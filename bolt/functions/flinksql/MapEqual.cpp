@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <unordered_map>
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
@@ -135,6 +136,23 @@ bool canDecodeWithoutRows(const VectorPtr& vector) {
        (vector->isConstantEncoding() && !isLazyNotLoaded(*vector)));
 }
 
+struct DecodedValue;
+
+struct LazyInput {
+  VectorPtr vector;
+  SelectivityVector rows;
+  DecodedValue* target;
+};
+
+struct LazyLoad {
+  LazyLoad(vector_size_t size, bool allRows) : rows(size, allRows) {}
+
+  SelectivityVector rows;
+  std::vector<LazyInput> inputs;
+};
+
+using LazyLoads = std::unordered_map<const LazyVector*, LazyLoad>;
+
 // Cache child decoding once per batch, including selected nested elements.
 struct DecodedValue {
   template <bool sqlKeys>
@@ -142,25 +160,50 @@ struct DecodedValue {
       const VectorPtr& vector,
       const SelectivityVector& rows,
       exec::EvalCtx& context,
+      std::unique_ptr<LazyLoads>& lazyLoads,
       std::bool_constant<sqlKeys> policy)
       : decoded(context),
         scalar(scalarComparison<sqlKeys>(vector->typeKind())) {
     if (canDecodeWithoutRows(vector)) {
       decoded.get()->decode(*vector);
-      return;
+    } else if (rows.hasSelections()) {
+      initialize(vector, rows, context, lazyLoads, policy);
     }
-    if (!rows.hasSelections()) {
-      return;
-    }
-    if (isLazyNotLoaded(*vector)) {
-      LazyVector::ensureLoadedRows(vector, rows);
-    }
+  }
+
+  template <bool sqlKeys>
+  void initialize(
+      const VectorPtr& vector,
+      const SelectivityVector& rows,
+      exec::EvalCtx& context,
+      std::unique_ptr<LazyLoads>& lazyLoads,
+      std::bool_constant<sqlKeys> policy) {
     if (vector->isFlatEncoding() || vector->isConstantEncoding()) {
-      decoded.get()->decode(*vector);
+      decoded.get()->decode(*vector, false);
     } else {
-      decoded.get()->decode(*vector, rows);
+      decoded.get()->decode(*vector, rows, false);
     }
     const auto* base = decoded->base();
+    if (base->isLazy()) {
+      // Merge aliases before the one-shot load. Later conditional branches
+      // may access any row of this child vector.
+      if (!lazyLoads) {
+        lazyLoads = std::make_unique<LazyLoads>();
+      }
+      auto& load = lazyLoads
+                       ->try_emplace(
+                           base->asUnchecked<LazyVector>(),
+                           base->size(),
+                           !context.isFinalSelection())
+                       .first->second;
+      rows.applyToSelected([&](vector_size_t row) {
+        if (!decoded->isNullAt(row)) {
+          load.rows.setValid(decoded->index(row), true);
+        }
+      });
+      load.inputs.push_back({vector, rows, this});
+      return;
+    }
     if (base->type()->isPrimitiveType()) {
       return;
     }
@@ -177,8 +220,8 @@ struct DecodedValue {
     switch (base->typeKind()) {
       case TypeKind::ROW:
         for (const auto& child : base->asUnchecked<RowVector>()->children()) {
-          children.emplace_back(
-              std::make_unique<DecodedValue>(child, baseRows, context, policy));
+          children.emplace_back(std::make_unique<DecodedValue>(
+              child, baseRows, context, lazyLoads, policy));
         }
         break;
       case TypeKind::ARRAY: {
@@ -186,7 +229,7 @@ struct DecodedValue {
         const auto elements =
             toElementRows(array->elements()->size(), baseRows, array);
         children.emplace_back(std::make_unique<DecodedValue>(
-            array->elements(), elements, context, policy));
+            array->elements(), elements, context, lazyLoads, policy));
         break;
       }
       case TypeKind::MAP: {
@@ -194,9 +237,9 @@ struct DecodedValue {
         const auto elements =
             toElementRows(map->mapKeys()->size(), baseRows, map);
         children.emplace_back(std::make_unique<DecodedValue>(
-            map->mapKeys(), elements, context, policy));
+            map->mapKeys(), elements, context, lazyLoads, policy));
         children.emplace_back(std::make_unique<DecodedValue>(
-            map->mapValues(), elements, context, policy));
+            map->mapValues(), elements, context, lazyLoads, policy));
         break;
       }
       default:
@@ -210,6 +253,32 @@ struct DecodedValue {
   // Each nesting level retains its scratch indices for this batch.
   mutable std::vector<vector_size_t> indices;
 };
+
+template <bool sqlKeys>
+FOLLY_NOINLINE void loadLazyValues(
+    std::unique_ptr<LazyLoads> loads,
+    exec::EvalCtx& context,
+    std::bool_constant<sqlKeys> policy) {
+  while (loads) {
+    for (auto& [lazy, load] : *loads) {
+      load.rows.updateBounds();
+      std::vector<vector_size_t> selected;
+      selected.reserve(load.rows.countSelected());
+      load.rows.applyToSelected(
+          [&](vector_size_t row) { selected.push_back(row); });
+      lazy->load(RowSet(selected), nullptr);
+    }
+    std::unique_ptr<LazyLoads> nextLoads;
+    for (const auto& [lazy, load] : *loads) {
+      for (const auto& input : load.inputs) {
+        input.vector->loadedVector();
+        input.target->initialize(
+            input.vector, input.rows, context, nextLoads, policy);
+      }
+    }
+    loads = std::move(nextLoads);
+  }
+}
 
 template <typename TKeyCompare>
 FOLLY_NOINLINE const std::vector<vector_size_t>& sortedKeys(
@@ -538,14 +607,18 @@ class FlinkMapEqual final : public exec::VectorFunction {
     const auto leftElements = elementRows(leftMap, *left);
     const auto rightElements = elementRows(rightMap, *right);
     constexpr std::bool_constant<sqlKeys> policy;
-    const DecodedValue leftKeys(
-        leftMap->mapKeys(), leftElements, context, policy);
-    const DecodedValue rightKeys(
-        rightMap->mapKeys(), rightElements, context, policy);
-    const DecodedValue leftValues(
-        leftMap->mapValues(), leftElements, context, policy);
-    const DecodedValue rightValues(
-        rightMap->mapValues(), rightElements, context, policy);
+    std::unique_ptr<LazyLoads> lazyLoads;
+    DecodedValue leftKeys(
+        leftMap->mapKeys(), leftElements, context, lazyLoads, policy);
+    DecodedValue rightKeys(
+        rightMap->mapKeys(), rightElements, context, lazyLoads, policy);
+    DecodedValue leftValues(
+        leftMap->mapValues(), leftElements, context, lazyLoads, policy);
+    DecodedValue rightValues(
+        rightMap->mapValues(), rightElements, context, lazyLoads, policy);
+    if (lazyLoads) {
+      loadLazyValues(std::move(lazyLoads), context, policy);
+    }
     compare_(
         compareRows,
         leftMap,

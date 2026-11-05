@@ -19,6 +19,7 @@
 #include <numeric>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/expression/ConstantExpr.h"
+#include "bolt/expression/RegisterSpecialForm.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -111,6 +112,23 @@ class MapEqualityModeTest : public ComplexEqualTest,
 
   bool sqlKeys() const {
     return std::string_view(GetParam()) == "sql_keys";
+  }
+
+  VectorPtr makeSelectedLazyValues(std::vector<vector_size_t>& loaded) {
+    return std::make_shared<LazyVector>(
+        pool(),
+        INTEGER(),
+        3,
+        std::make_unique<bolt::test::SimpleVectorLoader>(
+            [&, this](RowSet rows) -> VectorPtr {
+              loaded.assign(rows.begin(), rows.end());
+              auto values =
+                  makeFlatVector<int32_t>(3, [](auto) { return -1000; });
+              for (auto row : rows) {
+                values->set(row, 7);
+              }
+              return values;
+            }));
   }
 };
 
@@ -291,6 +309,63 @@ TEST_P(MapEqualityModeTest, ConstantLazyStringKeys) {
   EXPECT_TRUE(leftLazy->isLoaded());
   EXPECT_TRUE(rightLazy->isLoaded());
   assertComparisons(left, left, {true, true});
+}
+
+TEST_P(MapEqualityModeTest, SharedLazyChildrenUseUnionOfRows) {
+  for (const auto nested : {0, 1, 2}) {
+    SCOPED_TRACE(nested);
+    std::vector<vector_size_t> loaded;
+    auto values = makeSelectedLazyValues(loaded);
+    if (nested == 1) {
+      values = makeArrayVector({0, 1, 2}, values);
+    } else if (nested == 2) {
+      values = makeRowVector({values});
+    }
+    auto map =
+        makeMapVector({0, 1, 2}, makeFlatVector<int32_t>({1, 1, 1}), values);
+    const auto selectMap = [&](vector_size_t index) {
+      return wrapInDictionary(
+          makeIndices(1, [index](auto) { return index; }), 1, map);
+    };
+    assertComparisons(selectMap(0), selectMap(2), {true});
+    EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 2}));
+  }
+}
+
+TEST_P(MapEqualityModeTest, SharedLazyKeysAndValues) {
+  std::vector<vector_size_t> loaded;
+  auto lazy = makeSelectedLazyValues(loaded);
+  auto left = makeMapVector({0, 1, 2}, lazy, lazy);
+  auto right = makeMapVector<int32_t, int32_t>({{{7, 7}}, {{7, 7}}, {{7, 7}}});
+  assertComparisons(left, right, {true, true, true});
+  EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 1, 2}));
+}
+
+TEST_P(MapEqualityModeTest, LazyValuesAcrossConditionalBranches) {
+  exec::registerFunctionCallToSpecialForms();
+  for (const auto* function :
+       {"flink_complex_equal", "flink_complex_not_equal"}) {
+    SCOPED_TRACE(function);
+    std::vector<vector_size_t> loaded;
+    auto left = makeMapVector(
+        {0, 1, 2},
+        makeFlatVector<int32_t>({1, 1, 1}),
+        makeSelectedLazyValues(loaded));
+    const auto other = [&] {
+      return makeMapVector<int32_t, int32_t>({{{1, 7}}, {{1, 7}}, {{1, 7}}});
+    };
+    auto input = makeRowVector(
+        {left, makeFlatVector<bool>({true, false, false}), other(), other()});
+    assertEqualVectors(
+        makeFlatVector<bool>(
+            3,
+            [&](auto) {
+              return std::string_view(function) == "flink_complex_equal";
+            }),
+        evaluate(
+            fmt::format("if(c1, {0}(c0, c2), {0}(c0, c3))", function), input));
+    EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 1, 2}));
+  }
 }
 
 TEST_P(MapEqualityModeTest, EmptyMapsDoNotLoadConstantLazyValues) {
