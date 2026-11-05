@@ -31,30 +31,58 @@ void BigDecimal::compactVal() {
   }
 }
 
-void BigDecimal::setScale(int newScale) {
+template <bool roundUp>
+void BigDecimal::setScaleImpl(int newScale) {
   if (scale == newScale || isZero) {
     return;
   }
 
   if (scale > newScale) {
-    int changeScale = scale - newScale;
+    int changeScale;
+    if constexpr (!roundUp) {
+      const auto change = static_cast<int64_t>(scale) - newScale;
+      BOLT_USER_CHECK_LE(change, kMaxScaleChange, "Decimal scale overflow");
+      // Inputs come from float/double. Beyond their maximum decimal span the
+      // discarded digits cannot leave a nonzero quotient.
+      if (change > 1024) {
+        intVal = 0;
+        isZero = true;
+        intCompact = -1;
+        return;
+      }
+      changeScale = change;
+    } else {
+      changeScale = scale - newScale;
+    }
     boost::multiprecision::cpp_int scaleVal = boost::multiprecision::pow(
         boost::multiprecision::cpp_int(10), changeScale);
-    boost::multiprecision::cpp_int quotient = intVal % scaleVal;
-    intVal /= scaleVal;
-    bool increment = quotient >= scaleVal / 2;
-    if (increment) {
-      intVal++;
+    if constexpr (roundUp) {
+      boost::multiprecision::cpp_int quotient = intVal % scaleVal;
+      intVal /= scaleVal;
+      if (quotient >= scaleVal / 2) {
+        intVal++;
+      }
+    } else {
+      intVal /= scaleVal;
     }
     scale = newScale;
   }
 
   if (intVal == 0) {
     isZero = true;
+    intCompact = -1;
     return;
   }
 
   compactVal();
+}
+
+void BigDecimal::setScale(int newScale) {
+  setScaleImpl<true>(newScale);
+}
+
+void BigDecimal::truncateScale(int newScale) {
+  setScaleImpl<false>(newScale);
 }
 
 double BigDecimal::doubleValue() {
