@@ -142,6 +142,7 @@ void DateTimeFormatter::initializeJavaParsing() {
         number = nullptr;
         continue;
     }
+    BOLT_USER_CHECK_LE(width, 19, "Too many numeric pattern letters");
     if (number && fixedWidth) {
       number->followingDigits += static_cast<uint32_t>(width);
     } else {

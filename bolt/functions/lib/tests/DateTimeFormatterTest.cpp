@@ -1673,6 +1673,30 @@ TEST_F(DateTimeFormatterTest, javaBuilderParsing) {
       copied->parse("20240102").value().timestamp, Timestamp(1704153600, 0));
 }
 
+TEST_F(DateTimeFormatterTest, javaBuilderNumericWidth) {
+  for (const auto append :
+       {&DateTimeFormatterBuilder::appendYear,
+        &DateTimeFormatterBuilder::appendYearOfEra,
+        &DateTimeFormatterBuilder::appendMonthOfYear,
+        &DateTimeFormatterBuilder::appendDayOfMonth,
+        &DateTimeFormatterBuilder::appendDayOfYear,
+        &DateTimeFormatterBuilder::appendHourOfDay,
+        &DateTimeFormatterBuilder::appendClockHourOfDay,
+        &DateTimeFormatterBuilder::appendHourOfHalfDay,
+        &DateTimeFormatterBuilder::appendClockHourOfHalfDay,
+        &DateTimeFormatterBuilder::appendMinuteOfHour,
+        &DateTimeFormatterBuilder::appendSecondOfMinute,
+        &DateTimeFormatterBuilder::appendDayOfWeekInMonth}) {
+    DateTimeFormatterBuilder valid(0);
+    EXPECT_NO_THROW(
+        (valid.*append)(19).setType(DateTimeFormatterType::JAVA_TIME).build());
+    DateTimeFormatterBuilder invalid(0);
+    EXPECT_THROW(
+        (invalid.*append)(20).setType(DateTimeFormatterType::JAVA_TIME).build(),
+        BoltUserError);
+  }
+}
+
 TEST_F(DateTimeFormatterTest, javaYearAndEraResolution) {
   struct Case {
     const char* pattern;
