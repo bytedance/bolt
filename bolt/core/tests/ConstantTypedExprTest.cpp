@@ -141,6 +141,8 @@ TEST_F(ConstantVectorExprTest, nestedValuesAndEncodings) {
       EXPECT_TRUE(constant(2) == constant(3));
       EXPECT_FALSE(constant(2) == constant(4));
       EXPECT_TRUE(constant(5) == constant(5));
+      EXPECT_FALSE(constant(0) == constant(5));
+      EXPECT_FALSE(constant(5) == constant(0));
       EXPECT_NE(constant(0).hash(), constant(1).hash());
       EXPECT_EQ(constant(2).hash(), constant(3).hash());
       EXPECT_NE(constant(2).hash(), constant(4).hash());
@@ -154,6 +156,46 @@ TEST_F(ConstantVectorExprTest, nestedValuesAndEncodings) {
   };
   check(std::bit_cast<float>(uint32_t{0x7fc00001}));
   check(std::bit_cast<double>(uint64_t{0x7ff8000000000001}));
+}
+
+TEST_F(ConstantVectorExprTest, dictionaryEncodedChildren) {
+  const auto check = [&]<typename T>(T nan, T otherNan) {
+    auto values = makeFlatVector<T>({T(0.0), T(-0.0), nan, otherNan});
+    auto dictionary = wrapInDictionary(makeIndices({1, 0, 3, 2}), 4, values);
+    auto expected = makeFlatVector<T>({T(-0.0), T(0.0), otherNan, nan});
+    const auto containers = [&](const VectorPtr& child) {
+      auto integers = makeFlatVector<int32_t>({1, 1, 1, 1});
+      return std::vector<VectorPtr>{
+          makeArrayVector({0, 1, 2, 3}, child),
+          makeRowVector({child}),
+          makeMapVector({0, 1, 2, 3}, child, integers),
+          makeMapVector({0, 1, 2, 3}, integers, child)};
+    };
+    auto encodedContainers = containers(dictionary);
+    auto expectedContainers = containers(expected);
+    for (size_t i = 0; i < encodedContainers.size(); ++i) {
+      SCOPED_TRACE(encodedContainers[i]->type()->toString());
+      const auto constant = [&](const VectorPtr& vector, vector_size_t row) {
+        return ConstantTypedExpr(BaseVector::wrapInConstant(1, row, vector));
+      };
+      for (vector_size_t row = 0; row < 4; ++row) {
+        auto actual = constant(encodedContainers[i], row);
+        auto expectedValue = constant(expectedContainers[i], row);
+        EXPECT_TRUE(actual == expectedValue);
+        EXPECT_TRUE(expectedValue == actual);
+        EXPECT_EQ(actual.hash(), expectedValue.hash());
+        auto different = constant(expectedContainers[i], row ^ 1);
+        EXPECT_FALSE(actual == different);
+        EXPECT_NE(actual.hash(), different.hash());
+      }
+    }
+  };
+  check(
+      std::bit_cast<float>(uint32_t{0x7fc00001}),
+      std::bit_cast<float>(uint32_t{0x7fc00002}));
+  check(
+      std::bit_cast<double>(uint64_t{0x7ff8000000000001}),
+      std::bit_cast<double>(uint64_t{0x7ff8000000000002}));
 }
 
 TEST_F(ConstantVectorExprTest, projectedRowFields) {
