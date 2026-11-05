@@ -114,8 +114,8 @@ void ChunkAllocator::packFreelist() {
 }
 
 void ChunkAllocator::recycle(uint32_t cellId) {
-  BOLT_DCHECK_LT(cellId >> cellsPerChunkShift_, chunks_.size());
-  BOLT_DCHECK_GT(chunkLiveCells_[cellId >> cellsPerChunkShift_], 0);
+  BOLT_CHECK_LT(cellId >> cellsPerChunkShift_, chunks_.size());
+  BOLT_CHECK_GT(chunkLiveCells_[cellId >> cellsPerChunkShift_], 0);
   // A cell recycled out of a chunk being evacuated must not be handed out
   // again by the evacuation itself.
   if (FOLLY_UNLIKELY(!evacuating_.empty()) &&
@@ -259,7 +259,7 @@ DataCells::DataCells(
   infos_ = reinterpret_cast<ChainInfo*>(
       pool_->allocate(numChains * sizeof(ChainInfo)));
   // The pool aligns to 64 bytes: every ChainInfo stays in one cache line.
-  BOLT_DCHECK_EQ(reinterpret_cast<uintptr_t>(infos_) % alignof(ChainInfo), 0);
+  BOLT_CHECK_EQ(reinterpret_cast<uintptr_t>(infos_) % alignof(ChainInfo), 0);
   if (numChains != 0) {
     std::fill(infos_, infos_ + numChains, ChainInfo{});
   }
@@ -357,7 +357,7 @@ void DataCells::appendSlow(
       // Link the next held cell to the end of the chain; next_ covers it,
       // reserved in phase 1.
       const uint32_t id = heldAt(nextHeld++);
-      BOLT_DCHECK_LT(id, nextCapacity_);
+      BOLT_CHECK_LT(id, nextCapacity_);
       next_[id] = ChunkAllocator::kInvalidCell;
       if (info.numCells == 0) {
         info.firstCell = id;
@@ -469,7 +469,7 @@ uint64_t DataCells::compact(uint64_t targetBytes) {
             moved,
             ChunkAllocator::kInvalidCell,
             "cell compaction ran out of room");
-        BOLT_DCHECK_LT(moved, nextCapacity_);
+        BOLT_CHECK_LT(moved, nextCapacity_);
         ::memcpy(
             allocator_->cellData(moved), allocator_->cellData(id), cellBytes);
         next_[moved] = following;
@@ -766,7 +766,7 @@ void NullCells::emitRecords(
   };
   for (const uint32_t col : cols) {
     const Column& column = columns_[col];
-    BOLT_DCHECK(column.cells != nullptr, "records of a column without nulls");
+    BOLT_CHECK(column.cells != nullptr, "records of a column without nulls");
     const Progress& progress = column.progress[pid];
     const uint32_t records = progress.moved + 1;
     folly::storeUnaligned<uint32_t>(out, records);

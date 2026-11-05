@@ -605,7 +605,7 @@ bool CellPayloadDecoder::openPayload(
   encodingTags_.assign((layout_.numWireColumns() + 7) / 8, 0);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     const uint32_t from = sourceColumns[col];
-    BOLT_DCHECK_EQ(
+    BOLT_CHECK_EQ(
         layout_.rowType()->childAt(col)->kind(),
         source.layout_.rowType()->childAt(from)->kind());
     nullTags_[col] = source.nullTags_[from];

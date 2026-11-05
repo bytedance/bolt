@@ -103,7 +103,7 @@ void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
 }
 
 void ShuffleSpillFile::read(uint64_t offset, void* out, size_t bytes) const {
-  BOLT_DCHECK(pendingPatches_.empty(), "shuffle spill read before flush()");
+  BOLT_CHECK(pendingPatches_.empty(), "shuffle spill read before flush()");
   BOLT_CHECK(
       offset + bytes <= end_, "shuffle spill read beyond what was written");
   size_t done = 0;
