@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Java Time pattern validation and formatter construction.
  */
 
 #include "bolt/functions/lib/DateTimePattern.h"

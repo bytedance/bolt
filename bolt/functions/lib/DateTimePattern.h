@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Shared pattern scanning and token construction for date-time profiles.
  */
 
 #pragma once

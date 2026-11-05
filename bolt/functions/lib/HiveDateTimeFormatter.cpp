@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Hive date-time formatter profile construction.
  */
 
 #include "bolt/functions/lib/DateTimePattern.h"

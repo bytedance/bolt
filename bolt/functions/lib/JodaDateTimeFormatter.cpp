@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Joda date-time pattern translation and formatter construction.
  */
 
 #include "bolt/functions/lib/DateTimePattern.h"

@@ -1736,6 +1736,42 @@ TEST_F(DateTimeFormatterTest, javaYearAndEraResolution) {
   }
 }
 
+TEST_F(DateTimeFormatterTest, javaResolvedYearRange) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<int32_t> year;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"G y-MM-dd", "BC 292275056-01-01", util::kMinYear},
+           {"G y-MM-dd", "BC 292275057-01-01", std::nullopt},
+           {"y-MM-dd G", "292275057-01-01 BC", std::nullopt},
+           {"G y", "BC 292275057", std::nullopt},
+           {"G y-D", "BC 292275057-1", std::nullopt},
+           {"G y-MM-dd", "BC 292278993-01-01", std::nullopt},
+           {"G y-MM-dd", "AD 292275057-01-01", 292275057},
+           {"u-MM-dd", "292278994-01-01", util::kMaxYear}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      const auto formatter =
+          buildJavaDateTimeFormatter(test.pattern, {.strict = strict});
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        ASSERT_EQ(parsed.hasError(), !test.year.has_value());
+        if (test.year) {
+          EXPECT_EQ(
+              parsed.value().timestamp,
+              Timestamp(
+                  util::daysSinceEpochFromDate(*test.year, 1, 1) * 86400, 0));
+        } else {
+          EXPECT_EQ(parsed.errorCodeMsg(), "year out of range.");
+        }
+      }
+    }
+  }
+}
+
 TEST_F(DateTimeFormatterTest, javaDayOfYearFormatting) {
   auto formatter = buildJavaDateTimeFormatter("DD");
   auto* utc = tz::locateZone("UTC");
@@ -3919,6 +3955,26 @@ TEST_F(DateTimeFormatterTest, simpleDateFormatSystemTimezone) {
           expected);
     }
     EXPECT_EQ(context->defaultTimezone, nullptr);
+  }
+
+  // Fixed Java 8 results also pin the UTC fallback for the invalid test zone.
+  if (name == "UTC" || name == "Etc/UTC" || name == "GMT" ||
+      name == "Etc/GMT" || name == "Asia/Shanghai" || name == "Invalid/Zone") {
+    const bool shanghai = name == "Asia/Shanghai";
+    EXPECT_EQ(
+        buildSimpleDateTimeFormatter(
+            "yyyy-MM-dd HH:mm:ss z", std::nullopt, false)
+            ->parseToUtc("2024-01-01 00:00:00 CST", utc)
+            .value()
+            .timestamp,
+        Timestamp(shanghai ? 1704038400 : 1704088800, 0));
+    EXPECT_EQ(
+        buildSimpleDateTimeFormatter(
+            "yy-MM-dd HH:mm:ss", Timestamp::fromMillis(946670400000), false)
+            ->parseToUtc("99-12-31 23:00:00", utc)
+            .value()
+            .timestamp,
+        Timestamp(shanghai ? 4102441200LL : 946681200LL, 0));
   }
 }
 

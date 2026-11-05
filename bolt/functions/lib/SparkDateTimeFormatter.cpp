@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Spark date-time formatter profiles and parser-policy pattern validation.
  */
 
 #include "bolt/functions/lib/DateTimeFormatter.h"

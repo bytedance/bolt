@@ -26,6 +26,8 @@
  *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
+ *
+ * Token parsing and field resolution for date-time formatter profiles.
  */
 
 #include "bolt/common/base/SparkCompatibility.h"
@@ -1785,6 +1787,9 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     if (date.has(DateTimeFormatSpecifier::ERA) && date.hasYear &&
         (date.year > 0) != date.isAd) {
       return ErrorCode::DAY_CONFLICT;
+    }
+    if (date.year < util::kMinYear || date.year > util::kMaxYear) {
+      return ErrorCode::YEAR_OUT_OF_RANGE;
     }
     if (date.has(DateTimeFormatSpecifier::HOUR_OF_DAY)) {
       date.hour = date.value(DateTimeFormatSpecifier::HOUR_OF_DAY);
