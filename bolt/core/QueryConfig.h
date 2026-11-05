@@ -604,6 +604,28 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// Whether the caller's JVM supports standalone month text without the
+  /// Java 8 formatting defect. Spark rejects LLL/LLLL when false (the default).
+  static constexpr const char* kSparkDatetimeStandaloneMonthText =
+      "spark.datetime_standalone_month_text_enabled";
+
+  /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
+  static constexpr const char* kDateTimeFormatterDefaultTimezone =
+      "date_time_formatter_default_timezone";
+  /// Zone used for hybrid/Gregorian calendar conversion; defaults to the
+  /// formatter's zone. For LEGACY parsing, Gluten must pass the JVM default
+  /// zone for Spark 3.3 and the formatter's zone for Spark 3.5.
+  static constexpr const char* kDateTimeFormatterRebaseTimezone =
+      "date_time_formatter_rebase_timezone";
+  /// Both values describe the SimpleDateFormat window captured by the caller.
+  static constexpr const char* kSparkLegacyTimestampParserPivotMillis =
+      "spark.legacy_timestamp_parser_pivot_millis";
+  static constexpr const char* kSparkLegacyTimestampParserPivotYear =
+      "spark.legacy_timestamp_parser_pivot_year";
+  /// Semicolon-separated zone=seconds entries for Java TimeZone raw offsets.
+  static constexpr const char* kSparkLegacyTimestampParserTimezoneRawOffsets =
+      "spark.legacy_timestamp_parser_timezone_raw_offsets";
+
   /// If true, base64() chunks its output into 76-character lines separated by
   /// CRLF; if false, it returns a single unchunked string. Mirrors
   /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true

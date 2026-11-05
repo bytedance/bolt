@@ -37,10 +37,12 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
+#include "bolt/functions/lib/DateTimeFormatterCache.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 #include <gtest/gtest.h>
+#include <unicode/timezone.h>
 #include <string>
 using namespace bytedance::bolt;
 namespace bytedance::bolt::functions {
@@ -309,7 +311,13 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
   testTokenRange('z', 1, 4, DateTimeFormatSpecifier::TIMEZONE);
 
   // Z specifier
-  testTokenRange('Z', 1, 4, DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID);
+  testTokenRange('Z', 1, 2, DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID);
+  for (const auto* pattern : {"ZZZ", "ZZZZ"}) {
+    EXPECT_EQ(
+        buildJodaDateTimeFormatter(pattern)->tokens(),
+        std::vector<DateTimeToken>{DateTimeToken(
+            FormatPattern{DateTimeFormatSpecifier::TIMEZONE_ID, 3})});
+  }
 
   // Literal case
   expected = {DateTimeToken(" ")};
@@ -368,8 +376,7 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
       DateTimeToken(
           FormatPattern{DateTimeFormatSpecifier::FRACTION_OF_SECOND, 6}),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::TIMEZONE, 3}),
-      DateTimeToken(
-          FormatPattern{DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID, 3}),
+      DateTimeToken(FormatPattern{DateTimeFormatSpecifier::TIMEZONE_ID, 3}),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::ERA, 2}),
       DateTimeToken("abcdefghijklmnopqrstuvwxyz"),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2}),
@@ -1199,6 +1206,793 @@ TEST_F(JodaDateTimeFormatterTest, parseTimezoneOffset) {
   EXPECT_THROW(parseTZ("+15", "ZZ"), BoltUserError);
   EXPECT_THROW(parseTZ("+16", "ZZ"), BoltUserError);
   EXPECT_THROW(parseTZ("-16", "ZZ"), BoltUserError);
+}
+
+TEST_F(JodaDateTimeFormatterTest, parseTimeZoneIds) {
+  for (const auto& [name, canonical] :
+       std::vector<std::pair<const char*, const char*>>{
+           {"Asia/Shanghai", "Asia/Shanghai"},
+           {"America/Los_Angeles", "America/Los_Angeles"},
+           {"US/Pacific", "America/Los_Angeles"},
+           {"America/Argentina/ComodRivadavia", "America/Argentina/Catamarca"},
+           {"UTC", "UTC"},
+           {"Etc/UTC", "UTC"},
+           {"GMT", "UTC"},
+           {"Etc/GMT+12", "-12:00"},
+           {"Etc/GMT-14", "+14:00"},
+           {"EST", "-05:00"},
+           {"MST", "-07:00"},
+           {"HST", "-10:00"}}) {
+    SCOPED_TRACE(name);
+    const auto input = std::string(name) + "1970";
+    for (const auto* pattern : {"ZZZyyyy", "ZZZZyyyy"}) {
+      auto formatter = buildJodaDateTimeFormatter(pattern);
+      for (const auto parsed :
+           {formatter->parse(input),
+            formatter->parseWithNanosecondPrecision(input)}) {
+        ASSERT_FALSE(parsed.hasError());
+        EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+        const auto expectedId = tz::getTimeZoneID(canonical);
+        EXPECT_EQ(parsed.value().timezoneId, expectedId);
+      }
+    }
+  }
+  for (const auto* invalid :
+       {"", "Asia/Unknown", "asia/Shanghai", "UTCjunk", "Asia/ShanghaiX"}) {
+    SCOPED_TRACE(invalid);
+    EXPECT_TRUE(buildJodaDateTimeFormatter("ZZZ")->parse(invalid).hasError());
+  }
+  auto longest = buildJodaDateTimeFormatter("ZZZyyyy")->parse("Etc/GMT+11970");
+  ASSERT_FALSE(longest.hasError());
+  EXPECT_EQ(longest.value().timezoneId, tz::getTimeZoneID(-11 * 60));
+  EXPECT_EQ(
+      longest.value().timestamp,
+      Timestamp(util::daysSinceEpochFromDate(970, 1, 1) * 86400, 0));
+  EXPECT_EQ("+05:30", parseTZ("+0530", "ZZZ"));
+  EXPECT_EQ("+00:00", parseTZ("Z", "ZZZ"));
+  EXPECT_TRUE(buildJodaDateTimeFormatter("ZZZ'!'yyyy")
+                  ->parse("Asia/Shanghai?1970")
+                  .hasError());
+}
+
+TEST_F(JodaDateTimeFormatterTest, registeredTimeZoneIds) {
+  const auto formatter = buildJodaDateTimeFormatter("ZZZ'@'yyyy");
+  const auto printer = buildJodaDateTimeFormatter("ZZZ");
+  for (const auto id : tz::getTimeZoneIDs()) {
+    if (id != 0 && id <= tz::kMaxFixedOffsetTimeZoneId) {
+      continue;
+    }
+    const auto& name = tz::locateZone(id)->name();
+    SCOPED_TRACE(name);
+    auto parsed = formatter->parse(name + "@1970");
+    ASSERT_FALSE(parsed.hasError());
+    const auto* zone = tz::locateZone(id);
+    std::string canonical(printer->maxResultSize(zone), '\0');
+    canonical.resize(printer->format(
+        Timestamp(0, 0), zone, canonical.size(), canonical.data()));
+    EXPECT_EQ(parsed.value().timezoneId, tz::getTimeZoneID(canonical));
+    EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+  }
+}
+
+TEST_F(JodaDateTimeFormatterTest, timeZoneIdRequiresFullInput) {
+  for (const auto* pattern : {"ZZZ", "ZZZZ"}) {
+    const auto formatter = buildJodaDateTimeFormatter(pattern);
+    for (const auto* input : {"+0530", "-05:30", "Z", "UTC"}) {
+      SCOPED_TRACE(std::string(pattern) + ":" + input);
+      const auto trailing = std::string(input) + "junk";
+      EXPECT_FALSE(formatter->parse(input).hasError());
+      EXPECT_TRUE(formatter->parse(trailing).hasError());
+      EXPECT_FALSE(formatter->parse(input, TimePolicy::LEGACY).hasError());
+      EXPECT_TRUE(formatter->parse(trailing, TimePolicy::LEGACY).hasError());
+      EXPECT_TRUE(formatter->parseWithNanosecondPrecision(trailing).hasError());
+      EXPECT_FALSE(buildJodaDateTimeFormatter(std::string(pattern) + "'junk'")
+                       ->parse(trailing)
+                       .hasError());
+    }
+  }
+  EXPECT_FALSE(buildJodaDateTimeFormatter("ZZ")->parse("+0530junk").hasError());
+}
+
+TEST_F(DateTimeFormatterTest, javaTimePatternValidation) {
+  for (const auto* pattern :
+       {"C",
+        "YYYY",
+        "ww",
+        "e",
+        "MMMMM",
+        "EEEEE",
+        "zzzzz",
+        "yyyy-MM-dd[ HH:mm:ss]",
+        "'"}) {
+    SCOPED_TRACE(pattern);
+    EXPECT_THROW(buildJavaDateTimeFormatter(pattern), BoltUserError);
+  }
+  EXPECT_TRUE(buildJavaDateTimeFormatter("uuuu-MM-dd dd")
+                  ->parse("2024-02-30 31")
+                  .hasError());
+  const auto literal = buildJavaDateTimeFormatter("uuuu'['MM']'dd");
+  EXPECT_EQ(
+      literal->parse("2024[01]02").value().timestamp,
+      parseMysql("2024-01-02", "%Y-%m-%d"));
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeFieldResolution) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<Timestamp> expected;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"uuuu-MM-dd EEE", "2024-02-29 Thu", Timestamp(1709164800, 0)},
+           {"uuuu-MM-dd EEE", "2024-02-29 Fri", std::nullopt},
+           {"uuuu-MM-dd EEE", "2024-02-29 thu", std::nullopt},
+           {"uuuu-MM-dd EEEE", "2024-02-29 Thursday", Timestamp(1709164800, 0)},
+           {"uuuu-MM-dd F", "2024-02-29 1", Timestamp(1709164800, 0)},
+           {"uuuu-MM-dd F", "2024-02-29 5", std::nullopt},
+           {"uuuu-MM-dd MM", "2024-02-29 02", Timestamp(1709164800, 0)},
+           {"uuuu-MM-dd MM", "2024-02-29 03", std::nullopt},
+           {"uuuu-MM-dd MMM", "2024-02-29 Feb", Timestamp(1709164800, 0)},
+           {"uuuu-MM-dd MMM", "2024-02-29 Mar", std::nullopt},
+           {"uuuu-MM-dd HH:mm:ss HH",
+            "2024-02-29 13:02:03 13",
+            Timestamp(1709211723, 0)},
+           {"uuuu-MM-dd HH:mm:ss HH", "2024-02-29 13:02:03 14", std::nullopt},
+           {"uuuu-MM-dd HH:mm:ss hh a",
+            "2024-02-29 13:02:03 01 PM",
+            Timestamp(1709211723, 0)},
+           {"uuuu-MM-dd HH:mm:ss hh a",
+            "2024-02-29 13:02:03 02 PM",
+            std::nullopt},
+           {"uuuu-MM-dd hh a HH:mm:ss",
+            "2024-02-29 01 PM 13:02:03",
+            Timestamp(1709211723, 0)},
+           {"uuuu-MM-dd hh a HH:mm:ss",
+            "2024-02-29 02 PM 13:02:03",
+            std::nullopt},
+           {"uuuu-MM-dd kk:mm:ss HH",
+            "2024-02-29 24:02:03 00",
+            Timestamp(1709164923, 0)},
+           {"uuuu-MM-dd HH:mm:ss mm", "2024-02-29 13:02:03 04", std::nullopt},
+           {"uuuu-MM-dd HH:mm:ss ss", "2024-02-29 13:02:03 04", std::nullopt},
+           {"uuuu-MM-dd HH:mm:ss.S S", "2024-02-29 13:02:03.4 5", std::nullopt},
+           {"uuuu-MM-dd HH:mm:ss.S SS",
+            "2024-02-29 13:02:03.4 40",
+            Timestamp(1709211723, 400000000)},
+       }) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    const auto parsed = buildJavaDateTimeFormatter(test.pattern)
+                            ->parseWithNanosecondPrecision(test.input);
+    ASSERT_EQ(parsed.hasError(), !test.expected.has_value());
+    if (test.expected) {
+      EXPECT_EQ(parsed.value().timestamp, *test.expected);
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaSmartDateCrossChecks) {
+  for (const auto* pattern :
+       {"yyyy/MM/dd HH:mm:ss D", "D yyyy/MM/dd HH:mm:ss"}) {
+    const auto formatter = buildJavaDateTimeFormatter(pattern);
+    const auto strict = buildJavaDateTimeFormatter(pattern, {.strict = true});
+    for (int dayOfYear : {59, 60, 61}) {
+      const auto input = pattern[0] == 'D'
+          ? fmt::format("{} 2024/02/30 00:00:00", dayOfYear)
+          : fmt::format("2024/02/30 00:00:00 {}", dayOfYear);
+      SCOPED_TRACE(input);
+      const auto parsed = formatter->parse(input);
+      ASSERT_EQ(parsed.hasError(), dayOfYear != 60);
+      if (!parsed.hasError()) {
+        EXPECT_EQ(parsed.value().timestamp, Timestamp(1709164800, 0));
+      }
+      EXPECT_TRUE(strict->parse(input).hasError());
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaOffsetAndZoneResolution) {
+  const auto* utc = tz::locateZone("UTC");
+  for (const auto* zonePattern : {"VV", "z"}) {
+    for (const auto& [zone, seconds] :
+         std::vector<std::pair<std::string, int64_t>>{
+             {"UTC", 0},
+             {"America/New_York", 18000},
+             {"UTC+17:00", -61200},
+             {"+02:03:04", -7384}}) {
+      for (bool zoneFirst : {true, false}) {
+        const auto pattern = std::string("yyyy-MM-dd HH:mm:ss ") +
+            (zoneFirst ? std::string(zonePattern) + " XXX"
+                       : "XXX " + std::string(zonePattern));
+        const auto input = std::string("1970-01-01 00:00:00 ") +
+            (zoneFirst ? zone + " +01:00" : "+01:00 " + zone);
+        SCOPED_TRACE(pattern + ":" + input);
+        EXPECT_EQ(
+            buildSparkDateTimeFormatter(pattern)
+                ->parseToUtc(input, utc)
+                .value()
+                .timestamp,
+            Timestamp(seconds, 0));
+        EXPECT_EQ(
+            buildJavaDateTimeFormatter(pattern)
+                ->parseToUtc(input, utc)
+                .value()
+                .timestamp,
+            Timestamp(-3600, 0));
+      }
+    }
+  }
+  EXPECT_EQ(
+      buildSparkDateTimeFormatter("yyyy-MM-dd HH:mm:ss XXXXX")
+          ->parseToUtc("1970-01-01 00:00:00 +17:00:01", utc)
+          .value()
+          .timestamp,
+      Timestamp(-61201, 0));
+}
+
+TEST_F(DateTimeFormatterTest, sparkStandaloneMonthText) {
+  for (const auto* pattern : {"LLL", "LLLL"}) {
+    EXPECT_THROW(buildSparkDateTimeFormatter(pattern), BoltUserError);
+    EXPECT_THROW(buildSparkDateTimeFormatter(pattern, false), BoltUserError);
+    EXPECT_NO_THROW(buildSparkDateTimeFormatter(pattern, false, true));
+    EXPECT_NO_THROW(buildJavaDateTimeFormatter(pattern));
+  }
+  for (const auto* pattern :
+       {"L", "LL", "MMM", "MMMM", "EEE", "EEEE", "'LLL'"}) {
+    EXPECT_NO_THROW(buildSparkDateTimeFormatter(pattern, false));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaAdjacentFieldsAndMidnight) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<Timestamp> smart;
+    std::optional<Timestamp> strict;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"yyyy-DD", "2024-366", std::nullopt, std::nullopt},
+           {"yyyy-DDD",
+            "2024-366",
+            Timestamp(1735603200, 0),
+            Timestamp(1735603200, 0)},
+           {"yyyyDD", "2024366", std::nullopt, std::nullopt},
+           {"DDyyyy", "3662024", std::nullopt, std::nullopt},
+           {"yyyy M-dd",
+            "2024 0000000000000000001-02",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyyy M-dd",
+            "2024 9223372036854775807-02",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy M-dd",
+            "2024 9223372036854775808-02",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm:ss XXX XXX",
+            "1970-01-01 00:00:00 +01:00 +02:00",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm:ss X Z",
+            "1970-01-01 00:00:00 Z +0000",
+            Timestamp(0, 0),
+            Timestamp(0, 0)},
+           {"yyyy-MM-dd HH:mm:ss VV XXX",
+            "1970-01-01 00:00:00 UTC +01:00",
+            Timestamp(0, 0),
+            Timestamp(0, 0)},
+           {"yMMdd",
+            "20240102",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyyMMdd",
+            "20240102",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyyyMMdd",
+            "20240102",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyMMdd",
+            "240102",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyyyMMdd",
+            "+100000102",
+            Timestamp(253402387200, 0),
+            Timestamp(253402387200, 0)},
+           {"yyyy/MM/dd",
+            "+10000/01/01",
+            Timestamp(253402300800, 0),
+            Timestamp(253402300800, 0)},
+           {"yyyy Mdd",
+            "2024 102",
+            Timestamp(1704153600, 0),
+            Timestamp(1704153600, 0)},
+           {"yyyy Mdd",
+            "2024 1231",
+            Timestamp(1735603200, 0),
+            Timestamp(1735603200, 0)},
+           {"Mddy", "1022024", std::nullopt, std::nullopt},
+           {"ddMMy",
+            "01022024",
+            Timestamp(1706745600, 0),
+            Timestamp(1706745600, 0)},
+           {"yyyyMMddHHmmssSSS",
+            "20240102030405123",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy/MM/dd HH:mm:ss",
+            "2024/01/31 24:00:00",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy/MM/dd HH:mm:ss",
+            "2024/01/31 24:00:01",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy/MM/dd HH:mm:ss.SSSSSSSSS",
+            "2024/01/31 24:00:00.000000001",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd EEE HH:mm",
+            "2024-01-31 Wed 24:00",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm a",
+            "2024-01-31 24:00 AM",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm a",
+            "2024-01-31 24:00 PM",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd a HH:mm",
+            "2024-01-31 AM 24:00",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd a HH:mm",
+            "2024-01-31 PM 24:00",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm hh",
+            "2024-01-31 24:00 12",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm hh a",
+            "2024-01-31 24:00 12 AM",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm HH",
+            "2024-01-31 24:00 00",
+            std::nullopt,
+            std::nullopt},
+       }) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (bool strict : {false, true}) {
+      if (strict &&
+          std::string_view(test.pattern).find("EEE") !=
+              std::string_view::npos) {
+        EXPECT_THROW(buildSparkDateTimeFormatter(test.pattern), BoltUserError);
+        continue;
+      }
+      auto formatter = strict ? buildSparkDateTimeFormatter(test.pattern)
+                              : buildJavaDateTimeFormatter(test.pattern);
+      const auto& expected = strict ? test.strict : test.smart;
+      for (const auto& parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        ASSERT_EQ(parsed.hasError(), !expected.has_value());
+        if (expected) {
+          EXPECT_EQ(parsed.value().timestamp, *expected);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaDayFieldRange) {
+  for (const auto* day : {"4294967297", "9223372032559808513"}) {
+    for (const bool strict : {false, true}) {
+      DateTimeParseOptions options;
+      options.strict = strict;
+      for (const bool dayOfYear : {false, true}) {
+        const auto pattern = dayOfYear ? "uuuu-D" : "uuuu-MM-d";
+        const auto input = std::string(dayOfYear ? "2024-" : "2024-01-") + day;
+        SCOPED_TRACE(std::string(pattern) + ":" + input);
+        const auto formatter = buildJavaDateTimeFormatter(pattern, options);
+        EXPECT_TRUE(formatter->parse(input).hasError());
+        EXPECT_TRUE(formatter->parseWithNanosecondPrecision(input).hasError());
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaClockHourZero) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    Timestamp expected;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"yyyy-MM-dd kk:mm", "2024-01-31 00:02", Timestamp(1706659320, 0)},
+           {"yyyy-MM-dd hh:mm a",
+            "2024-01-31 00:02 AM",
+            Timestamp(1706659320, 0)},
+           {"yyyy-MM-dd hh:mm a",
+            "2024-01-31 00:02 PM",
+            Timestamp(1706702520, 0)}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      const auto formatter = strict ? buildSparkDateTimeFormatter(test.pattern)
+                                    : buildJavaDateTimeFormatter(test.pattern);
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        EXPECT_EQ(parsed.hasError(), strict);
+        if (!parsed.hasError()) {
+          EXPECT_EQ(parsed.value().timestamp, test.expected);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaBuilderParsing) {
+  auto formatter = DateTimeFormatterBuilder(2)
+                       .appendYear(4)
+                       .appendLiteral("-", 1)
+                       .appendMonthOfYear(2)
+                       .appendLiteral("-", 1)
+                       .appendDayOfMonth(2)
+                       .setType(DateTimeFormatterType::JAVA_TIME)
+                       .build();
+  EXPECT_EQ(
+      formatter->parse("2024-01-02").value().timestamp,
+      Timestamp(1704153600, 0));
+  for (const auto width : {1, 2, 4}) {
+    formatter = DateTimeFormatterBuilder(0)
+                    .appendYear(width)
+                    .appendMonthOfYear(2)
+                    .appendDayOfMonth(2)
+                    .setType(DateTimeFormatterType::JAVA_TIME)
+                    .build();
+    const auto* input = width == 2 ? "240102" : "20240102";
+    for (const auto parsed :
+         {formatter->parse(input),
+          formatter->parseWithNanosecondPrecision(input)}) {
+      ASSERT_FALSE(parsed.hasError());
+      EXPECT_EQ(parsed.value().timestamp, Timestamp(1704153600, 0));
+    }
+  }
+  auto copied = std::make_shared<DateTimeFormatter>(
+      std::make_unique<char[]>(0),
+      0,
+      std::vector<DateTimeToken>(formatter->tokens()),
+      DateTimeFormatterType::JAVA_TIME);
+  EXPECT_EQ(
+      copied->parse("20240102").value().timestamp, Timestamp(1704153600, 0));
+}
+
+TEST_F(DateTimeFormatterTest, javaBuilderNumericWidth) {
+  for (const auto append :
+       {&DateTimeFormatterBuilder::appendYear,
+        &DateTimeFormatterBuilder::appendYearOfEra,
+        &DateTimeFormatterBuilder::appendMonthOfYear,
+        &DateTimeFormatterBuilder::appendDayOfMonth,
+        &DateTimeFormatterBuilder::appendDayOfYear,
+        &DateTimeFormatterBuilder::appendHourOfDay,
+        &DateTimeFormatterBuilder::appendClockHourOfDay,
+        &DateTimeFormatterBuilder::appendHourOfHalfDay,
+        &DateTimeFormatterBuilder::appendClockHourOfHalfDay,
+        &DateTimeFormatterBuilder::appendMinuteOfHour,
+        &DateTimeFormatterBuilder::appendSecondOfMinute,
+        &DateTimeFormatterBuilder::appendDayOfWeekInMonth}) {
+    DateTimeFormatterBuilder valid(0);
+    EXPECT_NO_THROW(
+        (valid.*append)(19).setType(DateTimeFormatterType::JAVA_TIME).build());
+    DateTimeFormatterBuilder invalid(0);
+    EXPECT_THROW(
+        (invalid.*append)(20).setType(DateTimeFormatterType::JAVA_TIME).build(),
+        BoltUserError);
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaYearAndEraResolution) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<int32_t> year;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"G yyyy uuuu-MM-dd", "BC 0001 0000-01-01", 0},
+           {"G uuuu yyyy-MM-dd", "BC 0000 0001-01-01", 0},
+           {"yyyy uuuu-MM-dd G", "0002 -0001-01-01 BC", -1},
+           {"yyyy uuuu-MM-dd", "0001 0000-01-01", 0},
+           {"uuuu yyyy-MM-dd", "0000 0001-01-01", 0},
+           {"yyyy uuuu-MM-dd", "2024 2024-01-01", 2024},
+           {"G yyyy uuuu-MM-dd", "BC 0001 0001-01-01", std::nullopt},
+           {"G yyyy uuuu-MM-dd", "AD 0001 0000-01-01", std::nullopt},
+           {"G uuuu-MM-dd", "BC 0000-01-01", 0},
+           {"G uuuu-MM-dd", "AD 0000-01-01", std::nullopt},
+           {"uuuu yyyy-MM-dd", "0000 0002-01-01", std::nullopt},
+           {"yyyy yyyy-MM-dd", "0001 0002-01-01", std::nullopt}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      DateTimeParseOptions options;
+      options.strict = strict;
+      auto formatter = buildJavaDateTimeFormatter(test.pattern, options);
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        ASSERT_EQ(parsed.hasError(), !test.year.has_value());
+        if (test.year) {
+          EXPECT_EQ(
+              parsed.value().timestamp,
+              Timestamp(
+                  util::daysSinceEpochFromDate(*test.year, 1, 1) * 86400, 0));
+        }
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaResolvedYearRange) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<int32_t> year;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"G y-MM-dd", "BC 292275056-01-01", util::kMinYear},
+           {"G y-MM-dd", "BC 292275057-01-01", std::nullopt},
+           {"y-MM-dd G", "292275057-01-01 BC", std::nullopt},
+           {"G y", "BC 292275057", std::nullopt},
+           {"G y-D", "BC 292275057-1", std::nullopt},
+           {"G y-MM-dd", "BC 292278993-01-01", std::nullopt},
+           {"G y-MM-dd", "AD 292275057-01-01", 292275057},
+           {"u-MM-dd", "292278994-01-01", util::kMaxYear}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      const auto formatter =
+          buildJavaDateTimeFormatter(test.pattern, {.strict = strict});
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        ASSERT_EQ(parsed.hasError(), !test.year.has_value());
+        if (test.year) {
+          EXPECT_EQ(
+              parsed.value().timestamp,
+              Timestamp(
+                  util::daysSinceEpochFromDate(*test.year, 1, 1) * 86400, 0));
+        } else {
+          EXPECT_EQ(parsed.errorCodeMsg(), "year out of range.");
+        }
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaDayOfYearFormatting) {
+  auto formatter = buildJavaDateTimeFormatter("DD");
+  auto* utc = tz::locateZone("UTC");
+  std::string output(formatter->maxResultSize(utc), '\0');
+  const Timestamp yearEnd(1735603200, 0);
+  EXPECT_THROW(
+      formatter->format(yearEnd, utc, output.size(), output.data()),
+      BoltUserError);
+  formatter = buildSparkDateTimeFormatter("DD");
+  EXPECT_THROW(
+      formatter->format(yearEnd, utc, output.size(), output.data()),
+      BoltUserError);
+  formatter = buildJavaDateTimeFormatter("DDD");
+  output.resize(formatter->format(yearEnd, utc, output.size(), output.data()));
+  EXPECT_EQ(output, "366");
+}
+
+TEST_F(DateTimeFormatterTest, javaEraFormatting) {
+  struct Case {
+    const char* pattern;
+    int32_t year;
+    const char* expected;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"G yy", 0, "BC 01"},     {"uuuu G", 0, "0000 BC"},
+           {"yy", 0, "01"},          {"yyyy", 0, "0001"},
+           {"G yy", -1, "BC 02"},    {"uuuu G", -1, "-0001 BC"},
+           {"yy", -1, "02"},         {"yyyy", -1, "0002"},
+           {"G yy", -99, "BC 00"},   {"uuuu G", -99, "-0099 BC"},
+           {"yy", -99, "00"},        {"yyyy", -99, "0100"},
+           {"G yy", -100, "BC 01"},  {"uuuu G", -100, "-0100 BC"},
+           {"yy", -100, "01"},       {"yyyy", -100, "0101"},
+           {"G yy", 1, "AD 01"},     {"uuuu G", 1, "0001 AD"},
+           {"yy", 1, "01"},          {"yyyy", 1, "0001"},
+           {"G yy", 10000, "AD 00"}, {"uuuu G", 10000, "+10000 AD"},
+           {"yy", 10000, "00"},      {"yyyy", 10000, "+10000"},
+       }) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + std::to_string(test.year));
+    auto formatter = buildJavaDateTimeFormatter(test.pattern);
+    const auto* zone = tz::locateZone("UTC");
+    std::string output(formatter->maxResultSize(zone), '\0');
+    output.resize(formatter->format(
+        Timestamp(util::daysSinceEpochFromDate(test.year, 1, 1) * 86400, 0),
+        zone,
+        output.size(),
+        output.data()));
+    EXPECT_EQ(output, test.expected);
+    if (std::string_view(test.pattern) == "G yy") {
+      formatter = buildSparkDateTimeFormatter(test.pattern);
+      output.resize(formatter->maxResultSize(zone));
+      output.resize(formatter->format(
+          Timestamp(util::daysSinceEpochFromDate(test.year, 1, 1) * 86400, 0),
+          zone,
+          output.size(),
+          output.data()));
+      EXPECT_EQ(output, test.expected);
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneOffsets) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    int32_t seconds;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"Z", "+0530", 19800},
+           {"Z'1970'", "+00001970", 0},
+           {"ZZZ", "-0330", -12600},
+           {"ZZZZ", "GMT", 0},
+           {"ZZZZ", "GMT+05:30", 19800},
+           {"ZZZZZ", "Z", 0},
+           {"ZZZZZ", "+05:30:15", 19815},
+           {"X", "+05", 18000},
+           {"X", "+0530", 19800},
+           {"XX", "+0530", 19800},
+           {"XX", "+053015", 19815},
+           {"XXX", "+05:30", 19800},
+           {"XXX", "+05:30:15", 19815},
+           {"XXXX", "+053015", 19815},
+           {"XXXXX", "+05:30:15", 19815},
+           {"xxx", "-00:00", 0},
+           {"x", "+00", 0},
+           {"Z", "+1800", 64800},
+           {"xxx", "-18:00", -64800}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    auto formatter = buildJavaDateTimeFormatter(test.pattern);
+    for (const auto parsed :
+         {formatter->parse(test.input),
+          formatter->parseWithNanosecondPrecision(test.input)}) {
+      ASSERT_FALSE(parsed.hasError());
+      EXPECT_EQ(parsed.timezoneOffsetSeconds(), test.seconds);
+      EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+      if (test.seconds % 60 == 0 && std::abs(test.seconds) <= 14 * 3600) {
+        EXPECT_EQ(
+            parsed.value().timezoneId, tz::getTimeZoneID(test.seconds / 60));
+      } else {
+        EXPECT_EQ(parsed.value().timezoneId, -1);
+      }
+    }
+  }
+  for (const auto& [pattern, input] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"XX", "+05:30"},
+           {"Z'1970'", "+05301970"},
+           {"XXX", "+0530"},
+           {"Z", "Z"},
+           {"ZZZ", "Asia/Shanghai"},
+           {"x", "Z"},
+           {"x", "+0000"},
+           {"xxx", "+18:00:01"},
+           {"Z", "+1860"},
+           {"Z", "+1900"},
+           {"XXX", "+05:60"},
+           {"XXXXX", "+05:30:60"},
+           {"ZZZZ", "GMT+5:30"},
+           {"XXX", "+05:30junk"},
+           {"XXX", std::string("+05:30\0", 7)}}) {
+    SCOPED_TRACE(pattern + ":" + input);
+    EXPECT_TRUE(buildJavaDateTimeFormatter(pattern)->parse(input).hasError());
+  }
+  for (const auto* pattern : {"XXXXXX", "xxxxxx", "ZZZZZZ", "V", "VVV"}) {
+    EXPECT_THROW(buildJavaDateTimeFormatter(pattern), BoltUserError);
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneIds) {
+  for (const auto* name :
+       {"Asia/Shanghai",
+        "US/Pacific",
+        "UTC",
+        "UT",
+        "GMT",
+        "Etc/GMT+5",
+        "Zulu"}) {
+    SCOPED_TRACE(name);
+    auto parsed = buildJavaDateTimeFormatter("VV'@'yyyy")
+                      ->parse(std::string(name) + "@1970");
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.value().timezoneId, tz::getTimeZoneID(name));
+    EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+  }
+  for (const auto* name :
+       {"+05:30:15", "UTC+05:30:15", "GMT+05:30:15", "UT+05:30:15"}) {
+    auto parsed = buildJavaDateTimeFormatter("VV")->parse(name);
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.timezoneOffsetSeconds(), 19815);
+  }
+  auto prefix = buildJavaDateTimeFormatter("VV'+bad'")->parse("GMT+bad");
+  ASSERT_FALSE(prefix.hasError());
+  EXPECT_EQ(prefix.value().timezoneId, 0);
+  for (const auto* name :
+       {"+05",
+        "+0530",
+        "UTC+05",
+        "Asia/ShanghaiX",
+        "asia/shanghai",
+        "EST",
+        "MST",
+        "HST",
+        "SystemV/EST5EDT"}) {
+    EXPECT_TRUE(buildJavaDateTimeFormatter("VV")->parse(name).hasError());
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneFormatting) {
+  const auto* zone = tz::locateZone("+05:30");
+  for (const auto& [pattern, expected] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Z", "+0530"},
+           {"ZZ", "+0530"},
+           {"ZZZ", "+0530"},
+           {"ZZZZ", "GMT+05:30"},
+           {"ZZZZZ", "+05:30"},
+           {"X", "+0530"},
+           {"XX", "+0530"},
+           {"XXX", "+05:30"},
+           {"XXXX", "+0530"},
+           {"XXXXX", "+05:30"},
+           {"VV", "+05:30"}}) {
+    auto formatter = buildJavaDateTimeFormatter(pattern);
+    std::string output(formatter->maxResultSize(zone), '\0');
+    output.resize(
+        formatter->format(Timestamp(0, 0), zone, output.size(), output.data()));
+    EXPECT_EQ(output, expected) << pattern;
+  }
+  auto idFormatter = buildJavaDateTimeFormatter("VV");
+  const auto* alias = tz::locateZone("US/Pacific");
+  std::string idOutput(idFormatter->maxResultSize(alias), '\0');
+  idOutput.resize(idFormatter->format(
+      Timestamp(0, 0), alias, idOutput.size(), idOutput.data()));
+  EXPECT_EQ(idOutput, "US/Pacific");
+  const auto* utc = tz::locateZone("UTC");
+  for (const auto& [pattern, expected] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Z", "+0000"},
+           {"ZZZZ", "GMT"},
+           {"ZZZZZ", "Z"},
+           {"X", "Z"},
+           {"XXX", "Z"},
+           {"x", "+00"},
+           {"xx", "+0000"},
+           {"xxx", "+00:00"}}) {
+    auto formatter = buildJavaDateTimeFormatter(pattern);
+    std::string output(formatter->maxResultSize(utc), '\0');
+    output.resize(
+        formatter->format(Timestamp(0, 0), utc, output.size(), output.data()));
+    EXPECT_EQ(output, expected) << pattern;
+  }
+}
+
+TEST_F(DateTimeFormatterTest, sparkTimeZoneBindings) {
+  EXPECT_TRUE(
+      buildSparkDateTimeFormatter("ZZZ")->parse("Asia/Shanghai").hasError());
+  EXPECT_TRUE(buildSparkDateTimeFormatter("ZZZ")->parse("+05:30").hasError());
+  EXPECT_FALSE(buildSparkDateTimeFormatter("ZZZ")->parse("+0530").hasError());
+  EXPECT_TRUE(buildSparkDateTimeFormatter("XXX")->parse("+0530").hasError());
+  EXPECT_FALSE(buildSparkDateTimeFormatter("XXX")->parse("+05:30").hasError());
+  EXPECT_FALSE(
+      buildSparkDateTimeFormatter("VV")->parse("Asia/Shanghai").hasError());
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseTimezone) {
@@ -2796,6 +3590,551 @@ TEST_F(MysqlDateTimeTest, parseConsecutiveSpecifiers) {
       util::fromTimestampString("0012-01-01 12:00:00", nullptr),
       parseMysql("1212", "%H%Y"));
   EXPECT_THROW(parseMysql("1212", "%Y%H"), BoltUserError);
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatParsing) {
+  const auto* utc = tz::locateZone("UTC");
+  const Timestamp centuryStart = Timestamp::fromMillis(-946684800000LL);
+  struct Case {
+    const char* pattern;
+    const char* input;
+    int64_t millis;
+  };
+  const Case cases[] = {
+      {"yyyy-MM-dd HH:mm:ss.SSS", "2023-02-29 25:61:61.1001", 1677722522001LL},
+      {"yyyy-MM-dd HH:mm:ss.SSS", "1969-12-31 23:59:59.999", -1LL},
+      {"yyyy-MM-dd", "   2024-  01-\t02", 1704153600000LL},
+      {"yyyyMMdd", "２０２４０２２９", 1709164800000LL},
+      {"yyyy-MM-dd", "1500-02-29", -14825894400000LL},
+      {"yyyy-MM-dd", "10000-01-01", 253402300800000LL},
+      {"yyyy-MM-dd", "999999-01-01", 31494753244800000LL},
+      {"yy-MM-dd", "39-01-01", 2177452800000LL},
+      {"yy-MM-dd", "40-01-01", 2208988800000LL},
+      {"y-MM-dd", "1-01-01", -62135769600000LL},
+      {"yyyy D", "1582 278", -12219292800000LL},
+      {"yyyy-MM-dd D", "2024-01-02 60", 1709164800000LL},
+      {"yyyy D MM-dd", "2024 60 01-02", 1704153600000LL},
+      {"yyyy-MM-dd dd", "2024-01-32 02", 1704153600000LL},
+      {"yyyy-MM-dd E", "2024-01-02 wEdNeSdAy", 1704153600000LL},
+      {"YYYY-MM-dd", "2021-01-01", 1609027200000LL},
+      {"yyyy-ww-u", "2021-1-7", 1609027200000LL},
+      {"YYYY-ww-u", "2021-54-8", 1641772800000LL},
+      {"yyyy-MM F E", "2024-02 -1 Wed", 1709078400000LL},
+      {"yyyy-MM W u", "2024-02 6 8", 1709424000000LL},
+      {"G yyyy-MM-dd", "BC 0001-01-01", -62167392000000LL},
+      {"hh a", "25 PM", 133200000LL},
+      {"HH a", "01 PM", 3600000LL},
+      {"hh a HH", "12 PM 01", 3600000LL},
+      {"MMM d y", "jAnUaRy 1 2024", 1704067200000LL},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.pattern);
+    SCOPED_TRACE(test.input);
+    const auto formatter =
+        buildSimpleDateTimeFormatter(test.pattern, centuryStart);
+    const auto parsed = formatter->parseToUtc(test.input, utc);
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.value().timestamp, Timestamp::fromMillis(test.millis));
+    EXPECT_EQ(
+        formatter->parse(test.input, TimePolicy::CORRECTED).value().timestamp,
+        formatter->parseWithNanosecondPrecision(test.input).value().timestamp);
+  }
+  for (int width = 1; width <= 9; ++width) {
+    auto formatter = buildSimpleDateTimeFormatter(std::string(width, 'S'));
+    EXPECT_EQ(
+        formatter->parse("1").value().timestamp, Timestamp::fromMillis(1));
+    EXPECT_EQ(
+        formatter->parse("1234").value().timestamp,
+        Timestamp::fromMillis(1234));
+  }
+  for (const auto* pattern : {"C", "e", "x", "VV", "XXXX", "yyyy '", "'a''"}) {
+    SCOPED_TRACE(pattern);
+    EXPECT_THROW(buildSimpleDateTimeFormatter(pattern), BoltUserError);
+  }
+  EXPECT_TRUE(buildSimpleDateTimeFormatter("yyyy-MM-dd")
+                  ->parse("+2024-01-01")
+                  .hasError());
+  EXPECT_TRUE(buildSimpleDateTimeFormatter("")->parse("").hasError());
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatFieldResolution) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    int64_t millis;
+    bool strict;
+  };
+  const Case cases[] = {
+      {"G MM-dd", "BC 01-01", -124304284800000LL, true},
+      {"yy|yyyy-MM-dd", "00|1930-01-01", 1893456000000LL, true},
+      {"YYYY|W", "1900|1", -2209075200000LL, false},
+      {"W|yyyy|MM", "6|1582|13", -12210048000000LL, false},
+      {"w|yyyy|YYYY", "54|0000|2024", 1736035200000LL, false},
+      {"yyyy-MM-W-u", "1582-12-1-3", -12215232000000LL, true},
+      {"yyyy-MM-W-u", "1582-10-5-3", -12218256000000LL, false},
+      {"W|yyyy|MM", "54|1581|10", -12219120000000LL, false},
+      {"G YYYY-w-u", "AD 1-1-1", -62136201600000LL, false},
+      {"w|yyyy|YYYY H", "54|0000|2024 -48", -125976729600000LL, false},
+      {"YYYY|yyyy-MM-dd", "2024|1930-01-01", -1262304000000LL, true},
+  };
+  for (const auto& test : cases) {
+    for (bool lenient : {false, true}) {
+      SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+      SCOPED_TRACE(lenient);
+      const auto formatter = buildSimpleDateTimeFormatter(
+          test.pattern, Timestamp::fromMillis(946684800000LL), lenient);
+      const auto result =
+          formatter->parseToUtc(test.input, tz::locateZone("UTC"));
+      ASSERT_EQ(result.hasError(), !lenient && !test.strict);
+      if (!result.hasError()) {
+        EXPECT_EQ(result.value().timestamp, Timestamp::fromMillis(test.millis));
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatTimeZones) {
+  const auto* utc = tz::locateZone("UTC");
+  for (const auto* pattern : {"Z", "ZZ", "ZZZZZ", "z", "zzzz"}) {
+    auto formatter = buildSimpleDateTimeFormatter(pattern);
+    for (const auto& [text, seconds] :
+         std::vector<std::pair<std::string, int32_t>>{
+             {"+0530", -19800},
+             {"GMT+5:30", -19800},
+             {"PST", 28800},
+             {"Pacific Daylight Time", 25200},
+             {"CEST", -7200},
+             {"+2359", -86340}}) {
+      SCOPED_TRACE(pattern);
+      SCOPED_TRACE(text);
+      EXPECT_EQ(
+          formatter->parseToUtc(text, utc).value().timestamp,
+          Timestamp(seconds, 0));
+    }
+    for (const auto* text : {"+05:30", "Z", "UT", "Asia/Shanghai", "+2400"}) {
+      EXPECT_TRUE(formatter->parse(text).hasError()) << text;
+    }
+  }
+  const auto named = buildSimpleDateTimeFormatter("z");
+  EXPECT_EQ(
+      named->parseToUtc("CST", tz::locateZone("Asia/Shanghai"))
+          .value()
+          .timestamp,
+      Timestamp(-28800, 0));
+  EXPECT_EQ(
+      named->parseToUtc("CST", tz::locateZone("America/Chicago"))
+          .value()
+          .timestamp,
+      Timestamp(21600, 0));
+  EXPECT_EQ(
+      named->parseToUtc("IST", tz::locateZone("Asia/Kolkata"))
+          .value()
+          .timestamp,
+      Timestamp(-19800, 0));
+  const char* offsets[] = {"+05", "+0530", "+05:30"};
+  for (int width = 1; width <= 3; ++width) {
+    auto formatter = buildSimpleDateTimeFormatter(std::string(width, 'X'));
+    EXPECT_EQ(
+        formatter->parseToUtc(offsets[width - 1], utc).value().timestamp,
+        Timestamp(width == 1 ? -18000 : -19800, 0));
+    EXPECT_EQ(
+        formatter->parseToUtc("Z", utc).value().timestamp, Timestamp(0, 0));
+  }
+  auto formatter = buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  const auto* newYork = tz::locateZone("America/New_York");
+  EXPECT_EQ(
+      formatter->parseToUtc("2024-03-10 02:30:00", newYork).value().timestamp,
+      Timestamp(1710055800, 0));
+  EXPECT_EQ(
+      formatter->parseToUtc("2024-11-03 01:30:00", newYork).value().timestamp,
+      Timestamp(1730615400, 0));
+  EXPECT_EQ(
+      formatter
+          ->parseToUtc("0001-01-01 00:00:00", tz::locateZone("Asia/Shanghai"))
+          .value()
+          .timestamp,
+      Timestamp(-62135798400, 0));
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatCenturyWindow) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    const char* zone;
+    int64_t millis;
+    int64_t startMillis{-946684800000LL};
+  };
+  const Case cases[] = {
+      {"yy-MM-dd HH:mm:ss", "39-12-31 16:00:00", "-08:00", 2208988800000LL},
+      {"yy-MM-dd HH:mm:ss Z",
+       "39-12-31 16:00:00 -0800",
+       "UTC",
+       2208988800000LL},
+      {"YY-ww-u", "40-1-1", "UTC", 2209075200000LL, -946598400000LL},
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 00:00:00",
+       "Asia/Shanghai",
+       2208960000000LL},
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 07:59:59",
+       "Asia/Shanghai",
+       2208988799000LL},
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 08:00:00",
+       "Asia/Shanghai",
+       2208988800000LL},
+      {"yyyy-MM-dd HH:mm:ss",
+       "1900-01-01 08:03:00",
+       "Asia/Shanghai",
+       -2208988620000LL},
+      {"yy-MM-dd HH:mm:ss Z",
+       "40-01-01 00:00:00 +0800",
+       "UTC",
+       2208960000000LL},
+      {"yy-MM-dd HH:mm:ss Z",
+       "40-01-01 08:00:00 +0800",
+       "UTC",
+       2208988800000LL},
+  };
+  for (const auto& test : cases) {
+    const auto formatter = buildSimpleDateTimeFormatter(
+        test.pattern, Timestamp::fromMillis(test.startMillis));
+    const auto result =
+        formatter->parseToUtc(test.input, tz::locateZone(test.zone));
+    ASSERT_FALSE(result.hasError());
+    EXPECT_EQ(result.value().timestamp, Timestamp::fromMillis(test.millis));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatOutput) {
+  const auto render =
+      [](std::string_view pattern, Timestamp timestamp, const char* zone) {
+        const auto formatter = buildSimpleDateTimeFormatter(pattern);
+        const auto* timezone = tz::locateZone(zone);
+        const auto size = formatter->maxResultSize(timezone);
+        std::string result(size, '\0');
+        result.resize(
+            formatter->format(timestamp, timezone, size, result.data(), true));
+        return result;
+      };
+  EXPECT_EQ(
+      render("S SS SSS SSSS", Timestamp::fromMillis(12), "UTC"),
+      "12 12 012 0012");
+  EXPECT_EQ(
+      render("z zzzz Z ZZ ZZZZ X XX XXX", Timestamp(0, 0), "Asia/Kolkata"),
+      "IST India Standard Time +0530 +0530 +0530 +05 +0530 +05:30");
+  EXPECT_EQ(render("X XX XXX", Timestamp(0, 0), "+00:30"), "+00 +0030 +00:30");
+  EXPECT_EQ(
+      render("G yyyy-MM-dd D E u Y w W F", Timestamp(-12219292800, 0), "UTC"),
+      "AD 1582-10-15 278 Fri 5 1582 40 1 1");
+  EXPECT_EQ(
+      render("yyyy-MM-dd", Timestamp(-14825894400, 0), "UTC"), "1500-02-29");
+  EXPECT_EQ(render("", Timestamp(0, 0), "UTC"), "");
+  EXPECT_EQ(
+      render("z zzzz", Timestamp(0, 0), "Europe/Kyiv"),
+      "EET Eastern European Time");
+  EXPECT_EQ(
+      render("z zzzz", Timestamp(1593561600, 0), "Europe/Kyiv"),
+      "EEST Eastern European Summer Time");
+  EXPECT_EQ(
+      render("z zzzz", Timestamp(0, 0), "America/Ciudad_Juarez"),
+      "MST Mountain Standard Time");
+  EXPECT_EQ(
+      render("z zzzz", Timestamp(1593561600, 0), "America/Ciudad_Juarez"),
+      "MDT Mountain Daylight Time");
+  for (auto id : tz::getTimeZoneIDs()) {
+    if (id > tz::kMaxFixedOffsetTimeZoneId) {
+      const auto name = tz::getTimeZoneName(id);
+      SCOPED_TRACE(name);
+      EXPECT_FALSE(render("z zzzz", Timestamp(0, 0), name.c_str()).empty());
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatContext) {
+  auto context = std::make_shared<DateTimeFormatterContext>();
+  context->defaultTimezone = tz::locateZone("Asia/Shanghai");
+  auto formatter = buildSimpleDateTimeFormatter(
+      "yyyy-MM-dd HH:mm:ss z", std::nullopt, false, context);
+  EXPECT_EQ(
+      formatter->parseToUtc("2024-01-01 00:00:00 CST", tz::locateZone("UTC"))
+          .value()
+          .timestamp,
+      Timestamp(1704038400, 0));
+  EXPECT_EQ(
+      formatter
+          ->parseToUtc(
+              "2024-01-01 00:00:00 CST", tz::locateZone("America/Chicago"))
+          .value()
+          .timestamp,
+      Timestamp(1704088800, 0));
+
+  context->twoDigitYearStart = Timestamp::fromMillis(946657800000LL);
+  context->twoDigitYearStartYear = 2000;
+  formatter = buildSimpleDateTimeFormatter(
+      "yy-MM-dd HH:mm:ss", std::nullopt, false, context);
+  EXPECT_EQ(
+      formatter->parseToUtc("99-12-31 23:00:00", tz::locateZone("UTC"))
+          .value()
+          .timestamp,
+      Timestamp::fromMillis(4102441200000LL));
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatRawOffsetContexts) {
+  const auto* utc = tz::locateZone("UTC");
+  const auto* losAngeles = tz::locateZone("America/Los_Angeles");
+  const auto* newYork = tz::locateZone("America/New_York");
+  auto first = std::make_shared<DateTimeFormatterContext>();
+  first->defaultTimezone = utc;
+  first->timezoneRawOffsets = {
+      {losAngeles->id(), -28800}, {newYork->id(), -18000}};
+  auto second = std::make_shared<DateTimeFormatterContext>(*first);
+  second->timezoneRawOffsets[losAngeles->id()] = -25200;
+  second->timezoneRawOffsets[newYork->id()] = -14400;
+  const auto standard =
+      buildSimpleDateTimeFormatter("z", std::nullopt, false, first);
+  const auto shifted =
+      buildSimpleDateTimeFormatter("z", std::nullopt, false, second);
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(
+        standard->parseToUtc("PST", utc).value().timestamp,
+        Timestamp(28800, 0));
+    EXPECT_EQ(
+        shifted->parseToUtc("EST", utc).value().timestamp, Timestamp(14400, 0));
+    EXPECT_EQ(
+        shifted->parseToUtc("PST", utc).value().timestamp, Timestamp(25200, 0));
+    EXPECT_EQ(
+        standard->parseToUtc("EST", utc).value().timestamp,
+        Timestamp(18000, 0));
+    EXPECT_EQ(
+        standard->parseToUtc("PDT", utc).value().timestamp,
+        Timestamp(25200, 0));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatSystemTimezone) {
+  std::unique_ptr<icu::TimeZone> systemZone(icu::TimeZone::createDefault());
+  ASSERT_NE(systemZone, nullptr);
+  icu::UnicodeString id;
+  systemZone->getID(id);
+  std::string name;
+  id.toUTF8String(name);
+  if (name.starts_with("GMT+") || name.starts_with("GMT-")) {
+    name.erase(0, 3);
+  }
+  const auto* zone = tz::locateZone(name, false);
+  const auto* utc = tz::locateZone(0);
+  for (auto startMillis : {946670400000LL, 946692000000LL}) {
+    auto context = std::make_shared<DateTimeFormatterContext>();
+    context->twoDigitYearStart = Timestamp::fromMillis(startMillis);
+    auto explicitContext = std::make_shared<DateTimeFormatterContext>(*context);
+    explicitContext->defaultTimezone = zone ? zone : utc;
+    for (const auto& [pattern, input] :
+         {std::pair{"yyyy-MM-dd HH:mm:ss z", "2024-01-01 00:00:00 CST"},
+          std::pair{"yy-MM-dd HH:mm:ss", "99-12-31 23:00:00"},
+          std::pair{"yy-MM-dd HH:mm:ss", "00-01-01 01:00:00"}}) {
+      SCOPED_TRACE(
+          fmt::format("{} {} {} {}", name, startMillis, pattern, input));
+      const auto expected = buildSimpleDateTimeFormatter(
+                                pattern, std::nullopt, false, explicitContext)
+                                ->parseToUtc(input, utc)
+                                .value()
+                                .timestamp;
+      EXPECT_EQ(
+          buildSimpleDateTimeFormatter(pattern, std::nullopt, false, context)
+              ->parseToUtc(input, utc)
+              .value()
+              .timestamp,
+          expected);
+      EXPECT_EQ(
+          buildSimpleDateTimeFormatter(
+              pattern, context->twoDigitYearStart, false)
+              ->parseToUtc(input, utc)
+              .value()
+              .timestamp,
+          expected);
+    }
+    EXPECT_EQ(context->defaultTimezone, nullptr);
+  }
+
+  // Fixed Java 8 results also pin the UTC fallback for the invalid test zone.
+  if (name == "UTC" || name == "Etc/UTC" || name == "GMT" ||
+      name == "Etc/GMT" || name == "Asia/Shanghai" || name == "Invalid/Zone") {
+    const bool shanghai = name == "Asia/Shanghai";
+    EXPECT_EQ(
+        buildSimpleDateTimeFormatter(
+            "yyyy-MM-dd HH:mm:ss z", std::nullopt, false)
+            ->parseToUtc("2024-01-01 00:00:00 CST", utc)
+            .value()
+            .timestamp,
+        Timestamp(shanghai ? 1704038400 : 1704088800, 0));
+    EXPECT_EQ(
+        buildSimpleDateTimeFormatter(
+            "yy-MM-dd HH:mm:ss", Timestamp::fromMillis(946670400000), false)
+            ->parseToUtc("99-12-31 23:00:00", utc)
+            .value()
+            .timestamp,
+        Timestamp(shanghai ? 4102441200LL : 946681200LL, 0));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatRebaseContext) {
+  auto context = std::make_shared<DateTimeFormatterContext>();
+  context->rebaseTimezone = tz::locateZone("Asia/Shanghai");
+  auto formatter =
+      buildLegacySparkDateTimeFormatter("yyyy-MM-dd HH:mm:ss", context);
+  EXPECT_EQ(
+      formatter
+          ->parseToUtc(
+              "1500-02-28 00:00:00", tz::locateZone("UTC"), TimePolicy::LEGACY)
+          .value()
+          .timestamp,
+      Timestamp(-14826758743LL, 0));
+  auto localContext = buildLegacySparkDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  EXPECT_EQ(
+      localContext
+          ->parseToUtc(
+              "1500-02-28 00:00:00", tz::locateZone("UTC"), TimePolicy::LEGACY)
+          .value()
+          .timestamp,
+      Timestamp(-14826758400LL, 0));
+}
+
+TEST_F(DateTimeFormatterTest, localTimeTransitions) {
+  const auto modern = buildJavaDateTimeFormatter("uuuu-MM-dd HH:mm:ss");
+  const auto simple = buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  const auto strict = buildLegacySparkDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  const auto* zone = tz::locateZone("America/New_York");
+  struct Case {
+    const char* local;
+    const char* modernUtc;
+    const char* simpleUtc;
+    bool gap{false};
+  };
+  // Interleave unique times with both transition boundaries to exercise cached
+  // intervals in both directions. Java time selects the earlier overlap.
+  const Case cases[] = {
+      {"2024-07-01 00:00:00", "2024-07-01 04:00:00", "2024-07-01 04:00:00"},
+      {"2024-11-03 01:00:00", "2024-11-03 05:00:00", "2024-11-03 06:00:00"},
+      {"2024-11-03 01:59:59", "2024-11-03 05:59:59", "2024-11-03 06:59:59"},
+      {"2024-11-03 02:00:00", "2024-11-03 07:00:00", "2024-11-03 07:00:00"},
+      {"2024-11-03 01:30:00", "2024-11-03 05:30:00", "2024-11-03 06:30:00"},
+      {"2024-03-10 01:59:59", "2024-03-10 06:59:59", "2024-03-10 06:59:59"},
+      {"2024-03-10 02:00:00",
+       "2024-03-10 07:00:00",
+       "2024-03-10 07:00:00",
+       true},
+      {"2024-03-10 03:00:00", "2024-03-10 07:00:00", "2024-03-10 07:00:00"},
+      {"2024-03-10 02:59:59",
+       "2024-03-10 07:59:59",
+       "2024-03-10 07:59:59",
+       true},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.local);
+    const auto expected = parseMysql(test.simpleUtc, "%Y-%m-%d %H:%i:%s");
+    EXPECT_EQ(
+        modern->parseToUtc(test.local, zone).value().timestamp,
+        parseMysql(test.modernUtc, "%Y-%m-%d %H:%i:%s"));
+    EXPECT_EQ(simple->parseToUtc(test.local, zone).value().timestamp, expected);
+    const auto parsed = strict->parseToUtc(test.local, zone);
+    EXPECT_EQ(parsed.hasError(), test.gap);
+    if (!test.gap) {
+      EXPECT_EQ(parsed.value().timestamp, expected);
+    }
+  }
+  EXPECT_EQ(
+      buildLegacySparkDateTimeFormatter("yyyyMMdd")
+          ->parseToUtc("19490501", tz::locateZone("Asia/Shanghai"))
+          .value()
+          .timestamp,
+      Timestamp(-652348800, 0));
+  EXPECT_TRUE(
+      strict->parseToUtc("1949-05-01 00:00:00", tz::locateZone("Asia/Shanghai"))
+          .hasError());
+}
+
+TEST_F(DateTimeFormatterTest, formatterCache) {
+  DateTimeFormatterCache cache;
+  int builds = 0;
+  auto get = [&](std::string_view pattern) {
+    return cache.get(pattern, [&] {
+      ++builds;
+      return buildJavaDateTimeFormatter(pattern);
+    });
+  };
+  const auto year = get("yyyy");
+  const auto month = get("MM");
+  EXPECT_EQ(year, get("yyyy"));
+  EXPECT_EQ(month, get("MM"));
+  EXPECT_EQ(builds, 2);
+  for (size_t i = 0; i < DateTimeFormatterCache::kMaxEntries; ++i) {
+    get("yyyy'" + std::to_string(i) + "'");
+  }
+  EXPECT_NE(year, get("yyyy"));
+  EXPECT_EQ(builds, DateTimeFormatterCache::kMaxEntries + 3);
+
+  const auto before = builds;
+  const std::string large =
+      "'" + std::string(DateTimeFormatterCache::kMaxPatternSize, 'x') + "'";
+  EXPECT_NE(get(large), get(large));
+  EXPECT_EQ(builds, before + 2);
+  EXPECT_THROW(get("invalid"), BoltUserError);
+  EXPECT_THROW(get("invalid"), BoltUserError);
+  EXPECT_EQ(builds, before + 4);
+  EXPECT_EQ(year->parse("2024").value().timestamp, Timestamp(1704067200, 0));
+}
+
+TEST_F(DateTimeFormatterTest, formatterCacheNegativeResult) {
+  DateTimeFormatterCache cache;
+  int builds = 0;
+  auto unsupported = [&] {
+    return cache.get("VV", [&]() -> std::shared_ptr<DateTimeFormatter> {
+      ++builds;
+      return nullptr;
+    });
+  };
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(builds, 1);
+  for (size_t i = 0; i < DateTimeFormatterCache::kMaxEntries; ++i) {
+    const auto pattern = "yyyy'" + std::to_string(i) + "'";
+    EXPECT_NE(
+        cache.get(pattern, [&] { return buildJavaDateTimeFormatter(pattern); }),
+        nullptr);
+  }
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(builds, 2);
+}
+
+TEST_F(DateTimeFormatterTest, formatterCacheCenturyWindow) {
+  for (const auto* pattern : {"y-MM-dd", "yy-MM-dd", "Y-ww-u", "YY-ww-u"}) {
+    DateTimeFormatterCache cache;
+    auto get = [&](bool cacheTwoDigitYears) {
+      return cache.get(
+          pattern,
+          [&] { return buildLegacySparkDateTimeFormatter(pattern); },
+          cacheTwoDigitYears);
+    };
+    EXPECT_NE(get(false), get(false));
+    EXPECT_EQ(get(true), get(true));
+  }
+  DateTimeFormatterCache fixedWindowCache;
+  auto fixed = [&] {
+    return fixedWindowCache.get(
+        "yy",
+        [&] { return buildSimpleDateTimeFormatter("yy", Timestamp(0, 0)); },
+        false);
+  };
+  EXPECT_EQ(fixed(), fixed());
+  DateTimeFormatterCache cache;
+  auto quoted = [&] {
+    return cache.get(
+        "yyyy-MM-dd 'yy'",
+        [&] { return buildLegacySparkDateTimeFormatter("yyyy-MM-dd 'yy'"); },
+        false);
+  };
+  EXPECT_EQ(quoted(), quoted());
 }
 
 } // namespace bytedance::bolt::functions
