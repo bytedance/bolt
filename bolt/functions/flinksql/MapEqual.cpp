@@ -16,6 +16,7 @@
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
 #include <unordered_map>
@@ -138,6 +139,14 @@ bool canDecodeWithoutRows(const VectorPtr& vector) {
 
 struct DecodedValue;
 
+uint32_t typeDepth(const Type& type) {
+  uint32_t depth = 0;
+  for (uint32_t i = 0; i < type.size(); ++i) {
+    depth = std::max(depth, 1 + typeDepth(*type.childAt(i)));
+  }
+  return depth;
+}
+
 struct LazyInput {
   VectorPtr vector;
   SelectivityVector rows;
@@ -145,9 +154,11 @@ struct LazyInput {
 };
 
 struct LazyLoad {
-  LazyLoad(vector_size_t size, bool allRows) : rows(size, allRows) {}
+  LazyLoad(const LazyVector* lazy, bool allRows)
+      : rows(lazy->size(), allRows), depth(typeDepth(*lazy->type())) {}
 
   SelectivityVector rows;
+  const uint32_t depth;
   std::vector<LazyInput> inputs;
 };
 
@@ -185,6 +196,10 @@ struct DecodedValue {
     }
     const auto* base = decoded->base();
     if (base->isLazy()) {
+      if (rows.testSelected(
+              [&](vector_size_t row) { return decoded->isNullAt(row); })) {
+        return;
+      }
       // Merge aliases before the one-shot load. Later conditional branches
       // may access any row of this child vector.
       if (!lazyLoads) {
@@ -193,7 +208,7 @@ struct DecodedValue {
       auto& load = lazyLoads
                        ->try_emplace(
                            base->asUnchecked<LazyVector>(),
-                           base->size(),
+                           base->asUnchecked<LazyVector>(),
                            !context.isFinalSelection())
                        .first->second;
       rows.applyToSelected([&](vector_size_t row) {
@@ -259,8 +274,29 @@ FOLLY_NOINLINE void loadLazyValues(
     std::unique_ptr<LazyLoads> loads,
     exec::EvalCtx& context,
     std::bool_constant<sqlKeys> policy) {
-  while (loads) {
-    for (auto& [lazy, load] : *loads) {
+  while (!loads->empty()) {
+    uint32_t depth = 0;
+    for (const auto& [lazy, load] : *loads) {
+      depth = std::max(depth, load.depth);
+    }
+    // Containers can reveal aliases of their children, so finish decoding
+    // every parent type before loading a shallower type.
+    LazyLoads current;
+    std::array<size_t, static_cast<size_t>(TypeKind::ROW) + 1> peers{};
+    for (auto it = loads->begin(); it != loads->end();) {
+      if (it->second.depth == depth) {
+        ++peers[static_cast<size_t>(it->first->typeKind())];
+        current.insert(loads->extract(it++));
+      } else {
+        ++it;
+      }
+    }
+    for (auto& [lazy, load] : current) {
+      // Same-kind peer loaders may return wrappers over each other, whose
+      // mappings are unavailable until after the one-shot load.
+      if (peers[static_cast<size_t>(lazy->typeKind())] > 1) {
+        load.rows.setAll();
+      }
       load.rows.updateBounds();
       std::vector<vector_size_t> selected;
       selected.reserve(load.rows.countSelected());
@@ -268,15 +304,13 @@ FOLLY_NOINLINE void loadLazyValues(
           [&](vector_size_t row) { selected.push_back(row); });
       lazy->load(RowSet(selected), nullptr);
     }
-    std::unique_ptr<LazyLoads> nextLoads;
-    for (const auto& [lazy, load] : *loads) {
+    for (const auto& [lazy, load] : current) {
       for (const auto& input : load.inputs) {
         input.vector->loadedVector();
         input.target->initialize(
-            input.vector, input.rows, context, nextLoads, policy);
+            input.vector, input.rows, context, loads, policy);
       }
     }
-    loads = std::move(nextLoads);
   }
 }
 

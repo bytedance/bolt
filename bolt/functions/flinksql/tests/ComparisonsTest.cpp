@@ -130,6 +130,34 @@ class MapEqualityModeTest : public ComplexEqualTest,
               return values;
             }));
   }
+
+  VectorPtr makeSelectedLazyContainer(
+      const VectorPtr& values,
+      std::vector<vector_size_t>& loaded) {
+    return std::make_shared<LazyVector>(
+        pool(),
+        values->type(),
+        values->size(),
+        std::make_unique<bolt::test::SimpleVectorLoader>(
+            [values, &loaded](RowSet rows) -> VectorPtr {
+              loaded.assign(rows.begin(), rows.end());
+              VectorPtr result = values->typeKind() == TypeKind::ROW
+                  ? std::make_shared<RowVector>(
+                        values->pool(),
+                        values->type(),
+                        nullptr,
+                        values->size(),
+                        values->asUnchecked<RowVector>()->children())
+                  : values->slice(0, values->size());
+              for (vector_size_t row = 0; row < result->size(); ++row) {
+                result->setNull(row, true);
+              }
+              for (auto row : rows) {
+                result->setNull(row, values->isNullAt(row));
+              }
+              return result;
+            }));
+  }
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -272,11 +300,7 @@ TEST_P(MapEqualityModeTest, NullEmptyRowMapValues) {
 TEST_P(MapEqualityModeTest, ConstantLazyMapValues) {
   const auto makeMap = [&](vector_size_t index) {
     auto lazy = makeLazyFlatVector<int32_t>(
-        4,
-        [](auto row) { return row; },
-        [](auto) { return false; },
-        1,
-        [index](auto) { return index; });
+        4, [](auto row) { return row; }, [](auto) { return false; }, 4);
     auto values =
         std::make_shared<ConstantVector<int32_t>>(pool(), 2, index, lazy);
     return std::make_pair(
@@ -296,8 +320,7 @@ TEST_P(MapEqualityModeTest, ConstantLazyStringKeys) {
         4,
         [](auto row) { return "a_long_map_key_" + std::to_string(row); },
         [](auto) { return false; },
-        1,
-        [index](auto) { return index; });
+        4);
     auto keys =
         std::make_shared<ConstantVector<StringView>>(pool(), 2, index, lazy);
     return std::make_pair(
@@ -339,6 +362,144 @@ TEST_P(MapEqualityModeTest, SharedLazyKeysAndValues) {
   auto right = makeMapVector<int32_t, int32_t>({{{7, 7}}, {{7, 7}}, {{7, 7}}});
   assertComparisons(left, right, {true, true, true});
   EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 1, 2}));
+}
+
+TEST_P(MapEqualityModeTest, SharedLazyChildBehindContainers) {
+  for (const auto kind : {TypeKind::ARRAY, TypeKind::ROW, TypeKind::MAP}) {
+    for (const auto lazySides : {0, 1, 2, 3}) {
+      for (const bool negate : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "kind={}, lazySides={}, negate={}",
+            static_cast<int>(kind),
+            lazySides,
+            negate));
+        std::vector<vector_size_t> loaded;
+        std::vector<vector_size_t> leftLoaded;
+        std::vector<vector_size_t> rightLoaded;
+        auto child = makeSelectedLazyValues(loaded);
+        VectorPtr values;
+        if (kind == TypeKind::ARRAY) {
+          values = makeArrayVector({0, 1, 2}, child);
+        } else if (kind == TypeKind::ROW) {
+          values = makeRowVector({child});
+        } else {
+          values = makeMapVector(
+              {0, 1, 2}, makeFlatVector<int32_t>({1, 1, 1}), child);
+        }
+        const auto makeMap = [&](vector_size_t row, VectorPtr elements) {
+          auto map = makeMapVector(
+              {0, 1, 2}, makeFlatVector<int32_t>({1, 1, 1}), elements);
+          return wrapInDictionary(makeIndices({row}), 1, map);
+        };
+        auto left = makeMap(
+            0,
+            lazySides & 1 ? makeSelectedLazyContainer(values, leftLoaded)
+                          : values);
+        auto right = makeMap(
+            2,
+            lazySides & 2 ? makeSelectedLazyContainer(values, rightLoaded)
+                          : values);
+        assertEqualVectors(
+            makeFlatVector<bool>({!negate}),
+            evaluate(
+                negate ? "flink_complex_not_equal(c0, c1)"
+                       : "flink_complex_equal(c0, c1)",
+                makeRowVector({left, right})));
+        EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 2}));
+        if (lazySides & 1) {
+          EXPECT_EQ(
+              leftLoaded,
+              (lazySides == 3 ? std::vector<vector_size_t>{0, 1, 2}
+                              : std::vector<vector_size_t>{0}));
+        }
+        if (lazySides & 2) {
+          EXPECT_EQ(
+              rightLoaded,
+              (lazySides == 3 ? std::vector<vector_size_t>{0, 1, 2}
+                              : std::vector<vector_size_t>{2}));
+        }
+      }
+    }
+  }
+}
+
+TEST_P(MapEqualityModeTest, SharedLazyContainerBehindDeeperContainer) {
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    std::vector<vector_size_t> loaded;
+    std::vector<vector_size_t> outerLoaded;
+    auto arrays = makeArrayVector<int32_t>({{7}, {7}, {7}});
+    auto shared = makeSelectedLazyContainer(arrays, loaded);
+    auto left = makeMapVector(
+        {0, 1, 2},
+        makeFlatVector<int32_t>({1, 1, 1}),
+        makeRowVector({shared, makeArrayVector({0, 1, 2}, arrays)}));
+    auto right = makeMapVector(
+        {0, 1, 2},
+        makeFlatVector<int32_t>({1, 1, 1}),
+        makeRowVector(
+            {arrays,
+             makeSelectedLazyContainer(
+                 makeArrayVector({0, 1, 2}, shared), outerLoaded)}));
+    auto first = wrapInDictionary(makeIndices({0}), 1, left);
+    auto second = wrapInDictionary(makeIndices({2}), 1, right);
+    assertComparisons(
+        reverse ? second : first, reverse ? first : second, {true});
+    EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 2}));
+    EXPECT_EQ(outerLoaded, (std::vector<vector_size_t>{2}));
+  }
+}
+
+TEST_P(MapEqualityModeTest, SharedLazyChildBehindDictionary) {
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    std::vector<vector_size_t> loaded;
+    auto child = makeSelectedLazyValues(loaded);
+    auto hidden = wrapInLazyDictionary(child);
+    const auto makeMap = [&](vector_size_t row, const VectorPtr& values) {
+      auto map =
+          makeMapVector({0, 1, 2}, makeFlatVector<int32_t>({1, 1, 1}), values);
+      return wrapInDictionary(makeIndices({row}), 1, map);
+    };
+    auto left = makeMap(0, child);
+    auto right = makeMap(2, hidden);
+    assertComparisons(reverse ? right : left, reverse ? left : right, {true});
+    EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 1, 2}));
+  }
+}
+
+TEST_P(MapEqualityModeTest, DifferentLazyKindsKeepSelectedRows) {
+  std::vector<vector_size_t> loaded;
+  auto keys = makeLazyFlatVector<std::string>(
+      3,
+      [](auto) { return "key"; },
+      [](auto) { return false; },
+      2,
+      [](auto i) { return 2 * i; });
+  auto map = makeMapVector({0, 1, 2}, keys, makeSelectedLazyValues(loaded));
+  assertComparisons(
+      wrapInDictionary(makeIndices({0, 2}), 2, map),
+      makeMapVector<std::string, int32_t>({{{"key", 7}}, {{"key", 7}}}),
+      {true, true});
+  EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 2}));
+}
+
+TEST_P(MapEqualityModeTest, NullDictionaryValuesDoNotLoadLazyChild) {
+  std::vector<vector_size_t> loaded;
+  auto child = makeSelectedLazyValues(loaded);
+  auto values = BaseVector::wrapInDictionary(
+      makeNulls(3, [](auto row) { return row == 0; }),
+      makeIndices({0, 1, 2}),
+      3,
+      child);
+  auto map =
+      makeMapVector({0, 1, 2}, makeFlatVector<int32_t>({1, 1, 1}), values);
+  assertComparisons(
+      wrapInDictionary(makeIndices({0}), 1, map),
+      makeMapVector<int32_t, int32_t>({{{1, 7}}}),
+      {false});
+  EXPECT_TRUE(loaded.empty());
+  EXPECT_FALSE(child->asUnchecked<LazyVector>()->isLoaded());
 }
 
 TEST_P(MapEqualityModeTest, LazyValuesAcrossConditionalBranches) {
@@ -391,19 +552,11 @@ TEST_P(MapEqualityModeTest, DifferentMapSizesDoNotLoadValues) {
   EXPECT_FALSE(rightValues->isLoaded());
 }
 
-TEST_P(MapEqualityModeTest, OnlyMatchingMapSizesLoadValues) {
+TEST_P(MapEqualityModeTest, MatchingMapRowsLoadCompleteLazyValues) {
   auto leftValues = makeLazyFlatVector<int32_t>(
-      3,
-      [](auto) { return 1; },
-      [](auto) { return false; },
-      1,
-      [](auto) { return 2; });
+      3, [](auto) { return 1; }, [](auto) { return false; }, 3);
   auto rightValues = makeLazyFlatVector<int32_t>(
-      2,
-      [](auto) { return 1; },
-      [](auto) { return false; },
-      1,
-      [](auto) { return 1; });
+      2, [](auto) { return 1; }, [](auto) { return false; }, 2);
   auto left = makeMapVector(
       {0, 2}, makeFlatVector<std::string>({"a", "b", "a"}), leftValues);
   auto right = makeMapVector(
