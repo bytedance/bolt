@@ -35,17 +35,19 @@ ChunkData& BmSegmentCollection::chunkForRow(
 const ChunkData& BmSegmentCollection::chunkForRow(
     const SegmentData& segment,
     RowNumber rowNumber) const {
-  const auto chunkIndex = rowNumber / rowsPerChunk_;
+  const auto chunkIndex = chunkIndexForRow(segment, rowNumber);
   BOLT_CHECK_LT(
       chunkIndex,
       segment.chunks.size(),
       "Unknown row number {} in segment {}",
       rowNumber,
       segment.meta.id);
-  const auto& chunk = chunkForRowUnchecked(segment, rowNumber);
+  const auto& chunk = *segment.chunks[chunkIndex];
+  const auto chunkBegin = static_cast<uint64_t>(chunk.meta.firstRowNumber);
+  const auto chunkEnd = chunkBegin + chunk.meta.rowCount;
+  const auto row = static_cast<uint64_t>(rowNumber);
   BOLT_CHECK(
-      rowNumber >= chunk.meta.firstRowNumber &&
-          rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount,
+      row >= chunkBegin && row < chunkEnd,
       "Unknown row number {} in segment {}",
       rowNumber,
       segment.meta.id);

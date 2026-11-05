@@ -32,6 +32,7 @@ void BmSegmentCollection::releaseChunkBlocks(ChunkData& chunk) {
   }
   chunk.heapBlocks.clear();
   chunk.heapBases.clear();
+  chunk.heapAllocatedBytes = 0;
   chunk.consumed = true;
 }
 
