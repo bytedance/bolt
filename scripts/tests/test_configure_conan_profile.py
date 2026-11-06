@@ -22,6 +22,7 @@ import io
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -63,6 +64,138 @@ class ConfigureConanProfileTest(unittest.TestCase):
         patcher = mock.patch.object(configure, name, **kwargs)
         self.addCleanup(patcher.stop)
         return patcher.start()
+
+    def run_main(self, *arguments):
+        (self.root / "settings.yml").write_text("os:\n  Linux:\n")
+        with (
+            mock.patch.dict(os.environ, {"CONAN_HOME": str(self.root)}),
+            mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]),
+            mock.patch.object(
+                configure,
+                "select_compiler_and_libcxx",
+                return_value=(self.compiler, "libc++"),
+            ),
+            mock.patch.object(configure, "validate_conan_compiler"),
+        ):
+            self.assertEqual(configure.main(), 0)
+
+    def test_default_profiles_isolate_pgo_and_share_lto(self):
+        default = self.root / "profiles" / "default"
+        default.write_text("keep default unchanged\n")
+        data = self.root / "sample profile.prof"
+        data.write_bytes(b"profile data")
+        for mode in ("none", "sample", "instrumentation", "generate"):
+            for lto in ("none", "thin", "full"):
+                with self.subTest(mode=mode, lto=lto):
+                    cflags = "-g -fpseudo-probe-for-profiling"
+                    linkflags = "-Wl,--as-needed -fdebug-info-for-profiling"
+                    arguments = []
+                    if mode == "generate":
+                        cflags += " -fprofile-generate=/tmp/profiles"
+                        linkflags += " -fprofile-instr-generate"
+                    elif mode != "none":
+                        arguments = ["--pgo-profile", str(data), "--pgo-mode", mode]
+                    self.run_main(
+                        "--lto",
+                        lto,
+                        f"--extra-cflags={cflags}",
+                        f"--extra-link-flags={linkflags}",
+                        *arguments,
+                    )
+                    build = self.assert_complete(
+                        self.root / "profiles" / "build-profile"
+                    )
+                    host = self.assert_complete(self.root / "profiles" / "host-profile")
+                    self.assertNotIn("profil", build)
+                    self.assertNotIn("user.pgo:", build)
+                    self.assertIn("-fpseudo-probe-for-profiling", host)
+                    self.assertIn("-fdebug-info-for-profiling", host)
+                    if mode == "generate":
+                        self.assertIn("-fprofile-generate=/tmp/profiles", host)
+                        self.assertIn("-fprofile-instr-generate", host)
+                    elif mode != "none":
+                        self.assertIn(f"user.pgo:mode={mode}", host)
+                        self.assertIn(
+                            hashlib.sha256(data.read_bytes()).hexdigest(), host
+                        )
+                    for profile in (build, host):
+                        self.assertIn("'-g'", profile)
+                        self.assertIn("'-Wl,--as-needed'", profile)
+                        if lto == "none":
+                            self.assertNotIn("-flto", profile)
+                        else:
+                            self.assertIn(f"-flto={lto}", profile)
+                            self.assertIn(f"user.flags:lto={lto}", profile)
+                    self.assertEqual(default.read_text(), "keep default unchanged\n")
+
+    def test_explicit_profile_and_skip_profile_preserve_other_profiles(self):
+        before = set((self.root / "profiles").iterdir())
+        self.run_main("--skip-profile")
+        self.assertEqual(set((self.root / "profiles").iterdir()), before)
+        self.run_main("--profile", "custom")
+        custom = self.root / "profiles" / "custom"
+        self.assert_complete(custom)
+        self.assertEqual(set(custom.parent.iterdir()), before | {custom})
+
+    def test_make_profiles_fall_back_independently(self):
+        for build_exists in (False, True):
+            for host_exists in (False, True):
+                for name, exists in (
+                    ("build-profile", build_exists),
+                    ("host-profile", host_exists),
+                ):
+                    path = self.root / "profiles" / name
+                    path.unlink(missing_ok=True)
+                    if exists:
+                        path.touch()
+                for target in ("debug", "release", "debug_spark", "release_spark"):
+                    with self.subTest(
+                        build=build_exists, host=host_exists, target=target
+                    ):
+                        output = subprocess.check_output(
+                            [
+                                "make",
+                                "--no-print-directory",
+                                "-n",
+                                target,
+                                f"CONAN_HOME={self.root}",
+                            ],
+                            cwd=SCRIPT.parents[1],
+                            text=True,
+                        )
+                        build = "build-profile" if build_exists else "default"
+                        host = "host-profile" if host_exists else "default"
+                        self.assertIn(f"-pr:h {host} -pr:b {build}", output)
+
+    def test_make_profile_overrides(self):
+        for arguments, host in (
+            ([], "default"),
+            (["HOST_PROFILE=custom-host"], "custom-host"),
+        ):
+            for target in (
+                "conan_install",
+                "conan_build",
+                "python-wheel",
+            ):
+                with self.subTest(arguments=arguments, target=target):
+                    output = subprocess.check_output(
+                        [
+                            "make",
+                            "--no-print-directory",
+                            "-n",
+                            target,
+                            f"CONAN_HOME={self.root}",
+                            "BUILD_PROFILE=custom-build",
+                            *arguments,
+                        ],
+                        cwd=SCRIPT.parents[1],
+                        text=True,
+                    )
+                    if target == "python-wheel":
+                        self.assertIn('BOLT_CONAN_BUILD_PROFILE="custom-build"', output)
+                        self.assertIn(f'--profile "{host}"', output)
+                    else:
+                        self.assertIn(f"-pr:h {host} -pr:b custom-build", output)
 
     def test_configure_source_download_cache(self):
         cache_key = "core.sources:download_cache"
@@ -335,7 +468,7 @@ class ConfigureConanProfileTest(unittest.TestCase):
         self.assertIn("os={{ detect_api.detect_os() }}", text)
         self.assertIn("arch={{ detect_api.detect_arch() }}", text)
         self.assertIn("build_type=Release", text)
-        self.assertIn("compiler.cppstd=gnu20", text)
+        self.assertIn("compiler.cppstd=gnu23", text)
         self.assertIn(f"cmake/*: cmake/{configure.CMAKE_VERSION}", text)
         return text
 
