@@ -12,3 +12,5 @@ services:
       - /etc/hostname:/etc/host-hostname:ro
       - ${HOST_DATA_DIR}/conan-server-data:/data/conan-server-data:r
       - ${HOST_DATA_DIR}/pre-commit-cache:/data/pre-commit-cache
+      - ${HOST_DATA_DIR}/gluten-ci-cache:/data/gluten-ci-cache
+      - ${HOST_DATA_DIR}/gluten-ci-seed:/data/gluten-ci-seed:ro

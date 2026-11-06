@@ -174,6 +174,9 @@ make release_spark BUILD_VERSION=main
 ```
 
 
+The optional [Gluten integration workflow](doc/gluten-ci.md) documents its
+compilation checks, scheduled Spark tests and runner cache preparation.
+
 ### Working with IDE
 
 Vscode guide in [English](./doc/vscode-config-en.md) or [Chinese](./doc/vscode-config.md).
