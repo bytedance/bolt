@@ -488,6 +488,8 @@ class SelectiveColumnReader {
   void doCastEvaluate(VectorPtr* result);
 
  protected:
+  void validateReaderCastFilter() const;
+
   // Filters 'rows' according to 'is_null'. Only applies to cases where
   // readsNullsOnly() is true.
   template <typename T>

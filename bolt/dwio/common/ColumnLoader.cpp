@@ -52,6 +52,28 @@ scatter(const RowSet& rows, vector_size_t resultSize, VectorPtr* result) {
   result->get()->disableMemo();
   *result = BaseVector::wrapInDictionary(nullptr, indices, resultSize, *result);
 }
+
+bool requiresReaderCastMaterialization(
+    const SelectiveColumnReader& reader,
+    const ValueHook* hook) {
+  return hook && reader.fileType().type()->kind() == TypeKind::BIGINT &&
+      !reader.fileType().type()->isDecimal() &&
+      reader.requestedType()->equivalent(*VARCHAR());
+}
+
+void applyStringHook(const BaseVector& values, ValueHook* hook) {
+  auto strings = values.as<SimpleVector<StringView>>();
+  for (vector_size_t i = 0; i < values.size(); ++i) {
+    if (values.isNullAt(i)) {
+      if (hook->acceptsNulls()) {
+        hook->addNull(i);
+      }
+    } else {
+      const auto value = strings->valueAt(i);
+      hook->addValue(i, &value);
+    }
+  }
+}
 } // namespace
 
 void ColumnLoader::loadInternal(
@@ -90,7 +112,9 @@ void ColumnLoader::loadInternal(
   }
 
   structReader_->advanceFieldReader(fieldReader_, offset);
-  fieldReader_->scanSpec()->setValueHook(hook);
+  const bool materializeForHook =
+      requiresReaderCastMaterialization(*fieldReader_, hook);
+  fieldReader_->scanSpec()->setValueHook(materializeForHook ? nullptr : hook);
   fieldReader_->read(offset, effectiveRows, incomingNulls);
   if (fieldReader_->fileType().type()->kind() == TypeKind::ROW) {
     // 'fieldReader_' may itself produce LazyVectors. For this it must have its
@@ -98,8 +122,14 @@ void ColumnLoader::loadInternal(
     static_cast<SelectiveStructColumnReaderBase*>(fieldReader_)
         ->setLoadableRows(effectiveRows);
   }
-  if (!hook) {
-    fieldReader_->getValues(effectiveRows, result);
+  if (!hook || materializeForHook) {
+    VectorPtr materialized;
+    auto* output = materializeForHook ? &materialized : result;
+    fieldReader_->getValues(effectiveRows, output);
+    if (materializeForHook) {
+      applyStringHook(*materialized, hook);
+      return;
+    }
     if (((rows.back() + 1) < resultSize) || rows.size() != outputRows.size()) {
       // We read sparsely. The values that were read should appear
       // at the indices in the result vector that were given by

@@ -123,12 +123,21 @@ std::unordered_set<uint32_t> makeCompatibilityMap() {
   compat.insert(getKey(TypeKind::INTEGER, TypeKind::BIGINT));
   compat.insert(getKey(TypeKind::BIGINT, TypeKind::HUGEINT));
   compat.insert(getKey(TypeKind::REAL, TypeKind::DOUBLE));
+  compat.insert(getKey(TypeKind::BIGINT, TypeKind::VARCHAR));
   return compat;
 }
 
 bool isCompatible(TypeKind from, TypeKind to) {
   static auto compat = makeCompatibilityMap();
   return from == to || compat.find(getKey(from, to)) != compat.end();
+}
+
+bool isConcreteVarchar(const Type& type) {
+  return type.equivalent(*VARCHAR());
+}
+
+bool isConcreteVarchar(const TypeWithId& type) {
+  return type.type()->equivalent(*VARCHAR());
 }
 
 template <typename T, typename FKind, typename FShouldRead>
@@ -139,12 +148,20 @@ void checkTypeCompatibility(
     const FKind& kind,
     const FShouldRead& shouldRead,
     const std::function<std::string()>& exceptionMessageCreator) {
-  if (shouldRead(to) && !isCompatible(from.kind(), kind(to))) {
+  const auto toKind = kind(to);
+  const bool unsupportedDecimalToVarchar =
+      from.isDecimal() && toKind == TypeKind::VARCHAR;
+  const bool unsupportedBigintToVarcharLogicalType =
+      from.kind() == TypeKind::BIGINT && !from.isDecimal() &&
+      toKind == TypeKind::VARCHAR && !isConcreteVarchar(to);
+  if (shouldRead(to) &&
+      (!isCompatible(from.kind(), toKind) || unsupportedDecimalToVarchar ||
+       unsupportedBigintToVarcharLogicalType)) {
     BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
         "{}, From Kind: {}, To Kind: {}",
         exceptionMessageCreator ? exceptionMessageCreator() : "Schema mismatch",
         mapTypeKindToName(from.kind()),
-        mapTypeKindToName(kind(to))));
+        mapTypeKindToName(toKind)));
   }
 
   if (recurse) {
