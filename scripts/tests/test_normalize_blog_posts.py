@@ -137,6 +137,71 @@ class NormalizeBlogPostsTest(unittest.TestCase):
             original, post_bytes(title='"Example"', author='"Bolt Community"')
         )
 
+    def test_summary_is_optional(self):
+        self.path.write_bytes(post_bytes())
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_summary_reports_normalized_post(self):
+        self.path.write_bytes(post_bytes())
+        result = self.run_cli("--summary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "summary: checked=1 changed=0 unchanged=1 errors=0 skipped=0",
+        )
+
+    def test_summary_reports_rewritten_post(self):
+        original = post_bytes(title="'Needs normalization'")
+        expected = post_bytes(title='"Needs normalization"')
+        self.path.write_bytes(original)
+        result = self.run_cli("--summary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "summary: checked=1 changed=1 unchanged=0 errors=0 skipped=0",
+        )
+        self.assertEqual(self.path.read_bytes(), expected)
+
+    def test_summary_reports_pending_post_with_check(self):
+        original = post_bytes(title="'Needs normalization'")
+        self.path.write_bytes(original)
+        result = self.run_cli("--check", "--summary")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "summary: checked=1 changed=1 unchanged=0 errors=0 skipped=0",
+        )
+        self.assertIn("blog post is not normalized", result.stderr)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_summary_counts_errors(self):
+        original = post_bytes().replace(
+            b"parent: Blog\n", b"parent: Blog\nnav_order: two\n"
+        )
+        self.path.write_bytes(original)
+        result = self.run_cli("--summary")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "summary: checked=1 changed=0 unchanged=0 errors=1 skipped=0",
+        )
+        self.assertIn("nav_order must be an integer", result.stderr)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_summary_counts_skipped_paths(self):
+        notes = self.root / "doc/blog/notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("Not a blog post.\n", encoding="utf-8")
+        self.path.write_bytes(post_bytes())
+        result = self.run_cli("--summary", str(notes))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "summary: checked=1 changed=0 unchanged=1 errors=0 skipped=1",
+        )
+
     def test_check_does_not_write(self):
         original = post_bytes(title="'Needs normalization'")
         expected = post_bytes(title='"Needs normalization"')

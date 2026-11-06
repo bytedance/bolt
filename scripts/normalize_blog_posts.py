@@ -25,6 +25,7 @@ FRONT_MATTER_DELIMITER = "---"
 DEFAULT_AUTHOR = "Bolt Community"
 CORE_KEYS = ("layout", "title", "date", "author", "parent", "nav_order")
 DISALLOWED_KEYS = {"has_children"}
+SUMMARY_FIELDS = ("checked", "changed", "unchanged", "errors", "skipped")
 
 
 class BlogPostError(Exception):
@@ -184,6 +185,11 @@ def normalize_post(path: Path) -> tuple[bool, str]:
     return changed, normalized
 
 
+def format_summary(counts: dict[str, int]) -> str:
+    fields = " ".join(f"{field}={counts[field]}" for field in SUMMARY_FIELDS)
+    return f"summary: {fields}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Normalize Bolt blog post Markdown files."
@@ -195,6 +201,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--check", action="store_true", help="Fail if any file would be changed."
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a one-line summary of the checked posts.",
     )
     args = parser.parse_args()
 
@@ -218,15 +229,27 @@ def main() -> int:
             if not args.check:
                 path.write_text(normalized, encoding="utf-8")
 
+    counts = {
+        "checked": len(post_paths),
+        "changed": len(changed_paths),
+        "unchanged": len(post_paths) - len(changed_paths) - len(errors),
+        "errors": len(errors),
+        "skipped": len(paths) - len(post_paths),
+    }
+
     for error in errors:
         print(error, file=sys.stderr)
 
+    exit_code = 1 if errors else 0
     if changed_paths and args.check:
         for path in changed_paths:
             print(f"{path}: blog post is not normalized", file=sys.stderr)
-        return 1
+        exit_code = 1
 
-    return 1 if errors else 0
+    if args.summary:
+        print(format_summary(counts))
+
+    return exit_code
 
 
 if __name__ == "__main__":
