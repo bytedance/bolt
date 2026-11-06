@@ -418,6 +418,9 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   }
 
   void resetAggregateGroup() {
+#ifndef NDEBUG
+    testStats().withWLock([](auto& stats) { ++stats.aggregateResets; });
+#endif
     aggregate_->clear();
     if (aggregateInitialized_) {
       aggregate_->destroy(folly::Range(&rawSingleGroupRow_, 1));
