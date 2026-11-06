@@ -114,12 +114,23 @@ class HiveDataSource : public DataSource {
       const bool isPartOfPaimonSplit);
 
   void close() override {
+    releaseSplitReader();
+  }
+
+  void releaseFinalSplitResources() override {
+    releaseSplitReader();
+  }
+
+ protected:
+  void releaseSplitReader() {
+    // Destroy the whole SplitReader. SplitReader::resetSplit() keeps
+    // baseRowReader_ alive for adaptation, but final-split cleanup needs to
+    // release the RowReader -> ReaderBase -> BufferedInput/PageReader chain.
     if (splitReader_) {
       splitReader_.reset();
     }
   }
 
- protected:
   // Creates a split reader, which reads the split given as param
   virtual std::unique_ptr<SplitReader> createSplitReader(
       const std::shared_ptr<HiveConnectorSplit>& split,
