@@ -338,3 +338,7 @@ files.txt
 log.txt
 
 bolt/version/version.h
+
+# Gluten UT build and test output
+/scripts/gluten_ut/logs/
+/scripts/gluten_ut/timings/
