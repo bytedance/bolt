@@ -49,6 +49,7 @@ add_executable(
   ComparisonsTest.cpp
   DecimalArithmeticFuncTest.cpp
   DecimalArithmeticTest.cpp
+  EncodeDecodeTest.cpp
   DecimalCompareTest.cpp
   DecimalRoundTest.cpp
   DecimalUtilTest.cpp
