@@ -82,7 +82,52 @@ static constexpr bool kDefaultReuseColumnBuffer = false;
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
 
-enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
+enum class ShuffleWriterType {
+  Adaptive = 0,
+  V1 = 1,
+  V2 = 2,
+  RowBased = 3,
+  Cell = 4
+};
+
+// Cell memory thresholds and encoding policy; compression uses
+// PartitionWriterOptions. On Celeborn nothing is spilled: the spill
+// thresholds push the window at the next batch boundary instead.
+struct CellShuffleOptions {
+  // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
+  int64_t cellMemorySpillBytes = 0;
+  // Seal a partition's payload at a batch boundary once it exceeds this
+  // size; other partitions stay open.
+  int64_t partitionSealBytes = 40LL << 20;
+  // Seal the window once the moved null cells exceed this. A reclaim
+  // requests a seal above a quarter of it.
+  int64_t nullMemLimitBytes = 16LL << 20;
+  // Probe the first batch to enable dictionary encoding per string column.
+  bool enableStringDictionary = true;
+  // Compress runs through the codec's stream form, straight from the cells
+  // with fixed buffers; off, each frame is gathered into a spill-pool
+  // workspace
+  // and compressed at once. Codecs with no stream form are always one-shot.
+  // Both write the same run layouts.
+  bool streamCompression = true;
+  // Learn whether compressing pays, per stream and for COMBINED frames and
+  // null bodies: after a frame that compressed too little to be kept
+  // (random keys, hashes, packed doubles), only one frame of its kind in ten
+  // is compressed and judged, the others stored without a codec call, so a
+  // kind whose data starts to compress is picked up again. Off, every frame
+  // is compressed and judged.
+  bool adaptiveCompression = true;
+  // Shred ARRAY, MAP and ROW columns into plain columns of a nested
+  // layout (cell/CellFormat.h). Off, the type adapter packs them row by row
+  // into one binary column: a fallback for wide nested schemas at high
+  // partition counts, whose per-stream
+  // state the adapter's single column avoids. The reader must be set alike
+  // (ShuffleReaderOptions::cellNativeNestedTypes).
+  bool nativeNestedTypes = true;
+
+  /// Returns all options in a human readable form.
+  std::string toString() const;
+};
 
 enum PartitionWriterType { kLocal, kCeleborn };
 
@@ -128,6 +173,16 @@ struct ShuffleReaderOptions {
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
+
+  // The writer side's preferCellShuffle: the writer then writes Cell when
+  // adaptive (unless that picks the row-based writer) or forced to V1 or V2
+  // (see writesCellShuffle()). Must match the writer.
+  bool preferCellShuffle = false;
+
+  // The writer side's CellShuffleOptions::nativeNestedTypes: whether Cell
+  // payloads carry nested columns in a nested layout or packed by the type
+  // adapter. Both sides must agree; the payloads do not say.
+  bool cellNativeNestedTypes = true;
 
   /// Returns the options in a human readable form.
   std::string toString() const;
@@ -181,6 +236,11 @@ struct ShuffleWriterOptions {
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
+  // Write Cell in place of the adaptive choice, unless that is the
+  // row-based writer, and in place of a forced V1 or V2, under every
+  // partitioning. A forced RowBased or Cell stays as forced. The readers
+  // must set it alike. See writesCellShuffle().
+  bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
       kDefaultRowVectorModeCompressionMinColumns;
@@ -195,6 +255,7 @@ struct ShuffleWriterOptions {
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
+  CellShuffleOptions cellOptions{};
   PartitionWriterOptions partitionWriterOptions{};
 
   /// Returns the options in a human readable form.
@@ -204,6 +265,11 @@ struct ShuffleWriterOptions {
 struct ShuffleWriterMetrics {
   int64_t totalInputRowNumber{0};
   int64_t totalInputBatches{0};
+  // CellShuffleWriter: seals, whole-window and per-partition.
+  int64_t spillCount{0};
+  // Cell row counts summed over dictionary-enabled columns.
+  int64_t dictionaryMatchedRows{0};
+  int64_t dictionaryFallbackRows{0};
   int64_t totalBytesWritten{0};
   int64_t totalBytesEvicted{0};
   // Number of temporary local shuffle files created, excluding final output.
@@ -219,6 +285,9 @@ struct ShuffleWriterMetrics {
   int64_t combineVectorTimes{0};
   int64_t combineVectorCost{0};
   int64_t useRowBased{0};
+  // 1 when the writer is the Cell shuffle (CellShuffleWriter); summed over
+  // tasks it counts Cell writers.
+  int64_t useCellShuffle{0};
   int64_t splitTime{0};
   int64_t convertTime{0};
   int64_t flattenTime{0};
@@ -243,6 +312,32 @@ struct ShuffleWriterMetrics {
 inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
   return partitioning == Partitioning::kRange ||
       partitioning == Partitioning::kHash;
+}
+
+/// Whether the writer writes Cell payloads, which only
+/// SparkShuffleReaderNode reads: the one rule the writer's type choice and
+/// both readers follow, under every partitioning: a forced Cell always; a
+/// forced V1 or V2 when preferCellShuffle is set, which takes priority over
+/// them; a forced RowBased never; the adaptive choice when
+/// preferCellShuffle is set, unless it picked the row-based writer
+/// (`isRowBased`, never so without a pid). Where this is false, a
+/// partitioning without a pid (single, round-robin) writes V1.
+inline bool writesCellShuffle(
+    const Partitioning& /*partitioning*/,
+    ShuffleWriterType type,
+    bool preferCellShuffle,
+    bool isRowBased) {
+  switch (type) {
+    case ShuffleWriterType::Cell:
+      return true;
+    case ShuffleWriterType::V1:
+    case ShuffleWriterType::V2:
+      return preferCellShuffle;
+    case ShuffleWriterType::Adaptive:
+      return preferCellShuffle && !isRowBased;
+    default:
+      return false;
+  }
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

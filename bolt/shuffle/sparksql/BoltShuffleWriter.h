@@ -211,6 +211,15 @@ class BoltShuffleWriter : public ShuffleWriter {
       bytedance::bolt::memory::MemoryPool* boltPool,
       arrow::MemoryPool* arrowPool);
 
+  static std::shared_ptr<ShuffleWriter> createShuffleWriter(
+      const ShuffleWriterOptions& options,
+      int32_t numColumnsExludePid,
+      int64_t firstBatchRowNumber,
+      int64_t firstBatchFlatSize,
+      int64_t memLimit,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* arrowPool);
+
   // create a BoltShuffleWriter instance
   static std::shared_ptr<BoltShuffleWriter> createDefault(
       const ShuffleWriterOptions& options,
@@ -372,6 +381,12 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::string& funcLine);
 
   virtual arrow::Status init();
+
+  static std::shared_ptr<BoltShuffleWriter> createForType(
+      ShuffleWriterType type,
+      const ShuffleWriterOptions& options,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* arrowPool);
 
   virtual arrow::Status initPartitions();
 
