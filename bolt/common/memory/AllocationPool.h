@@ -43,6 +43,11 @@ class AllocationPool {
  public:
   static constexpr int32_t kMinPages = 16;
 
+  struct ReleasedRangeStats {
+    uint64_t bytes{0};
+    uint64_t allocations{0};
+  };
+
   explicit AllocationPool(memory::MemoryPool* pool) : pool_(pool) {}
 
   ~AllocationPool() {
@@ -69,6 +74,10 @@ class AllocationPool {
   /// distance from start to first byte after last allocation.
   folly::Range<char*> rangeAt(int32_t index) const;
 
+  /// Releases all complete ranges before 'rangeIndex'. Range indexes stay
+  /// stable: released ranges remain addressable as empty ranges.
+  ReleasedRangeStats releaseRangesBefore(int32_t rangeIndex);
+
   int64_t currentOffset() const {
     return currentOffset_;
   }
@@ -79,7 +88,7 @@ class AllocationPool {
 
   /// Returns the number of bytes allocatable without growing 'this'.
   int64_t freeBytes() const {
-    if (largeAllocations_.empty()) {
+    if (!currentRunIsLarge_) {
       return freeAddressableBytes();
     }
     return largeAllocations_.back().size() - currentOffset_;
@@ -132,7 +141,7 @@ class AllocationPool {
   // to 'bytesInRun_' ut they are not marked used by the
   // pool/allocator. So use growContiguous() to update this.
   int64_t endOfReservedRun() {
-    if (largeAllocations_.empty()) {
+    if (!currentRunIsLarge_) {
       return bytesInRun_;
     }
     return largeAllocations_.back().size();
@@ -151,9 +160,18 @@ class AllocationPool {
 
   void newRunImpl(memory::MachinePageCount numPages);
 
+  void recordAllocation();
+
+  struct RangeState {
+    uint64_t allocations{0};
+    bool released{false};
+  };
+
   memory::MemoryPool* pool_;
   std::vector<memory::Allocation> allocations_;
   std::vector<memory::ContiguousAllocation> largeAllocations_;
+  std::vector<RangeState> allocationStates_;
+  std::vector<RangeState> largeAllocationStates_;
 
   // Points to the start of the run from which allocations are being nade.
   char* startOfRun_{nullptr};
@@ -168,6 +186,8 @@ class AllocationPool {
   // Total space returned to users. Size of allocations can be larger specially
   // if mmapped in advance of use.
   int64_t usedBytes_{0};
+  bool currentRunIsLarge_{false};
+  bool largeRunsStarted_{false};
 
   // Start using large mmaps with huge pages after 'usedBytes_' exceeds this.
   int64_t hugePageThreshold_{kDefaultHugePageThreshold};
