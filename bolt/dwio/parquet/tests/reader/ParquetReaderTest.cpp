@@ -1092,6 +1092,32 @@ TEST_F(ParquetReaderTest, unsignedIntUsesSignedNativeVectors) {
   EXPECT_NE(child(3)->as<SimpleVector<int64_t>>(), nullptr);
 }
 
+TEST_F(ParquetReaderTest, allNullUnsignedIntUsesSignedNativeVectors) {
+  // uint_all_null.parquet holds the same unsigned integer columns as
+  // uint.parquet (uint8, uint16, uint32, uint64) with 3 rows, all null. This
+  // covers the all-null path, which returns a constant vector.
+  auto rowType =
+      ROW({"uint8", "uint16", "uint32", "uint64"},
+          {TINYINT(), INTEGER(), BIGINT(), BIGINT()});
+  auto rowReader = createRowReader("uint_all_null.parquet", rowType);
+  VectorPtr result = BaseVector::create(rowType, 0, pool_.get());
+  ASSERT_EQ(rowReader->next(1000, result), 3);
+  auto* rowVector = result->as<RowVector>();
+  ASSERT_NE(rowVector, nullptr);
+  auto child = [&](int32_t i) {
+    return BaseVector::loadedVectorShared(rowVector->childAt(i));
+  };
+  EXPECT_NE(child(0)->as<SimpleVector<int8_t>>(), nullptr);
+  EXPECT_NE(child(1)->as<SimpleVector<int32_t>>(), nullptr);
+  EXPECT_NE(child(2)->as<SimpleVector<int64_t>>(), nullptr);
+  EXPECT_NE(child(3)->as<SimpleVector<int64_t>>(), nullptr);
+  for (int32_t i = 0; i < rowType->size(); ++i) {
+    for (vector_size_t row = 0; row < 3; ++row) {
+      EXPECT_TRUE(child(i)->isNullAt(row)) << "column " << i << " row " << row;
+    }
+  }
+}
+
 TEST_F(ParquetReaderTest, parseDate) {
   // date.parquet holds a single column (date: DATE) and
   // 25 rows.
