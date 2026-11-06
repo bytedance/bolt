@@ -23,6 +23,8 @@
 namespace bytedance::bolt::functions::flinksql::test {
 
 namespace {
+using bolt::test::assertEqualVectors;
+
 const int64_t LongMinValue = std::numeric_limits<int64_t>::min();
 
 class FlinkSqlDateTimeFunctionsTest : public FlinkFunctionBaseTest {};
@@ -52,7 +54,7 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, unixTimestamp) {
   EXPECT_EQ(
       1747843200, unixTimestamp("2025-05-22", "yyyy-MM-dd", "Asia/Shanghai"));
   EXPECT_EQ(
-      -2177481944,
+      -2177481601,
       unixTimestamp(
           "1900-12-31 23:59:59", "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
   EXPECT_EQ(
@@ -78,7 +80,7 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, unixTimestamp) {
           "yyyy-MM-dd HH:mm:ss.SSS",
           "Asia/Shanghai"));
   EXPECT_EQ(
-      -62135625943,
+      -62135798400,
       unixTimestamp(
           "0001-01-01 00:00:00", "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
   EXPECT_EQ(
@@ -86,13 +88,27 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, unixTimestamp) {
       unixTimestamp(
           "1901-01-01 00:00:00", "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
   EXPECT_EQ(
-      -2177481944,
+      -2177481601,
       unixTimestamp(
           "1900-12-31 23:59:59", "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
 
   const std::string ISO_8601_DATE_FORMAT = "yyyy-MM-dd HH:mm:ss.SSZZ";
-  std::string isoTime = "1970-01-01 05:30:01.00+05:30";
+  std::string isoTime = "1970-01-01 05:30:01.00+0530";
   EXPECT_EQ(1, unixTimestamp(isoTime, ISO_8601_DATE_FORMAT, "Asia/Shanghai"));
+
+  for (const auto& [zone, expected] :
+       std::vector<std::pair<std::string, int64_t>>{
+           {"+0530", 0},
+           {"+05:30", LongMinValue},
+           {"Asia/Shanghai", LongMinValue}}) {
+    const auto input = std::string("1970-01-01 05:30:00") + zone;
+    EXPECT_EQ(expected, unixTimestamp(input, "yyyy-MM-dd HH:mm:ssZZZ", "UTC"));
+    EXPECT_EQ(
+        expected,
+        evaluateOnce<int64_t>(
+            "flink_unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ssZZZ', 'UTC')",
+            std::optional<std::string>(input)));
+  }
 
   // Empty or malformed input returns null.
   EXPECT_EQ(
@@ -154,6 +170,73 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, fromUnixtimeWithTimezone) {
   EXPECT_EQ(
       "1970-01-01 08:00:00",
       fromUnixtimeOnce(LongMinValue, "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
+}
+
+TEST_F(FlinkSqlDateTimeFunctionsTest, simpleDateFormat) {
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>(
+           {"1969-12-31 23:59:59.999",
+            "1970-01-01 00:00:00.1234",
+            "2023-02-29 25:00:00.0",
+            "1970-01-01 00:00:00.1",
+            "1970-01-01 00:00:00.1"}),
+       makeFlatVector<std::string>(
+           5, [](auto) { return "yyyy-MM-dd HH:mm:ss.S"; })});
+  auto expected = makeFlatVector<int64_t>({0, 1, 1677718800, 0, 0});
+  for (const auto* policy : {"LEGACY", "CORRECTED", "EXCEPTION"}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kTimeParserPolicy, policy}});
+    assertEqualVectors(
+        expected, evaluate("flink_unix_timestamp(c0, c1, 'UTC')", input));
+    assertEqualVectors(
+        expected,
+        evaluate(
+            "flink_unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss.S', 'UTC')", input));
+  }
+  auto dates = makeRowVector(
+      {makeFlatVector<int64_t>({0, 0, 0, 0}),
+       makeFlatVector<std::string>(
+           {"S SS SSS SSSS",
+            "yyyy-MM-dd HH:mm:ss XXX",
+            "yyyy-MM-dd HH:mm:ss XXX",
+            "yyyy-MM-dd HH:mm:ss ZZZ"}),
+       makeFlatVector<std::string>(
+           {"UTC", "Asia/Kolkata", "GMT+00:30", "America/New_York"})});
+  assertEqualVectors(
+      makeFlatVector<std::string>(
+          {"0 00 000 0000",
+           "1970-01-01 05:30:00 +05:30",
+           "1970-01-01 00:30:00 +00:30",
+           "1969-12-31 19:00:00 -0500"}),
+      evaluate("flink_from_unixtime(c0, c1, c2)", dates));
+}
+
+TEST_F(FlinkSqlDateTimeFunctionsTest, timestampParserContext) {
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kDateTimeFormatterDefaultTimezone, "Asia/Shanghai"},
+       {core::QueryConfig::kSparkLegacyTimestampParserPivotMillis,
+        "946657800000"},
+       {core::QueryConfig::kSparkLegacyTimestampParserPivotYear, "2000"}});
+  EXPECT_EQ(
+      1704038400,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss z', 'UTC')",
+          std::optional<std::string>("2024-01-01 00:00:00 CST")));
+  EXPECT_EQ(
+      4102441200LL,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'UTC')",
+          std::optional<std::string>("99-12-31 23:00:00")));
+  EXPECT_EQ(
+      4102416000LL,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'Asia/Shanghai')",
+          std::optional<std::string>("00-01-01 00:00:00")));
+  EXPECT_EQ(
+      946657800LL,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'Asia/Shanghai')",
+          std::optional<std::string>("00-01-01 00:30:00")));
 }
 
 TEST_F(FlinkSqlDateTimeFunctionsTest, timestampToStringV2) {

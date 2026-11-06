@@ -12,6 +12,7 @@ add_executable(
   BmRowContainerReadTest.cpp
   BmRowContainerResidentTest.cpp
   BmStreamingWindowBuildTest.cpp
+  BmTaskConfigTest.cpp
   BmWindowPartitionTest.cpp
   BmWindowSemanticCoverageTest.cpp
   BmSegmentCollectionTest.cpp

@@ -32,6 +32,7 @@
 #pragma once
 
 #include <arrow/array.h>
+#include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/filesystem/path_util.h>
@@ -75,6 +76,19 @@ int64_t getMaxCompressedBufferSize(
     Codec* codec);
 
 std::shared_ptr<arrow::Buffer> zeroLengthNullBuffer();
+
+/// Creates a zero-copy view using the parent's manager directly, avoiding
+/// Arrow 15's temporary access to the default manager during slice
+/// construction. The caller guarantees a valid range and a stable data address.
+/// Writers may reference initialized bytes within capacity beyond the parent's
+/// logical size.
+inline std::shared_ptr<arrow::Buffer> sliceBufferWithParentManager(
+    const std::shared_ptr<arrow::Buffer>& parent,
+    int64_t offset,
+    int64_t size) {
+  return std::make_shared<arrow::Buffer>(
+      parent->data() + offset, size, parent->memory_manager(), parent);
+}
 
 std::shared_ptr<arrow::Schema> boltTypeToArrowSchema(
     const bytedance::bolt::TypePtr& rowType,

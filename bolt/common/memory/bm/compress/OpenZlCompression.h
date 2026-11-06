@@ -73,7 +73,8 @@ std::string OpenZlDescriptorFingerprint(
 std::shared_ptr<const OpenZlCompressor> BuildOpenZlCompressor(
     const BlockDescriptor& descriptor,
     size_t blockSize,
-    std::string fingerprint);
+    std::string fingerprint,
+    int compressionLevel = 3);
 
 size_t OpenZlInitialCompressedCapacity(size_t rawSize);
 

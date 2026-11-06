@@ -2247,12 +2247,12 @@ TEST_F(ExprTest, clearNewlyInitializedMemo) {
 
   auto result = evaluateBatch();
   result.reset();
-  ASSERT_TRUE(base.unique());
+  ASSERT_EQ(base.use_count(), 1);
 
   // The second encounter with the same dictionary base initializes the memo.
   result = evaluateBatch();
   result.reset();
-  ASSERT_FALSE(base.unique());
+  ASSERT_NE(base.use_count(), 1);
   base.reset();
   indices.reset();
   EXPECT_GT(pool_->currentBytes(), bytesBefore);

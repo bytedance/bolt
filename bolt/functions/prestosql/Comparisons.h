@@ -117,7 +117,10 @@ struct DistinctFromFunction {
   }
 };
 
-template <typename T>
+template <
+    typename T,
+    CompareFlags::NullHandlingMode nullHandlingMode =
+        CompareFlags::NullHandlingMode::kNullAsIndeterminate>
 struct EqFunction : public TimestampWithTimezoneComparisonSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
@@ -140,8 +143,8 @@ struct EqFunction : public TimestampWithTimezoneComparisonSupport<T> {
       bool& out,
       const arg_type<Generic<T1>>& lhs,
       const arg_type<Generic<T1>>& rhs) {
-    static constexpr CompareFlags kFlags = CompareFlags::equality(
-        CompareFlags::NullHandlingMode::kNullAsIndeterminate);
+    static constexpr CompareFlags kFlags =
+        CompareFlags::equality(nullHandlingMode);
 
     auto result = lhs.compare(rhs, kFlags);
     if (!result.has_value()) {

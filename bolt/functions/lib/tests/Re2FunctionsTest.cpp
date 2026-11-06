@@ -402,6 +402,27 @@ TEST_F(Re2FunctionsTest, regexExtractBigintGroupId) {
   });
 }
 
+TEST_F(Re2FunctionsTest, regexExtractBigintGroupIdDoesNotNarrow) {
+  for (const auto groupId :
+       {int64_t{4294967296}, int64_t{4294967297}, int64_t{-4294967295}}) {
+    SCOPED_TRACE(groupId);
+    EXPECT_THROW(
+        evaluateOnce<std::string>(
+            "re2_extract(c0, c1, c2)",
+            std::optional<std::string>{"foo123"},
+            std::optional<std::string>{"foo([0-9]+)"},
+            std::optional<int64_t>{groupId}),
+        BoltException);
+    EXPECT_THROW(
+        evaluateOnce<std::string>(
+            fmt::format(
+                "re2_extract(c0, 'foo([0-9]+)', cast('{}' as bigint))",
+                groupId),
+            std::optional<std::string>{"foo123"}),
+        BoltException);
+  }
+}
+
 TEST_F(Re2FunctionsTest, regexExtractBatch) {
   VectorFunctionTester<std::string, std::string, std::string, int> re2Extract{
       "re2_extract(c0, c1, c2)"};

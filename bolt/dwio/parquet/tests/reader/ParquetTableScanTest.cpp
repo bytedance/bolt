@@ -202,6 +202,69 @@ void rewriteDateConvertedTypeToLogicalTypeOnly(const std::string& path) {
   out.write(file.data(), file.size());
 }
 
+void rewriteStructAsDcMap(
+    const std::string& path,
+    const std::string& columnName,
+    const std::vector<std::string>& dynamicKeys) {
+  std::ifstream in(path, std::ios::binary);
+  BOLT_CHECK(in.good(), "Failed to open Parquet file for read: {}", path);
+  std::string file(
+      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  BOLT_CHECK_GE(file.size(), 12);
+  BOLT_CHECK_EQ(file.substr(file.size() - 4), "PAR1");
+
+  const auto footerLength = readUint32LE(file.data() + file.size() - 8);
+  BOLT_CHECK_LE(footerLength + 8, file.size());
+  const auto footerOffset = file.size() - 8 - footerLength;
+
+  thrift::FileMetaData metadata;
+  auto inputBuffer = std::make_shared<apache::thrift::transport::TMemoryBuffer>(
+      reinterpret_cast<uint8_t*>(file.data() + footerOffset),
+      footerLength,
+      apache::thrift::transport::TMemoryBuffer::OBSERVE);
+  apache::thrift::protocol::TCompactProtocol inputProtocol(inputBuffer);
+  metadata.read(&inputProtocol);
+
+  bool foundColumn = false;
+  for (auto& schemaElement : metadata.schema) {
+    if (schemaElement.name == columnName) {
+      schemaElement.__set_converted_type(thrift::ConvertedType::DCMAP);
+      thrift::LogicalType logicalType;
+      logicalType.__set_DCMAP(thrift::DCMapType{});
+      schemaElement.__set_logicalType(logicalType);
+      foundColumn = true;
+      break;
+    }
+  }
+  BOLT_CHECK(
+      foundColumn, "Failed to find column in Parquet footer: {}", columnName);
+
+  thrift::KeyValue dcMapKeys;
+  dcMapKeys.__set_key(
+      fmt::format("parquet.meta.dynamic.column.map.keys.of.{}", columnName));
+  dcMapKeys.__set_value(folly::join(",", dynamicKeys));
+  metadata.key_value_metadata.push_back(std::move(dcMapKeys));
+  metadata.__isset.key_value_metadata = true;
+
+  auto outputBuffer =
+      std::make_shared<apache::thrift::transport::TMemoryBuffer>();
+  apache::thrift::protocol::TCompactProtocol outputProtocol(outputBuffer);
+  metadata.write(&outputProtocol);
+  uint8_t* serializedFooter{nullptr};
+  uint32_t serializedFooterLength{0};
+  outputBuffer->getBuffer(&serializedFooter, &serializedFooterLength);
+
+  file.resize(footerOffset);
+  file.append(
+      reinterpret_cast<const char*>(serializedFooter), serializedFooterLength);
+  appendUint32LE(file, serializedFooterLength);
+  file.append("PAR1", 4);
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  BOLT_CHECK(out.good(), "Failed to open Parquet file for write: {}", path);
+  out.write(file.data(), file.size());
+}
+
 class MapSubscriptMetadataFilterParser final
     : public exec::PrestoExprToSubfieldFilterParser {
  public:
@@ -1046,6 +1109,41 @@ TEST_F(ParquetTableScanTest, nullMap) {
            makeNullableMapVector<std::string, std::string>({std::nullopt})}));
 
   assertSelectWithFilter({"i", "c"}, {}, "", "SELECT i, c FROM tmp");
+}
+
+TEST_F(ParquetTableScanTest, dcMapPreservesNullAndEmptyMaps) {
+  auto file = TempFilePath::create();
+  auto keyValues = makeNullableMapVector<std::string, std::string>(
+      {std::vector<std::pair<std::string, std::optional<std::string>>>{},
+       std::vector<std::pair<std::string, std::optional<std::string>>>{},
+       std::vector<std::pair<std::string, std::optional<std::string>>>{
+           {"static_key", "static_value"}}});
+  auto dynamicColumns = makeRowVector(
+      {"value_0"},
+      {makeNullableFlatVector<std::string>(
+          {std::nullopt, std::nullopt, "dynamic_value"})});
+  auto accounts = makeRowVector(
+      {"key_value", "dynamic_column"},
+      {keyValues, dynamicColumns},
+      [](vector_size_t row) { return row == 0; });
+  auto physicalData = makeRowVector({"accounts"}, {accounts});
+  writeToParquetFile(file->getPath(), {physicalData}, {});
+  rewriteStructAsDcMap(file->getPath(), "accounts", {"dynamic_key"});
+
+  auto logicalType = ROW({"accounts"}, {MAP(VARCHAR(), VARCHAR())});
+  auto expected = makeRowVector(
+      {"accounts"},
+      {makeNullableMapVector<std::string, std::string>(
+          {std::nullopt,
+           std::vector<std::pair<std::string, std::optional<std::string>>>{},
+           std::vector<std::pair<std::string, std::optional<std::string>>>{
+               {"static_key", "static_value"},
+               {"dynamic_key", "dynamic_value"}}})});
+
+  auto plan = PlanBuilder().tableScan(logicalType).planNode();
+  AssertQueryBuilder(plan)
+      .split(makeSplit(file->getPath()))
+      .assertResults(expected);
 }
 
 // Core dump is fixed.

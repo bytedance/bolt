@@ -158,7 +158,8 @@ std::string OpenZlDescriptorFingerprint(
 std::shared_ptr<const OpenZlCompressor> BuildOpenZlCompressor(
     const BlockDescriptor& descriptor,
     size_t blockSize,
-    std::string fingerprint) {
+    std::string fingerprint,
+    int compressionLevel) {
   BOLT_CHECK(OpenZlSupportsDescriptor(descriptor, blockSize));
   const auto& schema = std::get<FixedRowBlockSchema>(descriptor.schema);
   const auto fields = NormalizeFixedRowFields(schema);
@@ -222,7 +223,7 @@ std::shared_ptr<const OpenZlCompressor> BuildOpenZlCompressor(
       "format configuration");
   checkReport(
       ZL_Compressor_setParameter(
-          compressor.get(), ZL_CParam_compressionLevel, 3),
+          compressor.get(), ZL_CParam_compressionLevel, compressionLevel),
       fingerprint,
       "level configuration");
   checkReport(

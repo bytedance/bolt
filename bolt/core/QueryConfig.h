@@ -31,6 +31,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
 #include "bolt/vector/TypeAliases.h"
@@ -255,10 +256,25 @@ class QueryConfig {
   /// Enables the task-level BufferManager for operators that opt in.
   static constexpr const char* kBufferManagerEnabled = "buffer_manager_enabled";
 
-  /// Overrides the BufferManager spill codec independently of the legacy
-  /// operator spill codec. Empty preserves the existing mapping.
+  /// Maximum size in bytes of each BufferManager bucket file. Does not apply
+  /// to dedicated files for records larger than the largest bucket.
+  static constexpr const char* kBufferManagerSpillFileSize =
+      "buffer_manager_spill_file_size";
+
+  /// Maximum number of files held by each bucket in a task's BufferManager.
+  static constexpr const char* kBufferManagerSpillMaxFilesPerBucket =
+      "buffer_manager_spill_max_files_per_bucket";
+
+  /// BufferManager spill codec, independent of the legacy operator spill
+  /// codec. Defaults to zstd; an explicit empty value is a compatibility alias
+  /// for zstd. Use none to disable compression.
   static constexpr const char* kBufferManagerSpillCompressionKind =
       "buffer_manager_spill_compression_kind";
+
+  /// Optional level for the selected BufferManager spill codec. Unset keeps
+  /// the codec's default; ignored when compression is disabled.
+  static constexpr const char* kBufferManagerSpillCompressionLevel =
+      "buffer_manager_spill_compression_level";
 
   /// Enables BufferManager-backed streaming Window build for pre-sorted input.
   static constexpr const char* kBmStreamingWindowBuildEnabled =
@@ -588,6 +604,28 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// Whether the caller's JVM supports standalone month text without the
+  /// Java 8 formatting defect. Spark rejects LLL/LLLL when false (the default).
+  static constexpr const char* kSparkDatetimeStandaloneMonthText =
+      "spark.datetime_standalone_month_text_enabled";
+
+  /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
+  static constexpr const char* kDateTimeFormatterDefaultTimezone =
+      "date_time_formatter_default_timezone";
+  /// Zone used for hybrid/Gregorian calendar conversion; defaults to the
+  /// formatter's zone. For LEGACY parsing, Gluten must pass the JVM default
+  /// zone for Spark 3.3 and the formatter's zone for Spark 3.5.
+  static constexpr const char* kDateTimeFormatterRebaseTimezone =
+      "date_time_formatter_rebase_timezone";
+  /// Both values describe the SimpleDateFormat window captured by the caller.
+  static constexpr const char* kSparkLegacyTimestampParserPivotMillis =
+      "spark.legacy_timestamp_parser_pivot_millis";
+  static constexpr const char* kSparkLegacyTimestampParserPivotYear =
+      "spark.legacy_timestamp_parser_pivot_year";
+  /// Semicolon-separated zone=seconds entries for Java TimeZone raw offsets.
+  static constexpr const char* kSparkLegacyTimestampParserTimezoneRawOffsets =
+      "spark.legacy_timestamp_parser_timezone_raw_offsets";
+
   /// If true, base64() chunks its output into 76-character lines separated by
   /// CRLF; if false, it returns a single unchunked string. Mirrors
   /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true
@@ -800,6 +838,13 @@ class QueryConfig {
 
   static constexpr const char* kEnableFlinkCompatible =
       "compatible.flink.enable";
+
+  /// java_map (default) uses boxed-key equality and visits only left key
+  /// groups. sql_keys uses SQL key equality and requires both sides' key
+  /// groups. Both modes require equal entry counts and keep the last duplicate
+  /// value.
+  static constexpr const char* kFlinkMapEqualityMode =
+      "flink_map_equality_mode";
 
   static constexpr const char* kFlinkJniUdfTaskInfo = "flink.jni.udf.task.info";
 
@@ -1136,8 +1181,20 @@ class QueryConfig {
     return get<bool>(kBufferManagerEnabled, false);
   }
 
+  int64_t bufferManagerSpillFileSize() const {
+    return get<int64_t>(kBufferManagerSpillFileSize, 2LL << 30);
+  }
+
+  int64_t bufferManagerSpillMaxFilesPerBucket() const {
+    return get<int64_t>(kBufferManagerSpillMaxFilesPerBucket, 64);
+  }
+
   std::string bufferManagerSpillCompressionKind() const {
-    return get<std::string>(kBufferManagerSpillCompressionKind, "");
+    return get<std::string>(kBufferManagerSpillCompressionKind, "zstd");
+  }
+
+  std::optional<int32_t> bufferManagerSpillCompressionLevel() const {
+    return get<int32_t>(kBufferManagerSpillCompressionLevel);
   }
 
   bool bmStreamingWindowBuildEnabled() const {
@@ -1770,6 +1827,10 @@ class QueryConfig {
 
   bool enableFlinkCompatible() const {
     return get<bool>(kEnableFlinkCompatible, false);
+  }
+
+  std::string flinkMapEqualityMode() const {
+    return get<std::string>(kFlinkMapEqualityMode, "java_map");
   }
 
   std::string getFlinkJniUdfTaskInfo() const {

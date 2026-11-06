@@ -25,6 +25,7 @@
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -36,6 +37,11 @@ class BufferManagerStatsCollector;
 class EvictionQueue;
 class SpillWriteDriver;
 class SpillStore;
+
+struct SpillCompressionOptions {
+  std::string kind{"zstd"};
+  std::optional<int32_t> level;
+};
 
 struct BufferManagerConfig {
   std::string poolName;
@@ -49,6 +55,12 @@ struct BufferManagerConfig {
   /// memory arbitration. Reclaiming BufferManager blocks remains the
   /// responsibility of BufferManagerReclaimer.
   std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer;
+
+  /// Optional named codec settings, resolved and validated by Create before
+  /// allocating resources. When absent, the typed spillStoreConfig compression
+  /// options are used unchanged. When present, kind and the optional selected
+  /// codec level override those options; other codec options are preserved.
+  std::optional<SpillCompressionOptions> spillCompression;
 };
 
 class BufferManager : public std::enable_shared_from_this<BufferManager> {
@@ -56,6 +68,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   static std::shared_ptr<BufferManager> Create(
       MemoryPool& parent,
       BufferManagerConfig config);
+
   ~BufferManager();
 
   /// Creates a dedicated allocation leaf under this manager's aggregate.

@@ -59,8 +59,8 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
 
 TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
   auto defaultConfig = QueryCtx::create(nullptr, QueryConfig{{}});
-  EXPECT_TRUE(
-      defaultConfig->queryConfig().bufferManagerSpillCompressionKind().empty());
+  EXPECT_EQ(
+      "zstd", defaultConfig->queryConfig().bufferManagerSpillCompressionKind());
 
   auto configured = QueryCtx::create(
       nullptr,
@@ -93,7 +93,7 @@ TEST_F(
     bufferManagerSpillCompressionKindHyphenatedKeyIsIgnored) {
   const auto oldKey = std::string{"buffer-manager"} + "-spill-compression-kind";
   QueryConfig config{{{oldKey, "openzl"}}};
-  EXPECT_TRUE(config.bufferManagerSpillCompressionKind().empty());
+  EXPECT_EQ("zstd", config.bufferManagerSpillCompressionKind());
 }
 
 TEST_F(QueryConfigTest, setConfig) {

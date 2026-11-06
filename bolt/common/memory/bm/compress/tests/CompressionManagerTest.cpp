@@ -21,6 +21,7 @@
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
 #include <lz4.h>
+#include <openzl/openzl.h>
 #include <zstd.h>
 
 #include <algorithm>
@@ -131,6 +132,84 @@ TEST(CompressionConfigTest, DefaultsToZstdLevelThree) {
   EXPECT_EQ(3, config.zstd.compressionLevel);
   EXPECT_EQ(256, config.openZl.graphCacheCapacity);
   EXPECT_EQ(0, config.openZl.maxOutputBytes);
+  EXPECT_EQ(3, config.openZl.compressionLevel);
+}
+
+TEST(CompressionConfigTest, SelectedCodecLevelAndIndependentDefaults) {
+  CompressionConfig zstd;
+  SetCompressionLevel(zstd, 9);
+  EXPECT_EQ(9, zstd.zstd.compressionLevel);
+  EXPECT_EQ(3, zstd.openZl.compressionLevel);
+  SetCompressionLevel(zstd, 0);
+  EXPECT_EQ(0, zstd.zstd.compressionLevel);
+  SetCompressionLevel(zstd, -2);
+  EXPECT_EQ(-2, zstd.zstd.compressionLevel);
+  EXPECT_THROW(SetCompressionLevel(zstd, ZSTD_maxCLevel() + 1), std::exception);
+  EXPECT_THROW(SetCompressionLevel(zstd, ZSTD_minCLevel() - 1), std::exception);
+
+  CompressionConfig openZl;
+  openZl.kind = CompressionKind::kOpenZlFrame;
+  SetCompressionLevel(openZl, 9);
+  EXPECT_EQ(9, openZl.openZl.compressionLevel);
+  EXPECT_EQ(3, openZl.zstd.compressionLevel);
+
+  CompressionConfig none;
+  none.kind = CompressionKind::kNone;
+  SetCompressionLevel(none, std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(3, none.zstd.compressionLevel);
+  EXPECT_EQ(3, none.openZl.compressionLevel);
+}
+
+TEST_F(CompressionManagerTest, OpenZlConfiguredLevelsRoundTrip) {
+  constexpr uint32_t kRows = 1024;
+  const auto descriptor = mixedFixedRowDescriptor(kRows);
+  const auto original = mixedFixedRowPayload(kRows, 5);
+  for (const int level : {0, 1, 9}) {
+    const auto compressor = BuildOpenZlCompressor(
+        descriptor,
+        original.size(),
+        OpenZlDescriptorFingerprint(descriptor, original.size()),
+        level);
+    EXPECT_EQ(
+        level,
+        ZL_Compressor_getParameter(
+            static_cast<const ZL_Compressor*>(compressor->native),
+            ZL_CParam_compressionLevel));
+    OpenZlCompressionContext context;
+    std::vector<char> expected(
+        OpenZlInitialCompressedCapacity(original.size()));
+    const auto encoded = OpenZlCompress(
+        context,
+        *compressor,
+        original.data(),
+        original.size(),
+        expected.data(),
+        expected.size());
+    ASSERT_FALSE(encoded.capacityTooSmall);
+    for (const size_t cacheCapacity : {0, 1}) {
+      CompressionConfig config;
+      config.kind = CompressionKind::kOpenZlFrame;
+      config.minCompressBytes = 1;
+      config.openZl.graphCacheCapacity = cacheCapacity;
+      SetCompressionLevel(config, level);
+      CompressionManager manager(config);
+      auto payload = makePayload(original);
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        auto record = manager.BuildSpillRecord(
+            std::span<const char>(payload.data(), payload.length()),
+            &descriptor);
+        EXPECT_EQ(CompressionKind::kOpenZlFrame, record.storedKind);
+        ASSERT_EQ(encoded.size + SpillRecordHeaderSize(), record.physicalSize);
+        EXPECT_EQ(
+            0,
+            std::memcmp(
+                expected.data(), SpillRecordBody(record.record), encoded.size));
+        const auto decoded =
+            decodeRecord(manager, record.record, original.size());
+        EXPECT_EQ(original, readPayload(decoded, original.size()));
+      }
+    }
+  }
 }
 
 TEST_F(CompressionManagerTest, NoneBuildsUncompressedMallocBackedRecord) {

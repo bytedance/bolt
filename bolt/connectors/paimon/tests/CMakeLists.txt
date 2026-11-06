@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ensure paimon Python package is available for tests that use it.
-# Only runs during cmake configuration; skips if already installed.
+# PaimonConnectorTest creates its tables with the pypaimon Python package.
+# Only check for it here; the test fails at runtime when it is missing.
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -25,23 +25,12 @@ execute_process(
   OUTPUT_QUIET
 )
 if(NOT _paimon_check_result EQUAL 0)
-  message(STATUS "Installing paimon Python package for integration tests...")
-  execute_process(
-    COMMAND
-      ${Python3_EXECUTABLE} -m pip install
-      "git+https://github.com/apache/paimon@release-1.4.1-rc2#subdirectory=paimon-python"
-    RESULT_VARIABLE _paimon_install_result
-    OUTPUT_VARIABLE _paimon_install_output
-    ERROR_VARIABLE _paimon_install_error
+  message(
+    WARNING
+    "Python package pypaimon is not available for ${Python3_EXECUTABLE}; "
+    "PaimonConnectorTest will fail. Install it with: "
+    "${Python3_EXECUTABLE} -m pip install pypaimon==1.4.2"
   )
-  if(NOT _paimon_install_result EQUAL 0)
-    message(
-      WARNING
-      "Failed to install paimon Python package: ${_paimon_install_error}. Please install at least version 1.4.1"
-    )
-  else()
-    message(STATUS "paimon Python package installed successfully")
-  endif()
 endif()
 
 set(
@@ -73,6 +62,7 @@ set_tests_properties(
 )
 
 set(PAIMON_CONNECTOR_TEST_REGISTRATION_LIBRARIES)
+set(PAIMON_CONNECTOR_TEST_EARLY_LIBRARIES)
 add_library(paimon_connector_test_compile_deps INTERFACE)
 target_link_libraries(paimon_connector_test_compile_deps INTERFACE bolt_connector_paimon)
 set(PAIMON_CONNECTOR_TEST_CONNECTOR_LIBRARY paimon_connector_test_compile_deps)
@@ -84,9 +74,51 @@ if(NOT BUILD_SHARED_LIBS AND BOLT_TEST_LINKAGE STREQUAL "static")
   )
 endif()
 
+if(BOLT_TEST_LINKAGE STREQUAL "shared" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Unit tests are split across multiple shared libraries to reduce disk usage.
+  # As a result, parts of the static Paimon archive are linked into both this
+  # executable and the shared Bolt engine. Paimon implementation types have
+  # hidden RTTI, so ELF symbol preemption can create an object using the
+  # executable's RTTI and later attempt to cast it using the engine's distinct
+  # RTTI, causing the cast to fail. Load the archive early for test-side
+  # serialization, then use a version script to keep the affected engine-side
+  # conversion entry points from being preempted by the executable's copy.
+  get_target_property(PAIMON_CORE_LINK_LIBRARIES Paimon::core INTERFACE_LINK_LIBRARIES)
+  list(
+    APPEND PAIMON_CONNECTOR_TEST_EARLY_LIBRARIES
+    fmt::fmt
+    ${PAIMON_CORE_LINK_LIBRARIES}
+  )
+  set(PAIMON_TEST_VERSION_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/paimon-test.map")
+  file(
+    GENERATE OUTPUT "${PAIMON_TEST_VERSION_SCRIPT}"
+    CONTENT
+      [[{
+  local:
+    _ZN6paimon5Split11DeserializeE*;
+    _ZN6paimon16PredicateBuilder*;
+};
+]]
+  )
+  target_link_options(
+    bolt_paimon_connector_test
+    PRIVATE
+      "LINKER:--version-script=${PAIMON_TEST_VERSION_SCRIPT}"
+  )
+  set_property(
+    TARGET
+      bolt_paimon_connector_test
+    APPEND
+    PROPERTY
+      LINK_DEPENDS
+        "${PAIMON_TEST_VERSION_SCRIPT}"
+  )
+endif()
+
 target_link_libraries(
   bolt_paimon_connector_test
   PUBLIC
+    ${PAIMON_CONNECTOR_TEST_EARLY_LIBRARIES}
     ${PAIMON_CONNECTOR_TEST_CONNECTOR_LIBRARY}
     Paimon::core
     roaring::roaring
