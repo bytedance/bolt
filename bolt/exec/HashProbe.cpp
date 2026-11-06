@@ -805,7 +805,7 @@ void HashProbe::addInput(RowVectorPtr input) {
   // If we want more accurate stats, we will have to decode input vector
   // even when not needed. So we tradeoff less accurate stats for more
   // performance.
-  {
+  if (!reuseSpillReader_) {
     auto lockedStats = stats_.wlock();
     lockedStats->numNullKeys +=
         activeRows_.size() - activeRows_.countSelected();

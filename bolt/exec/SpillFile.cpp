@@ -393,12 +393,14 @@ SpillWriter::SpillWriter(
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats,
     uint32_t maxBatchRows,
-    std::optional<RowFormatInfo> rowInfo)
+    std::optional<RowFormatInfo> rowInfo,
+    uint64_t targetFileRows)
     : type_(type),
       sortingKeys_(sortingKeys),
       compressionKind_(ioConfig.compressionKind),
       pathPrefix_(pathPrefix),
       targetFileSize_(targetFileSize),
+      targetFileRows_(targetFileRows),
       spillUringEnabled_(ioConfig.spillUringEnabled),
       writeBufferSize_(ioConfig.writeBufferSize),
       fileCreateConfig_(ioConfig.fileCreateConfig),
@@ -418,12 +420,14 @@ SpillWriter::SpillWriter(
     uint64_t targetFileSize,
     const common::SpillConfig::SpillIOConfig& ioConfig,
     memory::MemoryPool* pool,
-    folly::Synchronized<common::SpillStats>* stats)
+    folly::Synchronized<common::SpillStats>* stats,
+    uint64_t targetFileRows)
     : type_(nullptr),
       sortingKeys_(),
       compressionKind_(ioConfig.compressionKind),
       pathPrefix_(pathPrefix),
       targetFileSize_(targetFileSize),
+      targetFileRows_(targetFileRows),
       spillUringEnabled_(ioConfig.spillUringEnabled),
       writeBufferSize_(ioConfig.writeBufferSize),
       fileCreateConfig_(ioConfig.fileCreateConfig),
@@ -433,7 +437,9 @@ SpillWriter::SpillWriter(
       spillSerdeKind_(std::nullopt) {}
 
 SpillWriteFile* SpillWriter::ensureFile() {
-  if ((currentFile_ != nullptr) && (currentFile_->size() > targetFileSize_)) {
+  if (currentFile_ != nullptr &&
+      (currentFile_->size() > targetFileSize_ ||
+       (targetFileRows_ > 0 && rowsInCurrentFile_ >= targetFileRows_))) {
     closeFile();
   }
   if (currentFile_ == nullptr) {
@@ -537,6 +543,8 @@ uint64_t SpillWriter::flush() {
   }
   updateWriteStats(writtenBytes, flushTimeUs, writeTimeUs);
   updateAndCheckSpillLimitCb_(writtenBytes);
+  rowsInCurrentFile_ += unflushedRows_;
+  unflushedRows_ = 0;
   return writtenBytes;
 }
 
@@ -547,6 +555,7 @@ uint64_t SpillWriter::write(
 
   bool rowSizeExceed = false;
   uint64_t timeUs{0};
+  int32_t writeRowSize = 0;
   {
     MicrosecondTimer timer(&timeUs);
     if (batch_ == nullptr) {
@@ -560,7 +569,6 @@ uint64_t SpillWriter::write(
       unflushedRows_ = 0;
       unflushedSizeInRowVector_ = 0;
     }
-    int32_t writeRowSize = 0;
     for (const auto& range : indices) {
       writeRowSize += range.size;
     }
@@ -573,8 +581,7 @@ uint64_t SpillWriter::write(
       rowSizeExceed = unflushedSizeInRowVector_ > writeBufferSize_;
     }
   }
-  updateAppendStats(rows->size(), timeUs);
-  rowsInCurrentFile_ += rows->size();
+  updateAppendStats(writeRowSize, timeUs);
   if (batch_->size() < writeBufferSize_ && !rowSizeExceed &&
       !(maxBatchRows_ > 0 && unflushedRows_ >= maxBatchRows_)) {
     return 0;
@@ -606,6 +613,7 @@ uint64_t SpillWriter::writeAndFlush(
   checkNotFinished();
 
   uint64_t timeUs{0};
+  uint32_t numRows = 0;
   {
     MicrosecondTimer timer(&timeUs);
     if (batch_ == nullptr) {
@@ -618,9 +626,12 @@ uint64_t SpillWriter::writeAndFlush(
           &options);
     }
     batch_->append(rows, indices);
+    for (const auto& range : indices) {
+      numRows += range.size;
+    }
   }
-  rowsInCurrentFile_ += rows->size();
-  updateAppendStats(rows->size(), timeUs);
+  unflushedRows_ += numRows;
+  updateAppendStats(numRows, timeUs);
   return flush();
 }
 
@@ -650,7 +661,7 @@ uint64_t SpillWriter::write(
 
   resetNewBufferState();
 
-  auto writeBuffer = [&]() {
+  auto writeBuffer = [&](uint64_t numRows) {
     size_t bufferSize = current - bufferStart;
     size_t dataSize = bufferSize - headerSize;
     totalSize += bufferSize;
@@ -711,6 +722,7 @@ uint64_t SpillWriter::write(
     // there is no flush here, so add compress time as flush time
     updateWriteStats(writtenBytes, compressTimeUs, writeTimeUs);
     updateAndCheckSpillLimitCb_(writtenBytes);
+    rowsInCurrentFile_ += numRows;
     compressWriteTimsUs += compressTimeUs + writeTimeUs;
   };
 
@@ -728,7 +740,7 @@ uint64_t SpillWriter::write(
       }
       if (current + rowSize - bufferStart > writeBufferLimit) {
         if (needWriteRowCount > 0) {
-          writeBuffer();
+          writeBuffer(needWriteRowCount);
         }
         auto sizeWithHeader = rowSize + headerSize;
         if (sizeWithHeader > (bufferEnd - bufferStart)) {
@@ -757,10 +769,9 @@ uint64_t SpillWriter::write(
       needWriteRowCount++;
     }
     if (needWriteRowCount > 0) {
-      writeBuffer();
+      writeBuffer(needWriteRowCount);
     }
   }
-  rowsInCurrentFile_ += rows.size();
   updateAppendStats(rows.size(), timeUs - compressWriteTimsUs);
   return totalSize;
 }
@@ -829,9 +840,6 @@ uint64_t SpillWriter::writeEncodedBlock(
   rowsInCurrentFile_ += numRows;
   updateWriteStats(writtenBytes, compressTimeUs, writeTimeUs);
   updateAndCheckSpillLimitCb_(writtenBytes);
-  if (currentFile_ != nullptr && currentFile_->size() > targetFileSize_) {
-    closeFile();
-  }
   return writtenBytes;
 }
 
