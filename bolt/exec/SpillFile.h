@@ -49,6 +49,7 @@
 namespace bytedance::bolt::exec {
 
 using SpillSortKey = std::pair<column_index_t, CompareFlags>;
+class SpillState;
 
 /// Represents a spill file for writing the serialized spilled data into a disk
 /// file.
@@ -210,6 +211,10 @@ class SpillWriter {
   void cleanupFilesNoThrow() noexcept;
 
  private:
+  friend class SpillState;
+
+  uint64_t write(folly::Range<char* const*> rows, const RowFormatInfo& info);
+
   FOLLY_ALWAYS_INLINE void checkNotFinished() const {
     BOLT_CHECK(!finished_, "SpillWriter has finished");
   }
@@ -521,6 +526,8 @@ class RowBasedSpillReadFile : public SpillReadFileBase {
   uint64_t spillDecompressTimeUs_{0};
 
  private:
+  void finishBatch(std::vector<char*>& rows);
+
   const RowFormatInfo info_;
   BufferPtr rowBuffer_;
   BufferPtr compressedBuffer_;

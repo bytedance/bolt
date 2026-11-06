@@ -398,8 +398,16 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
 
   FLATTEN void
   extractValues(char** groups, int32_t numGroups, VectorPtr* result) override {
+    extractValuesWithOffset(groups, numGroups, result, 0);
+  }
+
+  FLATTEN void extractValuesWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset) override {
     BOLT_CHECK(result);
-    (*result)->resize(numGroups);
+    (*result)->resize(resultOffset + numGroups);
 
     uint64_t* rawNulls = nullptr;
     if ((*result)->mayHaveNulls()) {
@@ -407,17 +415,17 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
       rawNulls = nulls->asMutable<uint64_t>();
     }
 
-    bool exactSize = (numGroups == 1) ? true : false;
+    const bool exactSize = resultOffset == 0 && numGroups == 1;
     for (auto i = 0; i < numGroups; ++i) {
       char* group = groups[i];
       auto accumulator = value<AccumulatorType>(group);
       if (!accumulator->hasValue()) {
-        (*result)->setNull(i, true);
+        (*result)->setNull(resultOffset + i, true);
       } else {
         if (rawNulls) {
-          bits::clearBit(rawNulls, i);
+          bits::clearBit(rawNulls, resultOffset + i);
         }
-        accumulator->read(*result, i, exactSize);
+        accumulator->read(*result, resultOffset + i, exactSize);
       }
     }
   }
@@ -428,6 +436,14 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
       VectorPtr* result) override {
     // partial and final aggregations are the same
     extractValues(groups, numGroups, result);
+  }
+
+  FLATTEN void extractAccumulatorsWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset) override {
+    extractValuesWithOffset(groups, numGroups, result, resultOffset);
   }
 
   void destroy(folly::Range<char**> groups) override {
