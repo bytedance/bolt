@@ -20,6 +20,7 @@
 
 DECLARE_bool(bolt_enable_avx2);
 DECLARE_bool(bolt_enable_bmi2);
+DECLARE_bool(bolt_enable_sve);
 DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 DECLARE_bool(bolt_exception_system_stacktrace_enabled);
 DECLARE_bool(bolt_exception_user_stacktrace_enabled);
