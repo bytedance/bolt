@@ -48,15 +48,19 @@ std::vector<vector_size_t> makeConsecutiveIndices(size_t size) {
 } // namespace
 
 const std::vector<vector_size_t>& DecodedVector::consecutiveIndices() {
-  static std::vector<vector_size_t> consecutiveIndices =
-      makeConsecutiveIndices(10'000);
-  return consecutiveIndices;
+  // DecodedVectors can retain pointers into this table while worker threads
+  // are still running during process shutdown. Avoid static destruction.
+  static const auto* consecutiveIndices =
+      new std::vector<vector_size_t>(makeConsecutiveIndices(10'000));
+  return *consecutiveIndices;
 }
 
 const std::vector<vector_size_t>& DecodedVector::zeroIndices() {
-  static std::vector<vector_size_t> indices(10'000);
-  return indices;
-};
+  // Keep the constant-mapping table alive for the same process lifetime as
+  // consecutiveIndices(); DecodedVector::indices_ points directly into it.
+  static const auto* indices = new std::vector<vector_size_t>(10'000);
+  return *indices;
+}
 
 void DecodedVector::decode(
     const BaseVector& vector,
