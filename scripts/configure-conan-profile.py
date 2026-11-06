@@ -26,7 +26,7 @@
 #   # Show all supported options.
 #   python3 scripts/configure-conan-profile.py --help
 #
-#   # Configure the default profile using an automatically selected toolchain.
+#   # Configure build-profile and host-profile using an automatically selected toolchain.
 #   python3 scripts/configure-conan-profile.py
 #
 # Default toolchain selection:
@@ -91,7 +91,8 @@ from pathlib import Path
 import yaml
 
 
-DEFAULT_PROFILE_NAME = "default"
+DEFAULT_BUILD_PROFILE_NAME = "build-profile"
+DEFAULT_HOST_PROFILE_NAME = "host-profile"
 DEFAULT_LTO = "none"
 CMAKE_VERSION = "3.31.10"
 
@@ -196,8 +197,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         dest="profile_name",
-        default=DEFAULT_PROFILE_NAME,
-        help=f"Conan profile name to replace (default: {DEFAULT_PROFILE_NAME})",
+        help=(
+            "Replace only this named profile; by default, generate build-profile "
+            "and host-profile with PGO applied only to host-profile"
+        ),
     )
     # Use --skip-profile to extend Linux libc settings without requiring installed compilers.
     parser.add_argument(
@@ -1004,7 +1007,7 @@ def _generate_selected_profile(
             **defaults,
             "compiler": compiler_info.family,
             "compiler.version": compiler_info.version,
-            "compiler.cppstd": "gnu20",
+            "compiler.cppstd": "gnu23",
             "compiler.libcxx": compiler_libcxx,
         },
     )
@@ -1036,7 +1039,7 @@ def _generate_selected_profile(
     summary = (
         f"✅ Profile '{profile_name}' configured for "
         f"{compiler_info.family} {compiler_info.version}, compiler.libcxx={compiler_libcxx}, "
-        "compiler.cppstd=gnu20, absolute compiler paths, "
+        "compiler.cppstd=gnu23, absolute compiler paths, "
         f"CMake {CMAKE_VERSION}, "
         f"os.libc={libc if libc is not None else 'auto-detect'}, "
         f"os.libc_version={libc_version if libc_version is not None else 'auto-detect'}"
@@ -1107,20 +1110,30 @@ def main() -> int:
 
     assert compiler_info is not None
     assert libcxx is not None
-    profile_file = conan_home / "profiles" / args.profile_name
-    update_selected_profile(
-        profile_file,
-        args.profile_name,
-        compiler_info,
-        libcxx,
-        args.lto,
-        args.linker,
-        args.extra_cflags,
-        args.extra_link_flags,
-        libc=args.libc,
-        libc_version=args.libc_version,
-        pgo=args.pgo,
+    profile_names = (
+        [args.profile_name]
+        if args.profile_name
+        else [DEFAULT_BUILD_PROFILE_NAME, DEFAULT_HOST_PROFILE_NAME]
     )
+    for profile_name in profile_names:
+        is_build_profile = profile_name == DEFAULT_BUILD_PROFILE_NAME
+        update_selected_profile(
+            conan_home / "profiles" / profile_name,
+            profile_name,
+            compiler_info,
+            libcxx,
+            args.lto,
+            args.linker,
+            remove_pgo_flags(args.extra_cflags)
+            if is_build_profile
+            else args.extra_cflags,
+            remove_pgo_flags(args.extra_link_flags)
+            if is_build_profile
+            else args.extra_link_flags,
+            libc=args.libc,
+            libc_version=args.libc_version,
+            pgo=None if is_build_profile else args.pgo,
+        )
     return 0
 
 
