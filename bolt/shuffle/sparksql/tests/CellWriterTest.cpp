@@ -200,6 +200,94 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
          makeNullableFlatVector<StringView>(views)});
   }
 
+  /// `numBatches` batches of `rows` rows: a random bigint, a string of 20
+  /// to `maxChars` - 1 random letters and, when `nested`, an array of ints
+  /// and a struct, each null now and then. Partition 0 takes `hotPercent`%
+  /// of the rows, the others the rest in turn.
+  ShuffleInput skewedInput(
+      int32_t numPartitions,
+      int numBatches,
+      vector_size_t rows,
+      uint32_t hotPercent,
+      size_t maxChars,
+      bool nested,
+      std::mt19937& rng) {
+    ShuffleInput input;
+    for (int batch = 0; batch < numBatches; ++batch) {
+      auto& pids = input.pids.emplace_back(rows);
+      int32_t cold = 0;
+      for (auto& pid : pids) {
+        pid = rng() % 100 < hotPercent ? 0 : 1 + cold++ % (numPartitions - 1);
+      }
+      std::vector<std::string> strings(rows);
+      for (auto& value : strings) {
+        value.resize(20 + rng() % (maxChars - 20));
+        for (auto& c : value) {
+          c = static_cast<char>('a' + rng() % 26);
+        }
+      }
+      std::vector<std::string> names{"v", "s"};
+      std::vector<VectorPtr> columns{
+          makeFlatVector<int64_t>(
+              rows, [&](auto) { return static_cast<int64_t>(rng()); }),
+          makeFlatVector<std::string>(
+              rows, [&](auto row) { return strings[row]; })};
+      if (nested) {
+        names.insert(names.end(), {"a", "r"});
+        columns.push_back(makeArrayVector<int32_t>(
+            rows,
+            [](auto row) { return row % 4; },
+            [](auto index) { return static_cast<int32_t>(index * 7); },
+            nullEvery(9)));
+        columns.push_back(makeRowVector(
+            {"x", "t"},
+            {makeFlatVector<int32_t>(rows, [](auto row) { return row; }),
+             makeFlatVector<std::string>(
+                 rows, [&](auto row) { return strings[row].substr(0, 9); })},
+            nullEvery(11)));
+      }
+      input.data.push_back(makeRowVector(names, columns));
+    }
+    return input;
+  }
+
+  /// Expects every partition of `written` to read back, in order, the rows
+  /// of `input` that ordinary batches sent it and, as CompositeRowVectors,
+  /// those of the batches `composite` marks.
+  void expectMixedReadsBack(
+      const ShuffleInput& input,
+      const std::vector<bool>& composite,
+      const test::WrittenShuffle& written) {
+    const auto rowType = asRowType(input.data[0]->type());
+    const auto numPartitions = static_cast<int32_t>(written.partitions.size());
+    // Per kind, ordinary first, and partition.
+    std::vector<std::vector<test::RowRef>> expected[2];
+    for (auto& rows : expected) {
+      rows.resize(numPartitions);
+    }
+    for (size_t batch = 0; batch < input.data.size(); ++batch) {
+      for (vector_size_t row = 0; row < input.data[batch]->size(); ++row) {
+        expected[composite[batch]][input.pids[batch][row]].emplace_back(
+            input.data[batch].get(), row);
+      }
+    }
+    const auto codec = test::lz4Codec();
+    for (int32_t pid = 0; pid < numPartitions; ++pid) {
+      const auto reader = test::makeReader(
+          written.partitions[pid], rowType, codec.get(), pool(), 1000, 1 << 20);
+      std::vector<RowVectorPtr> batches[2];
+      while (auto batch = reader->next()) {
+        if (RowVector::isComposite(batch)) {
+          batches[1].push_back(test::compositeRows(rowType, batch, pool()));
+        } else {
+          batches[0].push_back(std::move(batch));
+        }
+      }
+      test::expectPartitionRows(expected[0][pid], batches[0], pid, 1000);
+      test::expectPartitionRows(expected[1][pid], batches[1], pid, 1000);
+    }
+  }
+
   std::string dir_;
   std::string dataFile_;
 };
@@ -1304,6 +1392,143 @@ TEST_F(CellWriterTest, compositeReclaimWritesTheBufferedRows) {
           metrics.totalBytesWritten);
     }
   }
+}
+
+TEST_F(CellWriterTest, sealsWaitInSpillMemoryWithMemoryToSpare) {
+  // A skewed shuffle whose hot partition seals its payload over and over:
+  // flat, nested, and with composite rows between the ordinary ones. With
+  // memory to spare the seals and the composite blocks wait in spill memory
+  // for the merge, and nothing reaches the disk. With spill memory off all
+  // of it does, and with 64 KiB of it, which fills and goes to disk again
+  // and again, all but the last 64 KiB. The data file is the same byte for
+  // byte, and every row reads back.
+  constexpr int32_t kPartitions = 5;
+  constexpr int64_t kTinyBytes = 64 << 10;
+  std::mt19937 rng(67);
+  for (const std::string kind : {"flat", "nested", "composite"}) {
+    SCOPED_TRACE(kind);
+    const auto input =
+        skewedInput(kPartitions, 10, 2048, 70, 60, kind == "nested", rng);
+    std::vector<bool> composite(input.data.size(), false);
+    if (kind == "composite") {
+      composite[3] = composite[4] = composite[7] = true;
+    }
+    const auto batchOf = [&](size_t batch) -> RowVectorPtr {
+      return composite[batch]
+          ? test::makeComposite(input.pids[batch], input.data[batch], pool())
+          : test::withPid(input.pids[batch], input.data[batch], pool());
+    };
+    std::vector<test::WrittenShuffle> written;
+    for (const int64_t spillMemory : {int64_t{-1}, kTinyBytes, int64_t{0}}) {
+      auto options = writerOptions(kPartitions);
+      options.cellOptions.partitionSealBytes = 32 << 10;
+      options.cellOptions.spillMemoryBytes = spillMemory;
+      written.push_back(test::writeShuffle(options, input, pool(), batchOf));
+      EXPECT_GT(written.back().metrics.spillCount, 5);
+    }
+    const auto evicted = [&](size_t i) {
+      return written[i].metrics.totalBytesEvicted;
+    };
+    EXPECT_EQ(evicted(0), 0);
+    EXPECT_GT(evicted(2), 4 * kTinyBytes);
+    EXPECT_LE(evicted(1), evicted(2));
+    EXPECT_GE(evicted(1), evicted(2) - kTinyBytes);
+    EXPECT_EQ(written[0].partitions, written[2].partitions);
+    EXPECT_EQ(written[1].partitions, written[2].partitions);
+    expectMixedReadsBack(input, composite, written[0]);
+  }
+}
+
+TEST_F(CellWriterTest, reclaimWritesSpillMemoryOutFirst) {
+  // Seals with memory to spare wait in spill memory. A reclaim writes it to
+  // disk first, and asked for little takes nothing else: the pool's usage
+  // drops by what it freed, at least what reached the disk. Asked for more
+  // than the idle chunks and the spill memory hold, it still spills
+  // partitions, straight to disk. Every row reads back.
+  constexpr int32_t kPartitions = 6;
+  std::mt19937 rng(71);
+  const auto input = skewedInput(kPartitions, 12, 4096, 50, 600, false, rng);
+  // The writer's pool shows its memory alone.
+  auto root = memory::memoryManager()->addRootPool("cellReclaimSpillMemory");
+  auto leaf = root->addLeafChild("writer");
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.partitionSealBytes = 2 << 20;
+  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+  const auto reclaim = [&](int64_t size) {
+    int64_t freed = 0;
+    EXPECT_TRUE(writer.reclaimFixedSize(size, &freed).ok());
+    EXPECT_GE(freed, size);
+    return freed;
+  };
+  const auto written = test::writeShuffle(
+      writer, options, input, pool(), nullptr, [&](size_t batch) {
+        if (batch != 9) {
+          return;
+        }
+        ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
+        const int64_t used = leaf->usedBytes();
+        const int64_t freed = reclaim(1);
+        const int64_t evicted = writer.metrics().totalBytesEvicted;
+        EXPECT_GT(evicted, 0);
+        EXPECT_GE(freed, evicted);
+        EXPECT_EQ(used - leaf->usedBytes(), freed);
+        // The spill memory is empty now: what reaches the disk is cells.
+        reclaim(leaf->usedBytes() * 3 / 4);
+        EXPECT_GT(writer.metrics().totalBytesEvicted, evicted);
+      });
+  test::expectReadsBack(input, written, arrow::Compression::LZ4_FRAME, pool());
+}
+
+TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
+  // A hot partition seals into spill memory while the others keep growing,
+  // so the cells take chunk after chunk. cellMemorySpillBytes at the peak of
+  // a writer without spill memory counts the spill memory too: it trips at
+  // a growth, and writing the spill memory out makes the room. No cell
+  // spills, and the data file is that writer's, byte for byte. In a root
+  // pool too small for the cells and the spill memory together, the
+  // reservations fail instead, and every row still reads back.
+  constexpr int32_t kPartitions = 64;
+  std::mt19937 rng(73);
+  const auto input = skewedInput(kPartitions, 30, 4096, 50, 400, false, rng);
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.partitionSealBytes = 1 << 20;
+  test::WrittenShuffle reference;
+  int64_t peak = 0;
+  {
+    auto root = memory::memoryManager()->addRootPool("cellGrowthReference");
+    auto leaf = root->addLeafChild("writer");
+    options.cellOptions.spillMemoryBytes = 0;
+    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+    reference = test::writeShuffle(writer, options, input, pool());
+    peak = leaf->peakBytes();
+  }
+  options.cellOptions.spillMemoryBytes = -1;
+  options.cellOptions.cellMemorySpillBytes = peak;
+  const auto written = test::writeShuffle(options, input, pool());
+  EXPECT_GT(written.metrics.totalBytesEvicted, 0);
+  EXPECT_LE(
+      written.metrics.totalBytesEvicted, reference.metrics.totalBytesEvicted);
+  EXPECT_EQ(written.partitions, reference.partitions);
+  test::expectReadsBack(input, written, arrow::Compression::LZ4_FRAME, pool());
+
+  // 24 MiB, raised after the last batch so that stop() has room.
+  options.cellOptions.cellMemorySpillBytes = 0;
+  auto root =
+      memory::memoryManager()->addRootPool("cellGrowthTightPool", 24 << 20);
+  auto leaf = root->addLeafChild("writer");
+  {
+    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+    const auto tight = test::writeShuffle(
+        writer, options, input, pool(), nullptr, [&](size_t batch) {
+          if (batch + 1 == input.data.size()) {
+            static_cast<memory::MemoryPoolImpl*>(root.get())
+                ->testingSetCapacity(1LL << 30);
+          }
+        });
+    EXPECT_GT(tight.metrics.totalBytesEvicted, 0);
+    test::expectReadsBack(input, tight, arrow::Compression::LZ4_FRAME, pool());
+  }
+  EXPECT_EQ(leaf->usedBytes(), 0);
 }
 
 TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {

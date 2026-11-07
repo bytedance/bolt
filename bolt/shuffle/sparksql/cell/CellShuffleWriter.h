@@ -48,6 +48,13 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// spills everything only when those fall short. Accounting is the
 /// allocator's exact chunk/cell counters.
 ///
+/// Locally, what spills - runs and sealed payloads, the composite blocks
+/// too - stays in a SpillMemory of the writer's pool while there is no
+/// memory pressure, and the merge copies it from there. Every pressure
+/// event - a reclaim, a chunk reservation that fails or passes the
+/// threshold, the seal a reclaim asks for - writes that memory to disk
+/// first, then does what it did before, straight to disk.
+///
 /// On Celeborn a window can only be pushed whole, so every one of those
 /// spills becomes a seal at the next batch boundary instead: batches are
 /// sliced small, each slice is admitted against the pool first, and a
@@ -76,6 +83,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   PartitionBlockOutput& output() override {
     return *blocks_;
   }
+  SpillMemory* spillMemory() override {
+    return spillMemory_.get();
+  }
 
  private:
   /// Why a whole window was sealed.
@@ -91,15 +101,18 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// What memory pressure made the writer do, counted per event - never per
   /// row - and logged once at stop.
   struct PressureStats {
-    /// Reclaims, and those answered with idle chunks alone, or deferred to
-    /// the next batch boundary (remote, mid-batch).
+    /// Reclaims, and those answered without a run - by idle chunks and the
+    /// spill memory - or deferred to the next batch boundary (remote,
+    /// mid-batch).
     uint64_t reclaims{0};
     uint64_t idleReclaims{0};
     uint64_t deferredReclaims{0};
     uint64_t requestedBytes{0};
     uint64_t freedBytes{0};
-    /// Chunk bytes freed by each step of a reclaim.
+    /// Bytes freed by each step of a reclaim: idle chunks, the spill memory
+    /// written out, then the chunks runs and compaction empty.
     uint64_t freedIdle{0};
+    uint64_t freedSpillMemory{0};
     uint64_t freedByPartialRun{0};
     uint64_t freedByCompaction{0};
     uint64_t freedByRun{0};
@@ -110,6 +123,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     uint64_t reclaimPartialRunBytes{0};
     uint64_t growthPartialRuns{0};
     uint64_t growthPartialRunBytes{0};
+    /// Chunk growths that writing the spill memory out made room for.
+    uint64_t growthFlushes{0};
     /// Cell compactions and the chunk bytes they emptied.
     uint64_t compactions{0};
     uint64_t compactedBytes{0};
@@ -139,10 +154,11 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       std::span<const DecodedVector> decoded,
       std::span<const NullClass> nullClass);
   /// The allocator's ReserveChunkFn: reserves a chunk's memory within
-  /// cellMemorySpillBytes. Locally, when it cannot, it spills the largest
-  /// partitions until half the cell data is covered, and the growth then
-  /// takes their recycled cells. Remotely, a window is released only whole
-  /// at a batch boundary, so it requests that and lets this growth proceed.
+  /// cellMemorySpillBytes. Locally, when it cannot, it writes the spill
+  /// memory out and tries once more; then it spills the largest partitions
+  /// until half the cell data is covered, and the growth takes their
+  /// recycled cells. Remotely, a window is released only whole at a batch
+  /// boundary, so it requests that and lets this growth proceed.
   void reserveChunk();
   void sealWindow(SealReason reason);
   /// Seals the whole window - on a remote shuffle, pushes it - and returns
@@ -172,6 +188,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellNestedLayout> nested_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
+  /// Locally, where both outputs' spill files keep their newest bytes;
+  /// declared before them, as it must outlive them. Null on Celeborn.
+  std::unique_ptr<SpillMemory> spillMemory_;
   /// The block output that serves the composite rows: locally a spill of
   /// its own, merged by output_ after the Cell payloads; on Celeborn also
   /// the push channel of those payloads, and finishing it ends the attempt

@@ -60,7 +60,8 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `cellMemorySpillBytes` | `0` (off) | Chunk-memory spill threshold. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
+| `cellMemorySpillBytes` | `0` (off) | Spill threshold on the chunk memory plus the spill memory. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
+| `spillMemoryBytes` | `-1` | Local only: the most spill data - runs, sealed payloads, composite blocks - kept in memory until memory pressure (see [Spill memory](#spill-memory-local)). `-1` is half the writer's memory limit, or 512 MiB with none; `0` is off. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
 | `enableStringDictionary` | `true` | Probe the first batch to enable dictionary form per string column. |
@@ -144,7 +145,8 @@ Step by step:
    staging line of its (partition, stream), and a full line is flushed as an
    Encoding Block or as raw bytes into **DataCells** chains of
    **ChunkAllocator** cells. **NullCells** keeps the null records.
-5. **LocalCellOutput** writes runs and sealed null bodies to a spill file and,
+5. **LocalCellOutput** writes runs and sealed null bodies to a spill file -
+   whose newest bytes stay in spill memory until memory runs short - and,
    in `finalize`, merges them partition by partition into the data file,
    writing the window still in memory straight from the cells.
    **RssCellOutput** pushes one complete payload per partition at each seal.
@@ -200,11 +202,12 @@ budget far above the real one would waste much of the real memory. The
 
 - **`reserveChunk`** is the allocator's callback, called only when the
   freelist is empty and a new chunk is needed. Locally, if the chunk passes
-  `cellMemorySpillBytes` or `maybeReserve` fails, it spills the largest
-  partitions until half of the used cell bytes are covered; the growth then
-  reuses their recycled cells. On Celeborn it only sets a seal request and
-  lets the growth proceed. While the output is reading cells, nothing may
-  spill, so growth there proceeds unreserved.
+  `cellMemorySpillBytes` or `maybeReserve` fails, it writes the spill memory
+  out and tries once more; only if that fails too does it spill the largest
+  partitions until half of the used cell bytes are covered, and the growth
+  then reuses their recycled cells. On Celeborn it only sets a seal request
+  and lets the growth proceed. While the output is reading cells, nothing
+  may spill, so growth there proceeds unreserved.
 - **`reserveSlice`** (Celeborn only) runs before each slice of a batch: it
   reserves the slice's estimated bytes plus one chunk, plus twice the largest
   partition's bytes for the push. If that fails, or passes
@@ -218,13 +221,48 @@ spill fired from inside a growth sees only complete earlier appends.
 Locally, a spill is a run of some partitions: their cells are compressed into
 the spill file in their final wire form and recycled, while their payloads
 stay open. A task that never spills writes the data file straight from the
-cells and creates no temporary file.
+cells and creates no temporary file, and neither does one whose spills all
+fit in spill memory.
 
 Celeborn may reorder a mapper's pushes and interleave other mappers' pushes,
 so every pushed block must be one complete payload. A window is therefore
 only pushed whole, at a batch boundary; there are no runs. Batches are sliced
 to 8 MiB so a boundary comes soon, and a reclaim arriving mid-batch or
 mid-seal is deferred to the next boundary.
+
+### Spill memory (local)
+
+What a local writer spills is copied into the data file by the merge
+anyway, so while memory is plentiful it waits in memory instead of on disk:
+the spill file keeps its newest bytes in 4 MiB pages of the writer's pool,
+accounted to it, and the merge copies them from there. A skewed task whose
+hot partitions seal payload after payload then needs no disk write and read
+for them. The pages of the Cell output's spill file and of the composite
+blocks' share one cap, `spillMemoryBytes`: only one kind holds data at a
+time, so the kind being written gets whatever the other does not hold. By
+default the cap is half the writer's memory limit, as the cell size takes
+it, or 512 MiB with none.
+
+What decides is memory pressure, not whether the bytes are a seal or a run.
+Every pressure event writes the spill memory out first, in order, and then
+does what it would have done, straight to disk:
+
+- a reclaim, which counts the pages freed towards its request;
+- a chunk reservation that fails or passes `cellMemorySpillBytes`, which
+  then tries once more before it spills;
+- the window seal a reclaim asks for;
+- composite rows short of room for the next batch, and a reclaim while
+  composite rows are held.
+
+Without pressure, a file past the cap writes its pages out and starts them
+afresh, and a page the pool cannot reserve counts as pressure for the rest
+of that run. A file's bytes in memory are always its last: it writes them
+out before it writes anything else to disk. They stay put while the file
+is being appended to, or merged: a reclaim reached from inside a page's
+reservation, or during the merge, leaves them. Mode switches and the final
+merge are not pressure. `totalBytesEvicted` counts the bytes that reached
+the disk; the `CellShuffleWriter pressure` log line ends with the spill
+memory's peak and the bytes it flushed and appended to disk directly.
 
 ### Reclaim policy (local)
 
@@ -233,17 +271,18 @@ is met:
 
 1. Return idle chunks (`shrink()`), the shredder's scratch and reservation
    slack. This is safe even while the output reads cells.
-2. Skip the rest if idle memory covered the request or the writer holds
-   fewer than two chunks.
-3. Spill the largest partitions until the request is covered, then shrink.
-4. Compact: move live cells out of the emptiest chunks and shrink again.
+2. Write the spill memory out, unless the output is reading cells.
+3. Skip the rest if that covered the request or the writer holds fewer
+   than two chunks.
+4. Spill the largest partitions until the request is covered, then shrink.
+5. Compact: move live cells out of the emptiest chunks and shrink again.
    After a partial run, the remaining cells are spread over every chunk, so
    no chunk would be free without this step.
-5. Only then, spill every partition (a full run).
+6. Only then, spill every partition (a full run).
 
 It then releases the pool reservation and requests a window seal if the
 moved null cells exceed a quarter of `nullMemLimitBytes`. On Celeborn, a
-reclaim pushes the whole window instead of steps 3 to 5. All of this is
+reclaim pushes the whole window instead of steps 2 to 6. All of this is
 counted in the `CellShuffleWriter pressure` log line.
 
 ### Why null cells are not freed by spills

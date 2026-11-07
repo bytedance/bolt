@@ -732,12 +732,18 @@ TEST_F(CellNestedTest, spillsAndSeals) {
       /// open, locally and on an RSS client.
       bool partial{false};
     };
+    // The seals go through the spill file on disk: spill memory would keep
+    // them in memory, there being no memory pressure.
     const std::vector<Limit> limits = {
         {"partition seals",
-         [](CellShuffleOptions& cell, bool) { cell.partitionSealBytes = 1; }},
+         [](CellShuffleOptions& cell, bool) {
+           cell.partitionSealBytes = 1;
+           cell.spillMemoryBytes = 0;
+         }},
         {"seals of partition 0",
          [](CellShuffleOptions& cell, bool rss) {
            cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
+           cell.spillMemoryBytes = 0;
          },
          true},
         // Every limit at once: locally growth spills and a null seal per
@@ -1413,6 +1419,8 @@ TEST_F(CellNestedTest, singleAndRoundRobinRoundTrips) {
             cell.cellMemorySpillBytes = 4 << 20;
             cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
             cell.nullMemLimitBytes = 4 << 10;
+            // The seals through the spill file on disk, not spill memory.
+            cell.spillMemoryBytes = 0;
           }
           const auto written = writeWithoutPid(
               writer,

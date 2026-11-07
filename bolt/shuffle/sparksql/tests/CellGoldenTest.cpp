@@ -567,6 +567,9 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
         scenario.lz4 ? arrow::Compression::LZ4_FRAME
                      : arrow::Compression::UNCOMPRESSED,
         scenario.rss);
+    // Seals and spills through the spill file on disk, as recorded: with
+    // memory to spare, spill memory would keep the seals off the disk.
+    options.cellOptions.spillMemoryBytes = 0;
     if (scenario.tune) {
       scenario.tune(options.cellOptions);
     }
