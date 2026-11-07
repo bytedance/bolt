@@ -48,11 +48,24 @@ uint64_t spillPageBytes(int64_t capBytes) {
 
 } // namespace
 
-SpillMemory::SpillMemory(memory::MemoryPool* pool, int64_t capBytes)
+SpillMemory::SpillMemory(
+    memory::MemoryPool* pool,
+    int64_t capBytes,
+    int64_t totalCapBytes)
     : pool_(pool),
       capBytes_(std::max<int64_t>(capBytes, 0)),
+      totalCapBytes_(std::max<int64_t>(totalCapBytes, 0)),
       pageBytes_(spillPageBytes(capBytes)),
       pageShift_(pageBytes_ == 0 ? 0 : folly::findLastSet(pageBytes_) - 1) {}
+
+bool SpillMemory::fits(int64_t bytes) const {
+  // usedBytes(), not reservedBytes(): the reservation also holds the
+  // pool's rounding and the slack each chunk's or page's maybeReserve()
+  // takes, in steps of up to 8 MiB that no page lines up with, until the
+  // next release().
+  return heldBytes_ + bytes <= capBytes_ &&
+      pool_->usedBytes() + bytes <= totalCapBytes_;
+}
 
 bool SpillMemory::fundPage(memory::ContiguousAllocation& page) {
   if (!pool_->maybeReserve(pageBytes_)) {
@@ -169,7 +182,7 @@ void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
 
 bool ShuffleSpillFile::appendToMemory(const char* data, size_t bytes) {
   auto& memory = *memory_;
-  if (memory.pressureDepth_ > 0 || unfunded_) {
+  if (memory.pressureDepth_ > 0 || unfunded_ || end_ < diskUntil_) {
     return false;
   }
   const uint64_t pageBytes = memory.pageBytes_;
@@ -178,18 +191,23 @@ bool ShuffleSpillFile::appendToMemory(const char* data, size_t bytes) {
     const uint64_t room = pages_.size() * pageBytes - memoryBytes();
     return bytes <= room ? 0 : (bytes - room + pageBytes - 1) / pageBytes;
   };
+  // Only new pages ask the caps, so the pool is read once per page.
   const auto fits = [&](uint64_t newPages) {
-    return memory.heldBytes_ + static_cast<int64_t>(newPages * pageBytes) <=
-        memory.capBytes_;
+    return newPages == 0 ||
+        memory.fits(static_cast<int64_t>(newPages * pageBytes));
   };
   uint64_t newPages = newPagesFor();
   if (!fits(newPages)) {
-    // Past the cap: the bytes in memory go to disk, and this append starts
-    // the memory afresh - unless it alone, or with what the other files
-    // hold, passes the cap too.
+    // Past a cap - the pages', or the pool's, which the cells fill too -
+    // is no memory pressure: the bytes in memory go to disk, and this
+    // append starts the memory afresh, unless it alone, or with what the
+    // other files and the rest of the pool hold, passes a cap too. Then it
+    // goes to disk, and so do the appends of the next page's bytes, before
+    // one asks for a page again.
     writeOutMemory();
     newPages = newPagesFor();
     if (!fits(newPages)) {
+      diskUntil_ = end_ + pageBytes;
       return false;
     }
   }

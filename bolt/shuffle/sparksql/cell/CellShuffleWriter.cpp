@@ -81,16 +81,25 @@ MemoryLimit memoryLimit(const memory::MemoryPool& pool) {
   return limit;
 }
 
-/// CellShuffleOptions::spillMemoryBytes resolved: -1 is half the memory
-/// limit, or of the budget assumed without one.
-int64_t spillMemoryCap(
+/// The caps of the spill memory: of its pages, and of the writer's pool
+/// once it takes one.
+struct SpillMemoryCaps {
+  int64_t capBytes;
+  int64_t totalCapBytes;
+};
+
+/// CellShuffleOptions::spillMemoryBytes resolved. Whatever it says, a page
+/// may take the writer's pool - cells and pages together - to half the
+/// memory limit at most, or half the budget assumed without one: the pages'
+/// cap alone would let them take the whole limit beside the cells. -1 caps
+/// the pages at that half as well.
+SpillMemoryCaps spillMemoryCaps(
     const CellShuffleOptions& options,
     const memory::MemoryPool& pool) {
-  if (options.spillMemoryBytes >= 0) {
-    return options.spillMemoryBytes;
-  }
   const int64_t limit = memoryLimit(pool).bytes;
-  return (limit > 0 ? limit : kUnlimitedBudgetBytes) / 2;
+  const int64_t half = (limit > 0 ? limit : kUnlimitedBudgetBytes) / 2;
+  return {
+      options.spillMemoryBytes >= 0 ? options.spillMemoryBytes : half, half};
 }
 
 } // namespace
@@ -121,9 +130,12 @@ CellShuffleWriter::CellShuffleWriter(
     // Two outputs with a spill file each, merged into the one data file:
     // the Cell output, and `blocks`, which serves the composite rows. One
     // cap of spill memory covers both: only one kind holds data at a time,
-    // so the kind written now gets what the other does not hold.
+    // so the kind written now gets what the other does not hold. Either
+    // takes a page only while the writer's whole pool stays within half its
+    // memory limit.
+    const auto caps = spillMemoryCaps(options_.cellOptions, *boltPool_);
     spillMemory_ = std::make_unique<SpillMemory>(
-        boltPool_, spillMemoryCap(options_.cellOptions, *boltPool_));
+        boltPool_, caps.capBytes, caps.totalCapBytes);
     auto blocks = std::make_unique<LocalBlockOutput>(
         options_.partitionWriterOptions, spillMemory_.get());
     output_ = std::make_unique<LocalCellOutput>(
@@ -210,6 +222,12 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   decoded_.resize(layout_.numColumns());
 
   initialized_ = true;
+  const std::string spillMemory = spillMemory_ != nullptr
+      ? fmt::format(
+            "{} (writer total <= {})",
+            spillMemory_->capBytes(),
+            spillMemory_->totalCapBytes())
+      : "0";
   LOG(INFO) << "CellShuffleWriter init: layout="
             << (nested_ != nullptr                  ? "native nested"
                     : adapter_->hasComplexColumns() ? "adapter"
@@ -222,8 +240,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
                                            : "none")
             << ", limit=" << limit << " (" << memory.source
             << "), budget=" << budget << ", perStream=" << perStream
-            << ", cellBytes=" << cellBytes << ", spillMemory="
-            << (spillMemory_ != nullptr ? spillMemory_->capBytes() : 0);
+            << ", cellBytes=" << cellBytes << ", spillMemory=" << spillMemory;
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(

@@ -36,17 +36,25 @@ class ShuffleSpillFile;
 /// Memory in which the spill files of one writer keep their newest bytes
 /// until memory runs short, instead of on disk: a spill that the merge
 /// copies into the data file anyway then costs no disk write and read.
-/// Pages of the writer's pool, accounted to it, at most capBytes() of them
-/// over every file together. A memory pressure event is a Pressure: it
-/// writes every file's pages out first, and keeps appends on disk while it
-/// lives. A file's bytes in memory always end it, as it writes its pages
-/// out before it writes anything else to disk.
+/// Pages of the writer's pool, accounted to it: at most capBytes() of them
+/// over every file together, each taken only while the pool holds at most
+/// totalCapBytes() with it, the writer's cells and everything else it holds
+/// there included. A page past either cap is no memory pressure: the file
+/// writes its pages out and starts them afresh or, when even fresh ones
+/// pass a cap, appends a page's bytes to disk before it asks again. A
+/// memory pressure event is a Pressure: it writes every file's pages out
+/// first, and keeps appends on disk while it lives. A file's bytes in
+/// memory always end it, as it writes its pages out before it writes
+/// anything else to disk.
 class SpillMemory {
  public:
   /// Pages of up to 4 MiB from `pool`, which must outlive this object, as
   /// must every file attached to it. A cap below one machine page keeps
   /// nothing in memory.
-  SpillMemory(memory::MemoryPool* pool, int64_t capBytes);
+  SpillMemory(
+      memory::MemoryPool* pool,
+      int64_t capBytes,
+      int64_t totalCapBytes);
 
   SpillMemory(const SpillMemory&) = delete;
   SpillMemory& operator=(const SpillMemory&) = delete;
@@ -73,8 +81,16 @@ class SpillMemory {
     int64_t freedBytes_{0};
   };
 
+  /// The most page bytes the files hold together.
   int64_t capBytes() const {
     return capBytes_;
+  }
+
+  /// The most the pool may hold, a new page included, for that page to be
+  /// taken. The pool's usedBytes() counts every allocation from it at its
+  /// size, a page as one page more; read once per page.
+  int64_t totalCapBytes() const {
+    return totalCapBytes_;
   }
 
   /// Page bytes the files hold now, and the most they held.
@@ -93,8 +109,8 @@ class SpillMemory {
     return flushes_;
   }
 
-  /// Bytes the files appended to disk directly: under pressure, past the
-  /// cap, or for want of a page.
+  /// Bytes the files appended to disk directly: under pressure, past a cap,
+  /// or for want of a page.
   uint64_t directBytes() const {
     return directBytes_;
   }
@@ -102,12 +118,16 @@ class SpillMemory {
  private:
   friend class ShuffleSpillFile;
 
+  /// Whether `bytes` more of pages stay within both caps.
+  bool fits(int64_t bytes) const;
+
   /// A page for a file, reserved through the pool first as a cell chunk is;
   /// false when the reservation fails.
   bool fundPage(memory::ContiguousAllocation& page);
 
   memory::MemoryPool* const pool_;
   const int64_t capBytes_;
+  const int64_t totalCapBytes_;
   /// A power of two; 0 keeps nothing in memory.
   const uint64_t pageBytes_;
   const uint32_t pageShift_;
@@ -218,8 +238,8 @@ class ShuffleSpillFile {
   /// Appends to disk, behind every byte: none may be in memory.
   void appendToDisk(const void* data, size_t bytes);
 
-  /// Appends to the pages, writing them out first when the append would pass
-  /// the cap; false when it must go to disk instead.
+  /// Appends to the pages, writing them out first when the pages it needs
+  /// would pass a cap; false when it must go to disk instead.
   bool appendToMemory(const char* data, size_t bytes);
 
   /// flushMemory() of an append, which may.
@@ -251,6 +271,10 @@ class ShuffleSpillFile {
   /// A page could not be funded: memory is short, so appends go to disk
   /// until the next flush() ends the run they belong to.
   bool unfunded_{false};
+  /// The caps left no room even for fresh pages: appends go to disk until
+  /// the file reaches this offset, a page's bytes on, before they ask for a
+  /// page again.
+  uint64_t diskUntil_{0};
   uint64_t writeTimeNs_{0};
   /// patch()es not applied yet: offset and bytes.
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;

@@ -97,15 +97,18 @@ struct CellShuffleOptions {
   // Spill threshold on the chunk memory plus the spill data kept in memory
   // (spillMemoryBytes); 0 disables it. Not a hard memory cap.
   int64_t cellMemorySpillBytes = 0;
-  // Local shuffle: the most spill data - runs and sealed payloads on their
-  // way to the merge, the composite rows' blocks included - kept in memory
-  // instead of the spill files, in pages of the writer's pool. Memory
-  // pressure writes it to disk first: a reclaim, a chunk reservation that
+  // Local shuffle: spill data - runs and sealed payloads on their way to
+  // the merge, the composite rows' blocks included - kept in memory instead
+  // of the spill files, in pages of the writer's pool. A page is taken only
+  // while everything the writer's pool holds, cells and pages included,
+  // stays within half the writer's memory limit - the tighter of the pool's
+  // cap and the task's execution memory - or 512 MiB with neither; past
+  // that, as past this cap, the pages go to disk and start afresh. Memory
+  // pressure writes them to disk first: a reclaim, a chunk reservation that
   // fails or passes cellMemorySpillBytes, the seal a reclaim asks for, or
   // composite rows short of room; the spill such an event makes then goes
-  // straight to disk. -1: half the writer's memory limit - the tighter of
-  // the pool's cap and the task's execution memory - or 512 MiB with
-  // neither. 0: off, every spill byte goes to disk.
+  // straight to disk. -1: what that half leaves. > 0: at most this many
+  // bytes too. 0: off, every spill byte goes to disk.
   int64_t spillMemoryBytes = -1;
   // Seal a partition's payload at a batch boundary once it exceeds this
   // size; other partitions stay open.

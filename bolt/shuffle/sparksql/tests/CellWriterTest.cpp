@@ -1488,8 +1488,10 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   // a writer without spill memory counts the spill memory too: it trips at
   // a growth, and writing the spill memory out makes the room. No cell
   // spills, and the data file is that writer's, byte for byte. In a root
-  // pool too small for the cells and the spill memory together, the
-  // reservations fail instead, and every row still reads back.
+  // pool that another consumer, as a task's other operators do, leaves too
+  // small for the cells and the spill memory together - the spill memory
+  // keeps the writer itself within half its limit - the reservations fail
+  // instead, and every row still reads back.
   constexpr int32_t kPartitions = 64;
   std::mt19937 rng(73);
   const auto input = skewedInput(kPartitions, 30, 4096, 50, 400, false, rng);
@@ -1514,11 +1516,15 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   EXPECT_EQ(written.partitions, reference.partitions);
   test::expectReadsBack(input, written, arrow::Compression::LZ4_FRAME, pool());
 
-  // 24 MiB, raised after the last batch so that stop() has room.
+  // 24 MiB, a third of it held by another consumer, raised after the last
+  // batch so that stop() has room.
   options.cellOptions.cellMemorySpillBytes = 0;
   auto root =
       memory::memoryManager()->addRootPool("cellGrowthTightPool", 24 << 20);
   auto leaf = root->addLeafChild("writer");
+  auto other = root->addLeafChild("other");
+  constexpr int64_t kOtherBytes = 8 << 20;
+  void* const held = other->allocate(kOtherBytes);
   {
     CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
     const auto tight = test::writeShuffle(
@@ -1532,6 +1538,69 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
     test::expectReadsBack(input, tight, arrow::Compression::LZ4_FRAME, pool());
   }
   EXPECT_EQ(leaf->usedBytes(), 0);
+  other->free(held, kOtherBytes);
+}
+
+TEST_F(CellWriterTest, spillMemoryKeepsTheWriterWithinHalfItsLimit) {
+  // Seals with memory to spare wait in spill memory only while the whole
+  // writer - its cells and the pages together - stays within half its
+  // memory limit: a page past that, like one past the cap, writes the spill
+  // memory out and starts it afresh. Under a 64 MiB pool, every 16 MB
+  // batch seals: each partition past partitionSealBytes, or the window for
+  // its nulls. By default, and with a cap of the spill memory's own above
+  // that half, the writer peaks within half the pool, a page and a chunk
+  // above it at most; part of the seals still waits in memory, and every
+  // row reads back.
+  constexpr int32_t kPartitions = 8;
+  constexpr vector_size_t kRows = 4096;
+  constexpr int64_t kLimit = 64 << 20;
+  constexpr int64_t kPageAndChunk = 8 << 20;
+  std::mt19937 rng(83);
+  ShuffleInput input;
+  for (int batch = 0; batch < 4; ++batch) {
+    std::vector<std::string> strings(kRows);
+    for (auto& value : strings) {
+      value.assign(4000, static_cast<char>('a' + rng() % 26));
+    }
+    input.data.push_back(makeRowVector(
+        {"v", "s"},
+        {makeFlatVector<int64_t>(
+             kRows,
+             [&](auto) { return static_cast<int64_t>(rng()); },
+             nullEvery(7)),
+         makeFlatVector<std::string>(
+             kRows, [&](auto row) { return strings[row]; })}));
+    input.pids.push_back(roundRobinPids(kRows, kPartitions));
+  }
+  for (const bool nullSeals : {false, true}) {
+    for (const int64_t spillMemory : {int64_t{-1}, int64_t{48} << 20}) {
+      SCOPED_TRACE(fmt::format(
+          "{} seals, spillMemoryBytes {}",
+          nullSeals ? "null" : "partition",
+          spillMemory));
+      auto root = memory::memoryManager()->addRootPool(
+          fmt::format("cellHalfLimit{}{}", nullSeals, spillMemory), kLimit);
+      auto leaf = root->addLeafChild("writer");
+      auto options =
+          writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+      options.cellOptions.spillMemoryBytes = spillMemory;
+      if (nullSeals) {
+        options.cellOptions.nullMemLimitBytes = 1;
+      } else {
+        options.cellOptions.partitionSealBytes = 1 << 20;
+      }
+      CellShuffleWriter writer(
+          options, leaf.get(), arrow::default_memory_pool());
+      const auto written = test::writeShuffle(writer, options, input, pool());
+      const auto& metrics = written.metrics;
+      EXPECT_EQ(metrics.spillCount, static_cast<int64_t>(input.data.size()));
+      EXPECT_LE(metrics.peakBytes, kLimit / 2 + kPageAndChunk);
+      EXPECT_GT(metrics.totalBytesEvicted, 0);
+      EXPECT_LT(metrics.totalBytesEvicted, metrics.totalBytesWritten);
+      test::expectReadsBack(
+          input, written, arrow::Compression::UNCOMPRESSED, pool());
+    }
+  }
 }
 
 TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {

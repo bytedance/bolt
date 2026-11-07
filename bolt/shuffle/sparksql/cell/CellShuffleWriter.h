@@ -50,8 +50,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 ///
 /// Locally, what spills - runs and sealed payloads, the composite blocks
 /// too - stays in a SpillMemory of the writer's pool while there is no
-/// memory pressure, and the merge copies it from there. Every pressure
-/// event - a reclaim, a chunk reservation that fails or passes the
+/// memory pressure and the whole writer, cells and pages together, holds at
+/// most half its memory limit, and the merge copies it from there. Every
+/// pressure event - a reclaim, a chunk reservation that fails or passes the
 /// threshold, the seal a reclaim asks for - writes that memory to disk
 /// first, then does what it did before, straight to disk.
 ///

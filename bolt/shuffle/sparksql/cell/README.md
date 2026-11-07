@@ -61,7 +61,7 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `cellMemorySpillBytes` | `0` (off) | Spill threshold on the chunk memory plus the spill memory. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
-| `spillMemoryBytes` | `-1` | Local only: the most spill data - runs, sealed payloads, composite blocks - kept in memory until memory pressure (see [Spill memory](#spill-memory-local)). `-1` is half the writer's memory limit, or 512 MiB with none; `0` is off. |
+| `spillMemoryBytes` | `-1` | Local only: spill data - runs, sealed payloads, composite blocks - kept in memory until memory pressure, while the whole writer stays within half its memory limit, or 512 MiB with none (see [Spill memory](#spill-memory-local)). `-1` keeps what that half leaves; a positive value caps the spill data at that many bytes as well; `0` is off. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
 | `enableStringDictionary` | `true` | Probe the first batch to enable dictionary form per string column. |
@@ -240,9 +240,22 @@ accounted to it, and the merge copies them from there. A skewed task whose
 hot partitions seal payload after payload then needs no disk write and read
 for them. The pages of the Cell output's spill file and of the composite
 blocks' share one cap, `spillMemoryBytes`: only one kind holds data at a
-time, so the kind being written gets whatever the other does not hold. By
-default the cap is half the writer's memory limit, as the cell size takes
-it, or 512 MiB with none.
+time, so the kind being written gets whatever the other does not hold.
+
+Whatever the cap, a page is taken only while the writer's whole pool, the
+page included, holds at most half the writer's memory limit, as the cell
+size takes it, or 512 MiB with none. The whole pool is the cells' chunks,
+the null state, both outputs' pages, the staging lines and scratch: a cap
+on the pages alone would let cells and pages together reach the whole
+limit and, under Spark, take the task's execution memory from its other
+operators, which then spill. The check reads the pool's `usedBytes()`,
+once per new page. It counts every allocation at its size, so a page is
+one page more, and leaves out the reservation slack, which moves in steps
+of up to 8 MiB of its own and goes back at the next `release()`. By
+default (`-1`) that half is all that bounds the pages; a positive
+`spillMemoryBytes` caps them at that many bytes as well. The
+`CellShuffleWriter init` log line shows both caps:
+`spillMemory=<cap> (writer total <= <half>)`.
 
 What decides is memory pressure, not whether the bytes are a seal or a run.
 Every pressure event writes the spill memory out first, in order, and then
@@ -255,11 +268,13 @@ does what it would have done, straight to disk:
 - composite rows short of room for the next batch, and a reclaim while
   composite rows are held.
 
-Without pressure, a file past the cap writes its pages out and starts them
-afresh, and a page the pool cannot reserve counts as pressure for the rest
-of that run. A file's bytes in memory are always its last: it writes them
-out before it writes anything else to disk. They stay put while the file
-is being appended to, or merged: a reclaim reached from inside a page's
+A page past the cap or past half the limit is no memory pressure: the
+file writes its pages out and starts them afresh, or, if even fresh pages
+do not fit, appends to disk and asks again a page's bytes later. A page
+the pool cannot reserve counts as pressure for the rest of that run. A
+file's bytes in memory are always its last: it writes them out before it
+writes anything else to disk. They stay put while the file is being
+appended to, or merged: a reclaim reached from inside a page's
 reservation, or during the merge, leaves them. Mode switches and the final
 merge are not pressure. `totalBytesEvicted` counts the bytes that reached
 the disk; the `CellShuffleWriter pressure` log line ends with the spill
