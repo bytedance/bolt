@@ -212,6 +212,10 @@ CompositeShuffleWriter::~CompositeShuffleWriter() {
 
 arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   BOLT_CHECK(!stopped_, "split after stop");
+  inSplitCall_ = true;
+  SCOPE_EXIT {
+    inSplitCall_ = false;
+  };
   if (!RowVector::isComposite(rv)) {
     if (compositeActive_) {
       flushComposite();

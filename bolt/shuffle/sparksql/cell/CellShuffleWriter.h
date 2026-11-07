@@ -141,6 +141,26 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     std::string toString() const;
   };
 
+  /// Times one seal, spill or push of cell data while a split() call is
+  /// under way, into sealSpillNs_. One reached from inside another - a
+  /// chunk growth or a reclaim during a seal, the seal of a window release
+  /// - counts once, with the outer one. Outside a split it times nothing:
+  /// the operator counts an external reclaim as externalReclaimTime, and
+  /// stop() is no split.
+  class SealSpillTimer {
+   public:
+    explicit SealSpillTimer(CellShuffleWriter& writer);
+    ~SealSpillTimer();
+
+    SealSpillTimer(const SealSpillTimer&) = delete;
+    SealSpillTimer& operator=(const SealSpillTimer&) = delete;
+
+   private:
+    /// Null when this one times nothing.
+    CellShuffleWriter* const writer_;
+    const uint64_t start_;
+  };
+
   void initOnFirstBatch(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// splitBatch() of a nested layout: seals the window first when the
@@ -182,6 +202,11 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// classifying their nulls, logged at stop. The nested path's is part of
   /// the shred time.
   uint64_t nullClassifyNs_{0};
+  /// What SealSpillTimer measured: sealSpillTime at stop. splitTime,
+  /// convertTime and the shred time leave it out.
+  uint64_t sealSpillNs_{0};
+  /// A SealSpillTimer is running.
+  bool timingSealSpill_{false};
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   /// Set, in place of adapter_, when the schema takes a nested layout.

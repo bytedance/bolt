@@ -203,7 +203,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
   if (nested_ != nullptr) {
     shredder_ = std::make_unique<CellNestedShredder>(
-        *nested_, *splitter_, numPartitions_, *boltPool_);
+        *nested_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);
   }
 
   perPidCounter_.assign(numPartitions_, 0);
@@ -235,8 +235,11 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   }
   if (shredder_ == nullptr && adapter_->hasComplexColumns()) {
     const uint64_t start = currentTimeNs();
+    const uint64_t sealSpillStart = sealSpillNs_;
     rv = adapter_->pack(rv, boltPool_);
-    metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
+    // Less the spills of a reclaim that the pack's allocations set off.
+    metrics_.convertTime += static_cast<int64_t>(
+        currentTimeNs() - start - (sealSpillNs_ - sealSpillStart));
   }
   // Oversized inputs are sliced so a seal boundary exists inside
   // them: one giant batch must not inflate a single payload window past
@@ -290,6 +293,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     return splitNested(std::move(rv));
   }
   const uint64_t start = currentTimeNs();
+  const uint64_t sealSpillStart = sealSpillNs_;
   // The row fields of a payload are u32: a window closes before any of
   // its partitions could pass kMaxPayloadRows. Nothing else bounds the
   // rows - the reader decodes a payload in batches of its own size.
@@ -387,12 +391,19 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   inSplit_ = false;
 
   maybeSeal();
-  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start);
+  // splitTime is the split alone, as V1 counts it with its eviction outside
+  // the timer: the seals, spills and pushes timed meanwhile - the rows'
+  // seal, the partial spills of chunk growths, maybeSeal()'s seals and a
+  // nested reclaim's spills - are sealSpillTime.
+  const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
+  const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
+  metrics_.splitTime += std::max<int64_t>(0, elapsed - sealSpill);
   return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   const uint64_t start = currentTimeNs();
+  const uint64_t sealSpillStart = sealSpillNs_;
   // The rows' bound, as for flat batches.
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
@@ -432,11 +443,15 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
 
   maybeSeal();
   // The shred time is reported as flattenTime, the metric the writers
-  // share for reshaping a batch before the split, and kept out of
-  // splitTime.
+  // share for reshaping a batch before the split, and the seals, spills
+  // and pushes as sealSpillTime, as for flat batches: splitTime keeps
+  // neither. The shred time leaves out the sealSpillTime, so the two do
+  // not overlap.
   const int64_t shred = shredder_->takeShredTimeNs();
   metrics_.flattenTime += shred;
-  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - shred;
+  const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
+  const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
+  metrics_.splitTime += std::max<int64_t>(0, elapsed - shred - sealSpill);
   return arrow::Status::OK();
 }
 
@@ -524,6 +539,22 @@ void CellShuffleWriter::probeDictionary(
       "CellShuffleWriter dictionary probe ({} rows): {}", numRows, parts);
 }
 
+CellShuffleWriter::SealSpillTimer::SealSpillTimer(CellShuffleWriter& writer)
+    : writer_(
+          writer.inSplitCall() && !writer.timingSealSpill_ ? &writer : nullptr),
+      start_(writer_ != nullptr ? currentTimeNs() : 0) {
+  if (writer_ != nullptr) {
+    writer_->timingSealSpill_ = true;
+  }
+}
+
+CellShuffleWriter::SealSpillTimer::~SealSpillTimer() {
+  if (writer_ != nullptr) {
+    writer_->sealSpillNs_ += currentTimeNs() - start_;
+    writer_->timingSealSpill_ = false;
+  }
+}
+
 void CellShuffleWriter::reserveChunk() {
   // While the output reads cells nothing may spill, so growth there
   // proceeds unreserved and the pool arbitrates.
@@ -550,6 +581,7 @@ void CellShuffleWriter::reserveChunk() {
   if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
     // Memory pressure: the spill data in memory goes to disk first, which
     // may make the room.
+    SealSpillTimer timer(*this);
     SpillMemory::Pressure pressure(spillMemory_.get());
     if (pressure.freedBytes() > 0 && !overCap() &&
         boltPool_->maybeReserve(kChunkBytes)) {
@@ -566,6 +598,7 @@ void CellShuffleWriter::reserveChunk() {
 }
 
 void CellShuffleWriter::sealWindow(SealReason reason) {
+  SealSpillTimer timer(*this);
   ++pressure_.seals[static_cast<size_t>(reason)];
   {
     sealing_ = true;
@@ -580,6 +613,8 @@ void CellShuffleWriter::sealWindow(SealReason reason) {
 }
 
 int64_t CellShuffleWriter::releaseWindow(SealReason reason) {
+  // The seal - on Celeborn the push - and the chunks it empties, together.
+  SealSpillTimer timer(*this);
   sealWindow(reason);
   // Every cell was recycled by the seal: the chunks go back as well.
   const int64_t freed = allocator_->shrink();
@@ -602,6 +637,7 @@ void CellShuffleWriter::maybeSeal() {
   if (sealRequested_) {
     // A reclaim asked for it: memory pressure. The spill data in memory
     // goes to disk first, and the whole window straight after it.
+    SealSpillTimer timer(*this);
     SpillMemory::Pressure pressure(spillMemory_.get());
     sealWindow(SealReason::kMemory);
   } else if (splitter_->nullMovedBytes() > cellOpts.nullMemLimitBytes) {
@@ -613,6 +649,7 @@ void CellShuffleWriter::maybeSeal() {
     // A payload grown past its bound: close that partition's alone, so a
     // skewed partition does not seal - and in local mode spill - every
     // other partition with it.
+    SealSpillTimer timer(*this);
     sealing_ = true;
     SCOPE_EXIT {
       sealing_ = false;
@@ -665,7 +702,9 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return reclaimWindow(size, actual);
   }
   // Memory pressure: the spill data in memory goes to disk first, and
-  // whatever spills below straight after it.
+  // whatever spills below straight after it. A reclaim reached from inside
+  // a split spills for that split: sealSpillTime.
+  SealSpillTimer timer(*this);
   SpillMemory::Pressure pressure(spillMemory_.get());
   if (pressure.freedBytes() > 0) {
     pressure_.freedSpillMemory += pressure.freedBytes();
@@ -750,9 +789,7 @@ arrow::Status CellShuffleWriter::flushOrdinary() {
   // Composite rows come next: the window goes out whole and its memory
   // back, so the two kinds never share memory or a payload.
   if (initialized_ && splitter_->hasWindowRows()) {
-    sealWindow(SealReason::kFlush);
-    allocator_->shrink();
-    boltPool_->release();
+    releaseWindow(SealReason::kFlush);
   }
   return arrow::Status::OK();
 }
@@ -776,6 +813,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
+  metrics_.sealSpillTime += static_cast<int64_t>(sealSpillNs_);
   if (initialized_) {
     std::string spillMemory;
     if (spillMemory_ != nullptr) {
@@ -789,7 +827,10 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
           mb(spillMemory_->directBytes()));
     }
     LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
-              << fmt::format(", nullClassify={:.1f}ms", nullClassifyNs_ / 1e6)
+              << fmt::format(
+                     ", nullClassify={:.1f}ms, sealSpill={:.1f}ms",
+                     nullClassifyNs_ / 1e6,
+                     sealSpillNs_ / 1e6)
               << spillMemory;
   }
 
