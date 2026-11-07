@@ -94,8 +94,19 @@ enum class ShuffleWriterType {
 // PartitionWriterOptions. On Celeborn nothing is spilled: the spill
 // thresholds push the window at the next batch boundary instead.
 struct CellShuffleOptions {
-  // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
+  // Spill threshold on the chunk memory plus the spill data kept in memory
+  // (spillMemoryBytes); 0 disables it. Not a hard memory cap.
   int64_t cellMemorySpillBytes = 0;
+  // Local shuffle: the most spill data - runs and sealed payloads on their
+  // way to the merge, the composite rows' blocks included - kept in memory
+  // instead of the spill files, in pages of the writer's pool. Memory
+  // pressure writes it to disk first: a reclaim, a chunk reservation that
+  // fails or passes cellMemorySpillBytes, the seal a reclaim asks for, or
+  // composite rows short of room; the spill such an event makes then goes
+  // straight to disk. -1: half the writer's memory limit - the tighter of
+  // the pool's cap and the task's execution memory - or 512 MiB with
+  // neither. 0: off, every spill byte goes to disk.
+  int64_t spillMemoryBytes = -1;
   // Seal a partition's payload at a batch boundary once it exceeds this
   // size; other partitions stay open.
   int64_t partitionSealBytes = 40LL << 20;

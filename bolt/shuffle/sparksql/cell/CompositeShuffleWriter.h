@@ -82,6 +82,13 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// the subclass ends it in stopOrdinary().
   virtual PartitionBlockOutput& output() = 0;
 
+  /// The memory the outputs' spill files keep their newest bytes in, or
+  /// null. Memory pressure on the composite side writes it to disk first,
+  /// and the held rows straight after it.
+  virtual SpillMemory* spillMemory() {
+    return nullptr;
+  }
+
   /// Partitions `rv` by its pid column (child 0, INTEGER) into
   /// row2Partition_ and partition2RowCount_. Both sides use them: they never
   /// split at the same time - a reclaim reached from inside a split goes to

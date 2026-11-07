@@ -25,21 +25,122 @@
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
+#include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 
-/// Temporary shuffle storage of one output on local disk: appended in time
-/// order, read back at any offset. The file is created on the first append,
-/// in a random configured directory so concurrent tasks spread their I/O
-/// over the disks, and removed by remove() or on destruction.
+class ShuffleSpillFile;
+
+/// Memory in which the spill files of one writer keep their newest bytes
+/// until memory runs short, instead of on disk: a spill that the merge
+/// copies into the data file anyway then costs no disk write and read.
+/// Pages of the writer's pool, accounted to it, at most capBytes() of them
+/// over every file together. A memory pressure event is a Pressure: it
+/// writes every file's pages out first, and keeps appends on disk while it
+/// lives. A file's bytes in memory always end it, as it writes its pages
+/// out before it writes anything else to disk.
+class SpillMemory {
+ public:
+  /// Pages of up to 4 MiB from `pool`, which must outlive this object, as
+  /// must every file attached to it. A cap below one machine page keeps
+  /// nothing in memory.
+  SpillMemory(memory::MemoryPool* pool, int64_t capBytes);
+
+  SpillMemory(const SpillMemory&) = delete;
+  SpillMemory& operator=(const SpillMemory&) = delete;
+
+  /// One memory pressure event, for as long as it lives. It first writes
+  /// out the pages of every file but one whose bytes must stay where they
+  /// are - in the middle of an append, or frozen for its merge - then keeps
+  /// every append on disk. Does nothing for a null `memory`.
+  class Pressure {
+   public:
+    explicit Pressure(SpillMemory* memory);
+    ~Pressure();
+
+    Pressure(const Pressure&) = delete;
+    Pressure& operator=(const Pressure&) = delete;
+
+    /// The page bytes the first step freed.
+    int64_t freedBytes() const {
+      return freedBytes_;
+    }
+
+   private:
+    SpillMemory* const memory_;
+    int64_t freedBytes_{0};
+  };
+
+  int64_t capBytes() const {
+    return capBytes_;
+  }
+
+  /// Page bytes the files hold now, and the most they held.
+  int64_t heldBytes() const {
+    return heldBytes_;
+  }
+  int64_t peakBytes() const {
+    return peakBytes_;
+  }
+
+  /// Bytes the files wrote out of their pages, and how many times.
+  uint64_t flushedBytes() const {
+    return flushedBytes_;
+  }
+  uint64_t flushes() const {
+    return flushes_;
+  }
+
+  /// Bytes the files appended to disk directly: under pressure, past the
+  /// cap, or for want of a page.
+  uint64_t directBytes() const {
+    return directBytes_;
+  }
+
+ private:
+  friend class ShuffleSpillFile;
+
+  /// A page for a file, reserved through the pool first as a cell chunk is;
+  /// false when the reservation fails.
+  bool fundPage(memory::ContiguousAllocation& page);
+
+  memory::MemoryPool* const pool_;
+  const int64_t capBytes_;
+  /// A power of two; 0 keeps nothing in memory.
+  const uint64_t pageBytes_;
+  const uint32_t pageShift_;
+  int64_t heldBytes_{0};
+  int64_t peakBytes_{0};
+  uint64_t flushedBytes_{0};
+  uint64_t flushes_{0};
+  uint64_t directBytes_{0};
+  /// Live Pressure events: appends go to disk while there is one.
+  uint32_t pressureDepth_{0};
+  std::vector<ShuffleSpillFile*> files_;
+};
+
+/// Temporary shuffle storage of one output: appended in time order, read
+/// back at any offset. On local disk, the file is created on the first byte
+/// it gets, in a random configured directory so concurrent tasks spread
+/// their I/O over the disks, and removed by remove() or on destruction.
+/// Attached to a SpillMemory, it keeps its newest bytes in pages while that
+/// has room and no pressure: the offsets stay the same, [0, diskEnd) on disk
+/// and [diskEnd, end()) in memory.
 class ShuffleSpillFile {
  public:
   /// `name` tells a task's spill files apart when, with no configured
   /// directory, they sit next to the data file: <dataFile>.<name>.spill.
-  ShuffleSpillFile(PartitionWriterOptions options, std::string name);
+  /// `memory`, if not null, must outlive this file.
+  ShuffleSpillFile(
+      PartitionWriterOptions options,
+      std::string name,
+      SpillMemory* memory = nullptr);
   ~ShuffleSpillFile();
+
+  ShuffleSpillFile(const ShuffleSpillFile&) = delete;
+  ShuffleSpillFile& operator=(const ShuffleSpillFile&) = delete;
 
   /// Appends `bytes` and returns the offset they start at.
   uint64_t append(const void* data, size_t bytes);
@@ -48,11 +149,19 @@ class ShuffleSpillFile {
   void flush();
 
   /// Overwrites `bytes` already appended at `offset`, e.g. a header whose
-  /// sizes are known only once its body is written. Applied at the next
-  /// flush(), so a patch per run does not break up the buffered writes.
+  /// sizes are known only once its body is written. In memory at once; on
+  /// disk at the next flush(), so a patch per run does not break up the
+  /// buffered writes.
   void patch(uint64_t offset, const void* data, size_t bytes);
 
   void read(uint64_t offset, void* out, size_t bytes) const;
+
+  /// Hands the `bytes` from `offset` to `out` in order, in pieces: those on
+  /// disk through a 64 KiB buffer, those in memory straight from the pages.
+  void copyTo(
+      uint64_t offset,
+      uint64_t bytes,
+      const std::function<void(const char* data, size_t bytes)>& out) const;
 
   /// The offset the next append starts at.
   uint64_t end() const {
@@ -68,26 +177,80 @@ class ShuffleSpillFile {
     return frozen_;
   }
 
-  /// Closes and deletes the file.
+  /// Closes and deletes the file, and frees its pages.
   void remove();
 
+  /// Writes the bytes in memory out to disk, in order, and frees their
+  /// pages; returns the page bytes freed. Does nothing - returns 0 - in the
+  /// middle of an append, or once frozen: the merge reads the pages.
+  int64_t flushMemory();
+
+  /// Bytes written to disk: the evict metric.
   int64_t bytesWritten() const {
-    return static_cast<int64_t>(end_);
+    return static_cast<int64_t>(diskEnd_);
   }
 
-  /// Append and flush time: the evict metric.
+  /// Bytes in memory now, and the most there were.
+  uint64_t memoryBytes() const {
+    return pages_.empty() ? 0 : end_ - diskEnd_;
+  }
+  uint64_t peakMemoryBytes() const {
+    return peakMemoryBytes_;
+  }
+
+  /// Bytes flushMemory() and the cap wrote out of memory, and how many
+  /// times.
+  uint64_t memoryFlushedBytes() const {
+    return memoryFlushedBytes_;
+  }
+  uint64_t memoryFlushes() const {
+    return memoryFlushes_;
+  }
+
+  /// Disk write and flush time: the evict metric.
   uint64_t writeTimeNs() const {
     return writeTimeNs_;
   }
 
  private:
+  void openFile();
+
+  /// Appends to disk, behind every byte: none may be in memory.
+  void appendToDisk(const void* data, size_t bytes);
+
+  /// Appends to the pages, writing them out first when the append would pass
+  /// the cap; false when it must go to disk instead.
+  bool appendToMemory(const char* data, size_t bytes);
+
+  /// flushMemory() of an append, which may.
+  int64_t writeOutMemory();
+
+  void readFromDisk(uint64_t offset, char* out, size_t bytes) const;
+
+  /// Calls `visit(char* data, size_t bytes)` on the pieces of [offset,
+  /// offset + bytes), which lies in memory, in order.
+  template <typename Visit>
+  void visitMemory(uint64_t offset, uint64_t bytes, Visit&& visit) const;
+
   const PartitionWriterOptions options_;
   const std::string name_;
+  SpillMemory* const memory_;
   std::FILE* file_{nullptr};
   int fd_{-1};
   std::string path_;
   uint64_t end_{0};
+  /// Where the bytes in memory start: everything before is on disk.
+  uint64_t diskEnd_{0};
+  /// The bytes from diskEnd_ on, packed from the first page's start.
+  std::vector<memory::ContiguousAllocation> pages_;
+  uint64_t peakMemoryBytes_{0};
+  uint64_t memoryFlushedBytes_{0};
+  uint64_t memoryFlushes_{0};
   bool frozen_{false};
+  bool appending_{false};
+  /// A page could not be funded: memory is short, so appends go to disk
+  /// until the next flush() ends the run they belong to.
+  bool unfunded_{false};
   uint64_t writeTimeNs_{0};
   /// patch()es not applied yet: offset and bytes.
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
@@ -114,7 +277,8 @@ class DataFileWriter {
   /// so a patch per run does not break up the buffered writes.
   void patch(uint64_t position, const void* data, size_t bytes);
 
-  /// Copies `bytes` of `spill` from `begin`.
+  /// Copies `bytes` of `spill` from `begin`: the part on disk through a
+  /// bounce buffer, the part in memory straight from its pages.
   void copyFrom(const ShuffleSpillFile& spill, uint64_t begin, uint64_t bytes);
 
   /// Flushes and closes; fills partitionLengths, totalBytesWritten and
@@ -141,11 +305,11 @@ class PartialSpiller {
   /// Writes the task's data file from `spillers`: for each partition, every
   /// spiller's share in the order given. Seals their spill files first -
   /// nothing may be appended behind the merge, and a spiller is merged once
-  /// only - and removes them afterwards. Fills partitionLengths,
-  /// totalBytesWritten, totalBytesEvicted and the write and evict times, and
-  /// totalSpillFiles with the spill runs: every run goes into the one spill
-  /// file, so the run is what the local partition writer's file per spill
-  /// corresponds to.
+  /// only - and removes them afterwards, freeing their memory. Fills
+  /// partitionLengths, totalBytesWritten, totalBytesEvicted - the bytes that
+  /// reached disk - and the write and evict times, and totalSpillFiles with
+  /// the spill runs: every run goes into the one spill file, so the run is
+  /// what the local partition writer's file per spill corresponds to.
   static void mergeToDataFile(
       const PartitionWriterOptions& options,
       std::initializer_list<PartialSpiller*> spillers,
@@ -153,13 +317,19 @@ class PartialSpiller {
 
   virtual ~PartialSpiller() = default;
 
+  /// Bytes written to disk.
   int64_t spilledBytes() const {
     return spill_.bytesWritten();
   }
 
  protected:
-  PartialSpiller(PartitionWriterOptions options, std::string name)
-      : spill_(std::move(options), std::move(name)) {}
+  /// `memory`, if not null, may keep the spill file's newest bytes and must
+  /// outlive this object.
+  PartialSpiller(
+      PartitionWriterOptions options,
+      std::string name,
+      SpillMemory* memory = nullptr)
+      : spill_(std::move(options), std::move(name), memory) {}
 
   /// Partition `pid`'s share of the data file. Called by mergeToDataFile()
   /// only, for partition 0, 1, ..., with the spill file frozen.
@@ -201,7 +371,7 @@ class PartitionBlockOutput {
   /// be written afterwards.
   virtual void finish(ShuffleWriterMetrics& metrics) = 0;
 
-  /// Bytes written to spill storage, or pushed, so far.
+  /// Bytes written to spill storage on disk, or pushed, so far.
   virtual int64_t bytesEvicted() const = 0;
 };
 
@@ -212,7 +382,11 @@ class PartitionBlockOutput {
 class LocalBlockOutput final : public PartitionBlockOutput,
                                public PartialSpiller {
  public:
-  explicit LocalBlockOutput(PartitionWriterOptions options);
+  /// `memory`, if not null, may keep the spill file's newest bytes and must
+  /// outlive this object.
+  explicit LocalBlockOutput(
+      PartitionWriterOptions options,
+      SpillMemory* memory = nullptr);
 
   void writeBlocks(const BlockSource& next) override;
 

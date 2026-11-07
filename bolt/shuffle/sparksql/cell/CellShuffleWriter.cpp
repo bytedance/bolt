@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 
 #include <numeric>
+#include <optional>
 
 #include <fmt/format.h>
 
@@ -46,6 +47,51 @@ constexpr uint32_t kDictMinRepeatRatio = 4;
 /// cell data is covered, and keeps the rest resident for the merge to write
 /// directly, as the V1/V2 writers evict partitions until the request is met.
 constexpr uint64_t kPartialSpillDivisor = 2;
+/// The memory a writer counts on when no limit is known.
+constexpr int64_t kUnlimitedBudgetBytes = int64_t{1} << 30;
+
+/// The memory the writer can count on: the tighter of the root pool's cap,
+/// which maxCapacity() reads, and the Spark execution memory per task, each
+/// where it is set (a pool without a cap reports kMaxMemory: under Spark the
+/// limit lives in the task's execution memory).
+struct MemoryLimit {
+  int64_t poolCap;
+  std::optional<int64_t> perTask;
+  /// 0 when neither is set.
+  int64_t bytes;
+  const char* source;
+};
+
+MemoryLimit memoryLimit(const memory::MemoryPool& pool) {
+  constexpr int64_t kUnlimited = int64_t{1} << 40;
+  const auto bounded = [](int64_t bytes) {
+    return bytes > 0 && bytes <= kUnlimited;
+  };
+  MemoryLimit limit;
+  limit.poolCap = pool.maxCapacity();
+  limit.perTask =
+      memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
+  limit.bytes = bounded(limit.poolCap) ? limit.poolCap : 0;
+  limit.source = limit.bytes > 0 ? "pool cap" : "none";
+  if (limit.perTask.has_value() && bounded(*limit.perTask) &&
+      (limit.bytes == 0 || *limit.perTask < limit.bytes)) {
+    limit.bytes = *limit.perTask;
+    limit.source = "task memory";
+  }
+  return limit;
+}
+
+/// CellShuffleOptions::spillMemoryBytes resolved: -1 is half the memory
+/// limit, or of the budget assumed without one.
+int64_t spillMemoryCap(
+    const CellShuffleOptions& options,
+    const memory::MemoryPool& pool) {
+  if (options.spillMemoryBytes >= 0) {
+    return options.spillMemoryBytes;
+  }
+  const int64_t limit = memoryLimit(pool).bytes;
+  return (limit > 0 ? limit : kUnlimitedBudgetBytes) / 2;
+}
 
 } // namespace
 
@@ -73,15 +119,20 @@ CellShuffleWriter::CellShuffleWriter(
         boltPool_);
   } else {
     // Two outputs with a spill file each, merged into the one data file:
-    // the Cell output, and `blocks`, which serves the composite rows.
-    auto blocks =
-        std::make_unique<LocalBlockOutput>(options_.partitionWriterOptions);
+    // the Cell output, and `blocks`, which serves the composite rows. One
+    // cap of spill memory covers both: only one kind holds data at a time,
+    // so the kind written now gets what the other does not hold.
+    spillMemory_ = std::make_unique<SpillMemory>(
+        boltPool_, spillMemoryCap(options_.cellOptions, *boltPool_));
+    auto blocks = std::make_unique<LocalBlockOutput>(
+        options_.partitionWriterOptions, spillMemory_.get());
     output_ = std::make_unique<LocalCellOutput>(
         *blocks,
         &layout_,
         options_.cellOptions,
         options_.partitionWriterOptions,
-        boltPool_);
+        boltPool_,
+        spillMemory_.get());
     blocks_ = std::move(blocks);
   }
 }
@@ -131,30 +182,15 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   }
 
   const uint32_t numStreams = layout_.numStreams();
-  // The memory the writer can count on: the tighter of the root pool's cap,
-  // which maxCapacity() reads, and the Spark execution memory per task,
-  // each where it is set (a pool without a cap reports kMaxMemory: under
-  // Spark the limit lives in the task's execution memory). Cell tail slack
-  // is bounded by a share of it, so sizing from a budget far above the
-  // real one wastes a large part of the real memory in half-filled tail
-  // cells. With neither, a 1 GiB budget.
-  constexpr int64_t kUnlimited = int64_t{1} << 40;
-  const auto bounded = [](int64_t bytes) {
-    return bytes > 0 && bytes <= kUnlimited;
-  };
-  const int64_t poolCap = boltPool_->maxCapacity();
-  const auto perTask =
-      memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
-  int64_t limit = bounded(poolCap) ? poolCap : 0;
-  const char* limitSource = limit > 0 ? "pool cap" : "none";
-  if (perTask.has_value() && bounded(*perTask) &&
-      (limit == 0 || *perTask < limit)) {
-    limit = *perTask;
-    limitSource = "task memory";
-  }
+  // Cell tail slack is bounded by a share of the memory the writer can count
+  // on, so sizing from a budget far above the real one wastes a large part
+  // of the real memory in half-filled tail cells. With no limit, a 1 GiB
+  // budget.
+  const auto memory = memoryLimit(*boltPool_);
+  const int64_t limit = memory.bytes;
   const int64_t budget = limit > 0
-      ? std::min<int64_t>(limit / 4, int64_t{1} << 30)
-      : (int64_t{1} << 30);
+      ? std::min<int64_t>(limit / 4, kUnlimitedBudgetBytes)
+      : kUnlimitedBudgetBytes;
   const int64_t perStream =
       budget / 8 / numPartitions_ / std::max<uint32_t>(1, numStreams);
   const auto cellBytes = static_cast<uint32_t>(
@@ -181,11 +217,13 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
             << ", logicalColumns=" << inputType.size() - 1
             << ", layoutColumns=" << layout_.numColumns()
             << ", streams=" << numStreams << ", partitions=" << numPartitions_
-            << ", maxCapacity=" << poolCap << ", perTask="
-            << (perTask.has_value() ? std::to_string(*perTask) : "none")
-            << ", limit=" << limit << " (" << limitSource
+            << ", maxCapacity=" << memory.poolCap << ", perTask="
+            << (memory.perTask.has_value() ? std::to_string(*memory.perTask)
+                                           : "none")
+            << ", limit=" << limit << " (" << memory.source
             << "), budget=" << budget << ", perStream=" << perStream
-            << ", cellBytes=" << cellBytes;
+            << ", cellBytes=" << cellBytes << ", spillMemory="
+            << (spillMemory_ != nullptr ? spillMemory_->capBytes() : 0);
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(
@@ -493,20 +531,34 @@ void CellShuffleWriter::reserveChunk() {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
-  const bool overCap = cellOpts.cellMemorySpillBytes > 0 &&
-      allocator_->allocatedBytes() + kChunkBytes >
-          cellOpts.cellMemorySpillBytes;
+  // The threshold counts the spill data in memory too, which a flush gives
+  // back.
+  const auto overCap = [&]() {
+    return cellOpts.cellMemorySpillBytes > 0 &&
+        allocator_->allocatedBytes() + kChunkBytes +
+            (spillMemory_ != nullptr ? spillMemory_->heldBytes() : 0) >
+        cellOpts.cellMemorySpillBytes;
+  };
   if (isRemote_) {
     // A remote window is pushed only whole, at a batch boundary: ask for
     // that there and let this growth proceed.
-    if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
+    if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
       sealRequested_ = true;
     }
     return;
   }
-  if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
-    // The cells freed go back to the freelist, which the growth retries
-    // first: a partial Run makes room without returning a chunk.
+  if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
+    // Memory pressure: the spill data in memory goes to disk first, which
+    // may make the room.
+    SpillMemory::Pressure pressure(spillMemory_.get());
+    if (pressure.freedBytes() > 0 && !overCap() &&
+        boltPool_->maybeReserve(kChunkBytes)) {
+      ++pressure_.growthFlushes;
+      return;
+    }
+    // Then a partial Run, straight to disk. The cells freed go back to the
+    // freelist, which the growth retries first: it makes room without
+    // returning a chunk.
     ++pressure_.growthPartialRuns;
     pressure_.growthPartialRunBytes += splitter_->spillPartitions(
         static_cast<uint64_t>(allocator_->usedBytes()) / kPartialSpillDivisor);
@@ -547,10 +599,14 @@ void CellShuffleWriter::maybeSeal() {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
-  if (sealRequested_ ||
-      splitter_->nullMovedBytes() > cellOpts.nullMemLimitBytes) {
-    // Memory or the null bitmaps of every partition: the whole window.
-    sealWindow(sealRequested_ ? SealReason::kMemory : SealReason::kNulls);
+  if (sealRequested_) {
+    // A reclaim asked for it: memory pressure. The spill data in memory
+    // goes to disk first, and the whole window straight after it.
+    SpillMemory::Pressure pressure(spillMemory_.get());
+    sealWindow(SealReason::kMemory);
+  } else if (splitter_->nullMovedBytes() > cellOpts.nullMemLimitBytes) {
+    // The null bitmaps of every partition: the whole window.
+    sealWindow(SealReason::kNulls);
   } else if (
       splitter_->maxPartitionBytes() >
       static_cast<uint64_t>(cellOpts.partitionSealBytes)) {
@@ -573,6 +629,13 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     int64_t* actual) {
   *actual = 0;
   if (!initialized_) {
+    // No ordinary batch yet: only the composite blocks may hold spill
+    // memory.
+    SpillMemory::Pressure pressure(spillMemory_.get());
+    *actual = pressure.freedBytes();
+    if (*actual > 0) {
+      boltPool_->release();
+    }
     return arrow::Status::OK();
   }
   ++pressure_.reclaims;
@@ -601,9 +664,18 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (isRemote_) {
     return reclaimWindow(size, actual);
   }
+  // Memory pressure: the spill data in memory goes to disk first, and
+  // whatever spills below straight after it.
+  SpillMemory::Pressure pressure(spillMemory_.get());
+  if (pressure.freedBytes() > 0) {
+    pressure_.freedSpillMemory += pressure.freedBytes();
+    *actual += pressure.freedBytes();
+    boltPool_->release();
+    metrics_.totalBytesEvicted = output_->bytesEvicted();
+  }
   // A run costs a drain and a compressed segment per partition, so skip it
-  // when idle memory already covers the request or the writer holds under
-  // two chunks.
+  // when idle memory and the spill memory already cover the request or the
+  // writer holds under two chunks.
   if ((size > 0 && *actual >= size) ||
       allocator_->allocatedBytes() < 2 * kChunkBytes) {
     ++pressure_.idleReclaims;
@@ -705,8 +777,20 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
   if (initialized_) {
+    std::string spillMemory;
+    if (spillMemory_ != nullptr) {
+      const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
+      spillMemory = fmt::format(
+          ", spill memory: held peak={:.1f}MB flushed={:.1f}MB ({} flushes) "
+          "direct={:.1f}MB",
+          mb(spillMemory_->peakBytes()),
+          mb(spillMemory_->flushedBytes()),
+          spillMemory_->flushes(),
+          mb(spillMemory_->directBytes()));
+    }
     LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
-              << fmt::format(", nullClassify={:.1f}ms", nullClassifyNs_ / 1e6);
+              << fmt::format(", nullClassify={:.1f}ms", nullClassifyNs_ / 1e6)
+              << spillMemory;
   }
 
   // The splitter has released its window; return idle chunks, the
@@ -728,17 +812,18 @@ std::string CellShuffleWriter::PressureStats::toString() const {
   };
   return fmt::format(
       "reclaims={} (idle={} deferred={}) requested={:.1f}MB freed={:.1f}MB "
-      "[idle={:.1f}MB spill={:.1f}MB compaction={:.1f}MB run={:.1f}MB "
-      "push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) growth={} "
-      "({:.1f}MB); compactions={} ({:.1f}MB emptied); full runs={}; seals "
-      "rows={} memory={} nulls={} flush={} reserve={}; "
-      "partition seals={} ({} partitions); null peak={:.1f}MB",
+      "[idle={:.1f}MB memory={:.1f}MB spill={:.1f}MB compaction={:.1f}MB "
+      "run={:.1f}MB push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) "
+      "growth={} ({:.1f}MB), growth flushes={}; compactions={} ({:.1f}MB "
+      "emptied); full runs={}; seals rows={} memory={} nulls={} flush={} "
+      "reserve={}; partition seals={} ({} partitions); null peak={:.1f}MB",
       reclaims,
       idleReclaims,
       deferredReclaims,
       mb(requestedBytes),
       mb(freedBytes),
       mb(freedIdle),
+      mb(freedSpillMemory),
       mb(freedByPartialRun),
       mb(freedByCompaction),
       mb(freedByRun),
@@ -747,6 +832,7 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       mb(reclaimPartialRunBytes),
       growthPartialRuns,
       mb(growthPartialRunBytes),
+      growthFlushes,
       compactions,
       mb(compactedBytes),
       fullRuns,

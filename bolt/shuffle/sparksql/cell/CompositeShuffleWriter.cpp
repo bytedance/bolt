@@ -242,7 +242,15 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
     return reclaimOrdinary(size, actual);
   }
   const int64_t before = boltPool_->reservedBytes();
-  flushComposite();
+  {
+    // Memory pressure: the spill data in memory goes to disk first, and the
+    // held rows straight after it.
+    SpillMemory::Pressure pressure(spillMemory());
+    flushComposite();
+    if (pressure.freedBytes() > 0) {
+      boltPool_->release();
+    }
+  }
   *actual = std::max<int64_t>(0, before - boltPool_->reservedBytes());
   return arrow::Status::OK();
 }
@@ -279,8 +287,11 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     if (numRows == 0) {
       return;
     }
-    // Composite rows are copied in whole batches: make room first.
+    // Composite rows are copied in whole batches: make room first. A
+    // failed reservation is memory pressure: the spill data in memory goes
+    // to disk first, and the held rows straight after it.
     if (heldRowBytes_ > 0 && !boltPool_->maybeReserve(rv->totalRowSize())) {
+      SpillMemory::Pressure pressure(spillMemory());
       writeComposite();
     }
     const auto status = computePartitions(*rv);
@@ -293,6 +304,8 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     metrics_.totalInputBatches += 1;
   }
   if (flushDeferred_) {
+    // A reclaim asked for it: memory pressure.
+    SpillMemory::Pressure pressure(spillMemory());
     flushComposite();
   }
 }

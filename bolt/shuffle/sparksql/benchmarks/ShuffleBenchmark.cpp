@@ -48,7 +48,8 @@
 ///   D  16 and 256 MiB inputs on narrow ints and the wide table: the fixed
 ///      cost of a writer against its throughput
 ///   E  one partition taking half the rows, on strings, dictionary strings
-///      and the mix
+///      and the mix; a few hot partitions taking most of an event log's
+///      rows, each sealed past partitionSealBytes with memory to spare
 ///   F  a 256 MiB task memory limit enforced by the Spark memory manager,
 ///      so every writer spills through reclaim: ints, medium and long
 ///      strings, dictionary strings; the complex types, nested nulls, 50%
@@ -135,6 +136,11 @@ DEFINE_bool(
     true,
     "Cell writers store, without a codec call, the frames of a kind that "
     "last did not shrink, trying one in ten.");
+DEFINE_int64(
+    bolt_benchmark_shuffle_cell_spill_memory_bytes,
+    -1,
+    "Cell writers' spillMemoryBytes: the spill data kept in memory until "
+    "memory pressure; -1 half the memory limit, 0 none.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -201,6 +207,7 @@ enum class Family {
   kLowCardArray,
   kStrDate8,
   kStrDate10,
+  kEvents,
 };
 
 /// The families an extra Cell writer joins: CellNoDict the dictionary ones,
@@ -251,6 +258,7 @@ constexpr FamilyInfo kFamilies[] = {
     {Family::kLowCardArray, "lowcard_array", kDictionary | kNested},
     {Family::kStrDate8, "str_date8", kDictionary},
     {Family::kStrDate10, "str_date10", kDictionary},
+    {Family::kEvents, "events"},
 };
 
 const FamilyInfo& familyInfo(Family family) {
@@ -280,6 +288,9 @@ struct CaseSpec {
   /// The null rate of the families that take one in per mille rather than
   /// nullPercent.
   int32_t nullPerMille{0};
+  /// Skewed another way: this many partitions, spread over the range, take
+  /// nine rows in ten between them.
+  int32_t hotPartitions{0};
 
   std::string name() const {
     return id + "." + familyInfo(family).name;
@@ -464,6 +475,11 @@ std::vector<CaseSpec> caseSpecs() {
   // characters that a string dictionary holds.
   add("A7-date8", Family::kStrDate8, 1024, kStd);
   add("A7-date10", Family::kStrDate10, 1024, kStd);
+  // Six of 500 partitions take 90% of an event log's rows: each passes
+  // partitionSealBytes once, with memory to spare, as the hot partitions of
+  // skewed stages do.
+  add("E-skew-seal", Family::kEvents, 500, kFull, 0, 600);
+  c.back().hotPartitions = 6;
   return c;
 }
 
@@ -875,6 +891,11 @@ VectorPtr pids(const CaseSpec& spec, Rng& rng) {
     // Skewed: half the rows go to partition 0, the rest spread evenly.
     if (spec.skewed && rng() % 2 == 0) {
       return int32_t{0};
+    }
+    // Hot partitions: nine rows in ten go to one of them.
+    if (spec.hotPartitions > 0 && rng() % 10 != 0) {
+      return static_cast<int32_t>(
+          rng() % spec.hotPartitions * (p / spec.hotPartitions));
     }
     return static_cast<int32_t>(rng() % p);
   });
@@ -1642,6 +1663,67 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
       auto tags = arrayOf(kRowsPerBatch, nullptr, at, words);
       return makeRow({"pid", "key", "tags"}, {pid, key(), tags});
     }
+    case Family::kEvents: {
+      // An event log: a sequential id, a user, an event type, the page
+      // and a detail of a few words. The strings repeat in fragments, not
+      // whole, so no dictionary takes them; LZ4 takes the rows to about
+      // half.
+      static const std::vector<std::string> sections = {
+          "home",
+          "search",
+          "item",
+          "cart",
+          "checkout",
+          "account",
+          "orders",
+          "help",
+          "deals",
+          "brands",
+          "reviews",
+          "wishlist",
+          "settings",
+          "payment",
+          "returns",
+          "stores"};
+      static const std::vector<std::string> words = {
+          "click",  "view",    "scroll",  "open",   "close", "add",
+          "remove", "update",  "submit",  "cancel", "retry", "share",
+          "banner", "button",  "link",    "image",  "video", "price",
+          "filter", "sort",    "page",    "next",   "back",  "menu",
+          "mobile", "desktop", "tablet",  "app",    "web",   "guest",
+          "member", "premium", "trial",   "coupon", "gift",  "card",
+          "fast",   "slow",    "timeout", "error",  "ok",    "done"};
+      return makeRow(
+          {"pid", "id", "user", "type", "page", "detail"},
+          {pid,
+           flat<int64_t>(
+               BIGINT(),
+               0,
+               rng,
+               [&](vector_size_t i) {
+                 return 9'000'000'000LL + int64_t{batch} * kRowsPerBatch + i;
+               }),
+           randomInts<int64_t>(BIGINT(), 0, rng, 20'000'000),
+           randomInts<int32_t>(INTEGER(), 0, rng, 40),
+           strings(
+               0,
+               rng,
+               [&](vector_size_t, std::string& out) {
+                 out = "/" + sections[rng() % sections.size()] + "/" +
+                     sections[rng() % sections.size()] + "/" +
+                     std::to_string(rng() % 1'000'000);
+               }),
+           strings(0, rng, [&](vector_size_t, std::string& out) {
+             out.clear();
+             const int numWords = 6 + rng() % 9;
+             for (int w = 0; w < numWords; ++w) {
+               if (w > 0) {
+                 out += ' ';
+               }
+               out += words[rng() % words.size()];
+             }
+           })});
+    }
   }
   BOLT_UNREACHABLE();
 }
@@ -1809,6 +1891,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
       FLAGS_bolt_benchmark_shuffle_cell_stream_compression;
   options.cellOptions.adaptiveCompression =
       FLAGS_bolt_benchmark_shuffle_cell_adaptive_compression;
+  options.cellOptions.spillMemoryBytes =
+      FLAGS_bolt_benchmark_shuffle_cell_spill_memory_bytes;
   return options;
 }
 
@@ -2393,7 +2477,7 @@ int main(int argc, char** argv) {
       // A rate in per mille shows as its whole percent, and in full after
       // the other fields.
       printf(
-          "%-16s %-24s P=%-6d nulls=%-3d input=%lldMB%s%s%s\n",
+          "%-16s %-24s P=%-6d nulls=%-3d input=%lldMB%s%s%s%s\n",
           spec.id.c_str(),
           familyInfo(spec.family).name,
           spec.partitions,
@@ -2408,6 +2492,9 @@ int main(int argc, char** argv) {
               : "",
           spec.nullPerMille > 0
               ? (" nullPerMille=" + std::to_string(spec.nullPerMille)).c_str()
+              : "",
+          spec.hotPartitions > 0
+              ? (" hot=" + std::to_string(spec.hotPartitions)).c_str()
               : "");
       continue;
     }

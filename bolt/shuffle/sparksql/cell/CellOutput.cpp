@@ -113,8 +113,9 @@ LocalCellOutput::LocalCellOutput(
     const CellLayout* layout,
     CellShuffleOptions cellOptions,
     PartitionWriterOptions options,
-    memory::MemoryPool* pool)
-    : PartialSpiller(options, "cell"),
+    memory::MemoryPool* pool,
+    SpillMemory* memory)
+    : PartialSpiller(options, "cell", memory),
       composite_(composite),
       options_(std::move(options)),
       layout_(layout),
