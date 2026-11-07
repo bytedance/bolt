@@ -61,12 +61,16 @@ class CellNestedShredder {
 
   /// Sets the splitter's column positions. `layout`, `splitter` and `pool`
   /// must outlive the shredder, and the shredder every output call of the
-  /// splitter.
+  /// splitter. `excludedNs`, if not null, is a clock of time reported apart
+  /// - the writer's seal and spill time, which a reclaim reached from inside
+  /// the shredding or the splitter adds to - and must outlive the shredder:
+  /// what it gains while the shredder runs is not shred time.
   CellNestedShredder(
       const CellNestedLayout& layout,
       CellSplitter& splitter,
       uint32_t numPartitions,
-      memory::MemoryPool& pool);
+      memory::MemoryPool& pool,
+      const uint64_t* excludedNs = nullptr);
 
   /// Takes the next batch, pid column first: decodes it, classifies the
   /// nulls of the rows' columns and counts each space's positions in this
@@ -103,7 +107,8 @@ class CellNestedShredder {
       std::span<const uint32_t> row2Partition,
       std::span<const uint32_t> partition2RowCount);
 
-  /// Time spent shredding since the last call, the splitter's own excluded.
+  /// Time spent shredding since the last call: the splitter's own, and the
+  /// excluded clock's, left out.
   uint64_t takeShredTimeNs() {
     const uint64_t ns = shredNs_;
     shredNs_ = 0;
@@ -224,6 +229,11 @@ class CellNestedShredder {
 
   void wireColumns(const SplitBatch& batch);
 
+  /// The excluded clock now; 0 without one.
+  uint64_t excludedNow() const {
+    return excludedNs_ != nullptr ? *excludedNs_ : 0;
+  }
+
   /// `n` elements of a pool buffer kept across batches.
   template <typename T>
   T* scratch(BufferPtr& buffer, size_t n);
@@ -236,6 +246,7 @@ class CellNestedShredder {
   CellSplitter& splitter_;
   const uint32_t numPartitions_;
   memory::MemoryPool& pool_;
+  const uint64_t* const excludedNs_;
 
   std::vector<NodeInput> inputs_;
   /// Per layout column: the rows' decoded column, or an element batch's view
