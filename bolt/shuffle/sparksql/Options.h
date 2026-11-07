@@ -300,6 +300,9 @@ struct ShuffleWriterMetrics {
   // tasks it counts Cell writers.
   int64_t useCellShuffle{0};
   int64_t splitTime{0};
+  // CellShuffleWriter: time spent sealing payloads and spilling or pushing
+  // cell data during split, excluded from splitTime.
+  int64_t sealSpillTime{0};
   int64_t convertTime{0};
   int64_t flattenTime{0};
   int64_t computePidTime{0};

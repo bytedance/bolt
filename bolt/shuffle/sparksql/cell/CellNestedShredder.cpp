@@ -159,11 +159,13 @@ CellNestedShredder::CellNestedShredder(
     const CellNestedLayout& layout,
     CellSplitter& splitter,
     uint32_t numPartitions,
-    memory::MemoryPool& pool)
+    memory::MemoryPool& pool,
+    const uint64_t* excludedNs)
     : layout_(layout),
       splitter_(splitter),
       numPartitions_(numPartitions),
       pool_(pool),
+      excludedNs_(excludedNs),
       inputs_(layout.numNodes()),
       decoded_(layout.numNodes()),
       nullClass_(layout.numNodes(), NullClass::kAllNull),
@@ -236,6 +238,7 @@ void CellNestedShredder::followSeals() {
 
 void CellNestedShredder::prepare(const RowVector& rv) {
   const uint64_t start = currentTimeNs();
+  const uint64_t excluded = excludedNow();
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
@@ -271,7 +274,7 @@ void CellNestedShredder::prepare(const RowVector& rv) {
   for (const uint32_t container : layout_.space(0).containers) {
     countRange(container, 0, numRows_);
   }
-  shredNs_ += currentTimeNs() - start;
+  shredNs_ += currentTimeNs() - start - (excludedNow() - excluded);
 }
 
 NullClass CellNestedShredder::viewRows(uint32_t col) {
@@ -518,6 +521,7 @@ void CellNestedShredder::split(
   BOLT_CHECK_EQ(row2Partition.size(), static_cast<size_t>(numRows_));
   BOLT_CHECK_EQ(partition2RowCount.size(), numPartitions_);
   const uint64_t start = currentTimeNs();
+  const uint64_t excluded = excludedNow();
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
@@ -581,7 +585,9 @@ void CellNestedShredder::split(
   }
   releaseOver(ones_, keep * sizeof(int16_t));
   releaseOver(identity_, keep * sizeof(vector_size_t));
-  shredNs_ += currentTimeNs() - start - splitNs_;
+  // splitNs_ leaves out the excluded time inside the splitter's calls: all
+  // of the excluded time comes off here.
+  shredNs_ += currentTimeNs() - start - splitNs_ - (excludedNow() - excluded);
 }
 
 int64_t CellNestedShredder::releaseScratch() {
@@ -798,8 +804,9 @@ NullClass CellNestedShredder::view(uint32_t col, const ElementBatch& elements) {
 
 void CellNestedShredder::wireColumns(const SplitBatch& batch) {
   const uint64_t start = currentTimeNs();
+  const uint64_t excluded = excludedNow();
   splitter_.split(batch);
-  splitNs_ += currentTimeNs() - start;
+  splitNs_ += currentTimeNs() - start - (excludedNow() - excluded);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -95,6 +95,12 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// the active side, and a composite flush waits for the split's end.
   arrow::Status computePartitions(const RowVector& rv);
 
+  /// Inside split(): a reclaim reached now is nested in the split, which
+  /// the operator times as a whole, not as externalReclaimTime.
+  bool inSplitCall() const {
+    return inSplitCall_;
+  }
+
   memory::MemoryPool* const boltPool_;
   std::vector<uint32_t> row2Partition_;
   std::vector<uint32_t> partition2RowCount_;
@@ -127,6 +133,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// takes the computed ids as they are.
   std::shared_ptr<Partitioner> pidSource_;
   bool stopped_{false};
+  bool inSplitCall_{false};
   /// The last batch was composite: that side is the active one - it takes
   /// reclaims - and the ordinary side holds nothing, having been flushed
   /// at the switch. Composite rows may or may not be held (heldRowBytes_).

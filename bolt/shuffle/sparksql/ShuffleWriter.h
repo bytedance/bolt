@@ -135,6 +135,10 @@ class ShuffleWriter {
     return metrics_.computePidTime;
   }
 
+  int64_t sealSpillTime() const {
+    return metrics_.sealSpillTime;
+  }
+
   const std::vector<int64_t>& partitionLengths() const {
     return metrics_.partitionLengths;
   }

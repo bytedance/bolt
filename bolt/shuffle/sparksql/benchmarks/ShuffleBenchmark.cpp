@@ -2241,6 +2241,10 @@ void writeCounters(
   setCounter(counters, "input_bytes", c.inputBytes, metric);
   setCounter(counters, "wall_ns", w.wallNs, time);
   setCounter(counters, "split_ns", w.splitNs, time);
+  // The Cell writer's seals, spills and pushes inside its splits; it holds
+  // the compression and writes compress_ns and evict_ns count, so other_ns
+  // does not take it off.
+  setCounter(counters, "seal_spill_ns", m.sealSpillTime, time);
   setCounter(counters, "stop_ns", w.stopNs, time);
   setCounter(counters, "convert_ns", m.convertTime, time);
   setCounter(counters, "flatten_ns", m.flattenTime, time);

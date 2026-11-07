@@ -488,8 +488,15 @@ LD_LIBRARY_PATH=<build dir> taskset -c 3 ./bolt_shuffle_benchmark \
   `verify`, `list`, `dir`, `cell_stream_compression` and
   `cell_adaptive_compression`. See `--helpfull`.
 - Each benchmark reports ns per row, plus user counters (split, shred,
-  compress, write and evict times, bytes written and raw, pool peak, and so
-  on) in the `--bm_json_verbose` output.
+  seal and spill, compress, write and evict times, bytes written and raw,
+  pool peak, and so on) in the `--bm_json_verbose` output. `seal_spill_ns`
+  is the writer's `sealSpillTime`: the seals, spills and pushes done inside
+  its splits - a batch's rows' seal, the partial spills of chunk growths,
+  the seals after a batch, the spills of a reclaim reached from inside a
+  split - which `splitTime` leaves out, as V1's leaves out its eviction. It
+  holds the compression and the spill writes or pushes that `compress_ns`
+  and `evict_ns` count. A reclaim from outside is the operator's
+  `externalReclaimTime`, and `stop()` is in neither.
 
 **A/B method.** The A/B helper scripts are not in the repository. The method:
 keep a copy of the baseline build's benchmark binary and its shared

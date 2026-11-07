@@ -1531,6 +1531,83 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   EXPECT_EQ(leaf->usedBytes(), 0);
 }
 
+TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
+  // splitTime is the split alone, as V1 counts it: the seals, spills and
+  // pushes done inside the splits are sealSpillTime, flat or nested, local
+  // or pushed. With the shred time the two fit in the time the split()
+  // calls took, so none of it is counted twice. A small write that never
+  // seals or spills has no sealSpillTime, and neither has a write whose
+  // only spill is a reclaim between two splits, which the operator counts
+  // as externalReclaimTime.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(79);
+  for (const bool nested : {false, true}) {
+    for (const bool rss : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "{}, {}", nested ? "nested" : "flat", rss ? "rss" : "local"));
+      const auto expectTimes = [&](const test::WrittenShuffle& written) {
+        const auto& metrics = written.metrics;
+        EXPECT_GT(metrics.splitTime, 0);
+        EXPECT_EQ(metrics.flattenTime > 0, nested);
+        EXPECT_LE(
+            metrics.splitTime + metrics.flattenTime + metrics.convertTime +
+                metrics.sealSpillTime,
+            written.splitWallNs);
+      };
+      const auto quietOptions = [&]() {
+        auto options = writerOptions(kPartitions, rss);
+        options.cellOptions.spillMemoryBytes = 0;
+        return options;
+      };
+
+      const auto small = skewedInput(kPartitions, 2, 1000, 50, 60, nested, rng);
+      const auto plain = test::writeShuffle(quietOptions(), small, pool());
+      expectTimes(plain);
+      EXPECT_EQ(plain.metrics.spillCount, 0);
+      if (!rss) {
+        EXPECT_EQ(plain.metrics.totalBytesEvicted, 0);
+      }
+      EXPECT_EQ(plain.metrics.sealSpillTime, 0);
+
+      // Payloads sealed past 2 MiB, and cells held to one chunk: seals,
+      // pushes on Celeborn, partial spills locally.
+      const auto input =
+          skewedInput(kPartitions, 8, 4096, 50, 600, nested, rng);
+      auto options = quietOptions();
+      options.cellOptions.partitionSealBytes = 2 << 20;
+      options.cellOptions.cellMemorySpillBytes = 4 << 20;
+      const auto busy = test::writeShuffle(options, input, pool());
+      expectTimes(busy);
+      EXPECT_GT(busy.metrics.spillCount, 0);
+      if (!rss) {
+        EXPECT_GT(busy.metrics.totalSpillFiles, 0);
+      }
+      EXPECT_GT(busy.metrics.sealSpillTime, 0);
+      test::expectReadsBack(input, busy, arrow::Compression::LZ4_FRAME, pool());
+
+      options = quietOptions();
+      CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+      const auto reclaimed = test::writeShuffle(
+          writer, options, input, pool(), nullptr, [&](size_t batch) {
+            if (batch == 4) {
+              int64_t freed = 0;
+              ASSERT_TRUE(writer.reclaimFixedSize(1 << 30, &freed).ok());
+              EXPECT_GT(freed, 0);
+            }
+          });
+      expectTimes(reclaimed);
+      // Locally a run, on Celeborn a push of the window.
+      EXPECT_EQ(reclaimed.metrics.spillCount, rss ? 1 : 0);
+      if (!rss) {
+        EXPECT_GT(reclaimed.metrics.totalSpillFiles, 0);
+      }
+      EXPECT_EQ(reclaimed.metrics.sealSpillTime, 0);
+      test::expectReadsBack(
+          input, reclaimed, arrow::Compression::LZ4_FRAME, pool());
+    }
+  }
+}
+
 TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
   CellShuffleWriter writer(
       writerOptions(2), pool(), arrow::default_memory_pool());
