@@ -630,8 +630,9 @@ bool CellPayloadDecoder::parsePayload(
     CellByteSource& in,
     uint32_t& rowCount,
     std::string& error) {
-  uint8_t header[kPayloadFixedHeaderBytes];
-  if (!in.read(header, sizeof(header))) {
+  // Read into the member, which a malformed stream's error shows.
+  const uint8_t* const header = header_;
+  if (!in.read(header_, sizeof(header_))) {
     return fail(error, "truncated payload header");
   }
   rowCount = folly::loadUnaligned<uint32_t>(header);

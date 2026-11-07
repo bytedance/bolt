@@ -135,6 +135,13 @@ struct CellShuffleOptions {
   // state the adapter's single column avoids. The reader must be set alike
   // (ShuffleReaderOptions::cellNativeNestedTypes).
   bool nativeNestedTypes = true;
+  // Diagnostic, local shuffle only: once the data file is closed, walk its
+  // block and run headers against the partition lengths and the payloads
+  // the merge wrote, and fail the task at write time on any mismatch, with
+  // the partition, the field and its bytes, rather than leave a misaligned
+  // file to its readers. A few small reads per payload of a file still in
+  // the page cache; off skips them.
+  bool verifyDataFile = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;

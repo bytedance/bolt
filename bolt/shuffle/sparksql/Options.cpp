@@ -58,7 +58,8 @@ std::string CellShuffleOptions::toString() const {
       "cellMemorySpillBytes={} spillMemoryBytes={} "
       "partitionSealBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} "
-      "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
+      "streamCompression={} adaptiveCompression={} nativeNestedTypes={} "
+      "verifyDataFile={}",
       cellMemorySpillBytes,
       spillMemoryBytes,
       partitionSealBytes,
@@ -66,7 +67,8 @@ std::string CellShuffleOptions::toString() const {
       enableStringDictionary,
       streamCompression,
       adaptiveCompression,
-      nativeNestedTypes);
+      nativeNestedTypes,
+      verifyDataFile);
 }
 
 std::string ShuffleReaderOptions::toString() const {
