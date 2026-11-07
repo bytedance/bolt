@@ -213,6 +213,13 @@ class CellPayloadDecoder {
     return layout_;
   }
 
+  /// The fixed header of the payload read last, its bytes as read: when
+  /// reading it failed, only the first bytes, as many as the source gave,
+  /// are its own. What a malformed stream's error shows of it.
+  std::span<const uint8_t, kPayloadFixedHeaderBytes> payloadHeader() const {
+    return std::span<const uint8_t, kPayloadFixedHeaderBytes>(header_);
+  }
+
  private:
   struct Dictionary {
     size_t firstEntry;
@@ -392,6 +399,9 @@ class CellPayloadDecoder {
   vector_size_t batchCapacity_{0};
   vector_size_t batchRows_{0};
   uint64_t batchStringBytes_{0};
+
+  /// The header parsePayload() read last.
+  uint8_t header_[kPayloadFixedHeaderBytes]{};
 };
 
 /// Expands the null records of one kRawNull column at `cursor` - their u32

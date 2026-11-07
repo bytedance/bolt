@@ -653,6 +653,129 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
   }
 }
 
+TEST_F(CellMalformedInputTest, malformedBlocksTellWhereTheReaderWas) {
+  // The message of the error reading `streams` as `type` fails with.
+  const auto errorOf = [&](const std::vector<std::string>& streams,
+                           const RowTypePtr& type) -> std::string {
+    try {
+      const auto reader =
+          test::makeReader(streams, type, nullptr, pool(), 4096, 1 << 20);
+      while (reader->next() != nullptr) {
+      }
+    } catch (const BoltException& e) {
+      return e.message();
+    }
+    ADD_FAILURE() << "read without an error";
+    return "";
+  };
+  const auto expectHas = [](const std::string& message,
+                            const std::string& part) {
+    EXPECT_NE(message.find(part), std::string::npos)
+        << "'" << part << "' not in: " << message;
+  };
+  // `bytes` as the error shows them.
+  const auto hex = [](const std::string& bytes) {
+    std::string out;
+    for (const char c : bytes) {
+      out += fmt::format(
+          "{}{:02x}", out.empty() ? "" : " ", static_cast<uint8_t>(c));
+    }
+    return out;
+  };
+  // What the error says of `payload`, a writer's payload read whole from
+  // offset 0 of the stream.
+  const auto previous = [](const std::string& payload) {
+    const auto field = [&](size_t at) {
+      return folly::loadUnaligned<uint32_t>(payload.data() + 1 + at);
+    };
+    return fmt::format(
+        "previous payload at offset 0 to {}: rows={} runCount={} "
+        "nullStoredSize={} nullDecodedSize={}",
+        payload.size(),
+        field(0),
+        field(4),
+        field(16),
+        field(20));
+  };
+  // After a payload, a payload header of 5 rows, 2^17 runs and a null body
+  // of one byte, then the bytes `tail` the error shows the first 32 of.
+  std::string tooManyRuns(1, static_cast<char>(CellBlockKind::kPayload));
+  put(tooManyRuns, uint32_t{5});
+  put(tooManyRuns, uint32_t{1} << 17);
+  put(tooManyRuns, uint64_t{0});
+  put(tooManyRuns, uint32_t{1});
+  put(tooManyRuns, uint32_t{0});
+  const std::string tail = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+  const auto bigint = ROW({"a"}, {BIGINT()});
+  const auto bigints = written(makeRowVector(
+      {makeFlatVector<int64_t>(100, [](auto row) { return row * 7; })}));
+  auto message = errorOf({bigints + tooManyRuns + tail}, bigint);
+  expectHas(
+      message,
+      fmt::format(
+          "malformed cell shuffle payload: run count beyond the configured "
+          "limit [stream 0 (1 opened), block 1 at offset {}, read to offset {}",
+          bigints.size(),
+          bigints.size() + tooManyRuns.size()));
+  expectHas(message, previous(bigints));
+  expectHas(message, "block header bytes: " + hex(tooManyRuns) + ";");
+  expectHas(message, "next 32 bytes: " + hex(tail.substr(0, 32)) + "]");
+
+  // The same in a nested layout's payload.
+  const auto arrays = ROW({"a"}, {ARRAY(BIGINT())});
+  const auto nested = written(makeRowVector({makeArrayVector<int64_t>(
+      50,
+      [](auto row) { return row % 3; },
+      [](auto index) { return index; })}));
+  message = errorOf({nested + tooManyRuns + tail}, arrays);
+  expectHas(
+      message,
+      fmt::format(
+          "malformed cell shuffle payload: run count beyond the configured "
+          "limit [stream 0 (1 opened), block 1 at offset {}, read to offset {}",
+          nested.size(),
+          nested.size() + tooManyRuns.size()));
+  expectHas(message, previous(nested));
+  expectHas(message, "block header bytes: " + hex(tooManyRuns) + ";");
+
+  // A header cut short: only its bytes read are shown.
+  const auto cut = tooManyRuns.substr(0, 11);
+  message = errorOf({bigints + cut}, bigint);
+  expectHas(
+      message,
+      fmt::format(
+          "truncated payload header [stream 0 (1 opened), block 1 at offset "
+          "{}, read to offset {}",
+          bigints.size(),
+          bigints.size() + cut.size()));
+  expectHas(
+      message, "block header bytes: " + hex(cut) + "; next 0 bytes: none]");
+
+  // A composite block's header cut short.
+  const auto composite =
+      std::string(1, static_cast<char>(CellBlockKind::kCompositeRows)) +
+      bytesOf<uint32_t>({3});
+  message = errorOf({bigints + composite}, bigint);
+  expectHas(
+      message,
+      fmt::format(
+          "malformed composite shuffle block: truncated composite block header "
+          "[stream 0 (1 opened), block 1 at offset {}, read to offset {}",
+          bigints.size(),
+          bigints.size() + composite.size()));
+  expectHas(message, "block header bytes: " + hex(composite) + ";");
+
+  // An unknown kind opening a second stream: no payload before it there.
+  message = errorOf({bigints, '\x07' + tail}, bigint);
+  expectHas(
+      message,
+      "unknown cell shuffle block kind [stream 1 (2 opened), block 0 at "
+      "offset 0, read to offset 1; no previous payload in this stream; "
+      "block header bytes: 07; next 32 bytes: " +
+          hex(tail.substr(0, 32)) + "]");
+}
+
 TEST_F(CellMalformedInputTest, edgesOfTheFormatAreRead) {
   // A FOR block of delta width 0 is its base, at every value, though the
   // writer never chooses one.

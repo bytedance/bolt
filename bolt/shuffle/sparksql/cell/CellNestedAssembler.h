@@ -54,6 +54,10 @@ class CellNestedAssembler final : public CellBatchSource {
 
   bool beginPayload(CellByteSource& in, std::string& error) override;
 
+  std::span<const uint8_t> payloadHeader() const override {
+    return payloadDecoder_.payloadHeader();
+  }
+
   RowVectorPtr nextBatch(
       vector_size_t capacity,
       int64_t byteBudget,
