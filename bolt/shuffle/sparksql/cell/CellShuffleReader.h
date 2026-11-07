@@ -37,6 +37,10 @@ class CellBatchSource {
   /// false with `error` set.
   virtual bool beginPayload(CellByteSource& in, std::string& error) = 0;
 
+  /// The fixed header beginPayload() read last, as
+  /// CellPayloadDecoder::payloadHeader() gives it.
+  virtual std::span<const uint8_t> payloadHeader() const = 0;
+
   /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
   /// one append when that is <= 0. `nextPayload` begins the next payload,
   /// false at the end or before a CompositeRows block. nullptr: no row.
@@ -101,8 +105,20 @@ class CellShuffleReader {
     bool read(void* out, size_t n) override;
     bool atEnd() const override;
 
+    /// Bytes read() gave so far, the lookahead byte only once read() gave
+    /// it: the stream offset of the next byte.
+    uint64_t consumed() const {
+      return consumed_;
+    }
+
+    /// Up to `n` of the next bytes into `out`, for a malformed stream's
+    /// error: as many as the stream gives, never an exception. Returns how
+    /// many; consumed() does not count them.
+    size_t readAhead(uint8_t* out, size_t n) noexcept;
+
    private:
     std::shared_ptr<arrow::io::InputStream> in_;
+    uint64_t consumed_{0};
     mutable bool peeked_{false};
     mutable bool ended_{false};
     mutable uint8_t peekByte_{0};
@@ -133,6 +149,13 @@ class CellShuffleReader {
   /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
   /// consumed; false, with `error`, on a malformed one.
   bool readCompositeBlock(std::string& error);
+
+  /// What the error of a malformed block, of kind byte `kind`, starting at
+  /// `blockStart` in the current stream adds to its message: the stream and
+  /// the block's index and offset in it, the stream's previous payload, the
+  /// block's header bytes read and up to 32 bytes after them. Reads those
+  /// from the stream: for the failure path only.
+  std::string blockDiagnostics(uint64_t blockStart, uint8_t kind);
 
   bool hasCompositeRows() const {
     return nextCompositeRow_ < compositeRows_.size();
@@ -167,6 +190,20 @@ class CellShuffleReader {
   std::unique_ptr<StreamSource> source_;
   bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
+
+  // Where the reader is, for a malformed block's error.
+  /// Streams opened, the current one last.
+  uint64_t streamsOpened_{0};
+  /// Blocks of the current stream read whole.
+  uint64_t streamBlocks_{0};
+  /// The current stream's last payload read whole: where its kind byte
+  /// lies and where its bytes end in the stream, and its fixed header.
+  bool hasLastPayload_{false};
+  uint64_t lastPayloadStart_{0};
+  uint64_t lastPayloadEnd_{0};
+  uint8_t lastPayloadHeader_[kPayloadFixedHeaderBytes]{};
+  /// The header, past the kind byte, of the last CompositeRows block.
+  uint8_t compositeHeader_[kCompositeBlockHeaderBytes - 1]{};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

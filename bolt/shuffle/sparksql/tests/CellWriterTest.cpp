@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cstdlib>
@@ -27,10 +28,12 @@
 #include <type_traits>
 
 #include <fmt/format.h>
+#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
+#include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/tests/CellTestUtils.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -1606,6 +1609,161 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
           input, reclaimed, arrow::Compression::LZ4_FRAME, pool());
     }
   }
+}
+
+TEST_F(CellWriterTest, dataFileVerificationNamesTheFaultyPartition) {
+  // Four partitions of 100 BIGINT rows, uncompressed: one payload of one
+  // stored run each, which the writer verified when it stopped.
+  constexpr int32_t kPartitions = 4;
+  const auto data = makeRowVector(
+      {makeFlatVector<int64_t>(400, [](auto row) { return row * 7; })});
+  const auto written = test::writeShuffle(
+      writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED),
+      test::roundRobin({data}, kPartitions),
+      pool());
+  const auto lengths = written.metrics.partitionLengths;
+  const auto layout = CellLayout::create(asRowType(data->type()));
+  // Each partition's payload as the writer wrote it, and where it starts.
+  std::vector<CellPayloadRecord> payloads;
+  std::vector<uint64_t> starts;
+  uint64_t fileSize = 0;
+  for (const auto length : lengths) {
+    starts.push_back(fileSize);
+    payloads.push_back({fileSize, 100, 1});
+    fileSize += length;
+  }
+  const auto verify = [&](const std::vector<int64_t>& partitionLengths) {
+    return verifyCellDataFile(
+        dataFile_,
+        partitionLengths,
+        layout.numWireColumns(),
+        layout.numStreams(),
+        &payloads);
+  };
+  const auto summary = verify(lengths);
+  EXPECT_EQ(summary.partitions, kPartitions);
+  EXPECT_EQ(summary.payloads, kPartitions);
+  EXPECT_EQ(summary.runs, kPartitions);
+  EXPECT_EQ(summary.compositeBlocks, 0);
+
+  // Writes `bytes` at `at` of the data file; returns the bytes there before.
+  const auto overwrite = [&](uint64_t at, const std::string& bytes) {
+    const int fd = ::open(dataFile_.c_str(), O_RDWR);
+    BOLT_CHECK_GE(fd, 0);
+    std::string old(bytes.size(), '\0');
+    const auto size = static_cast<ssize_t>(bytes.size());
+    BOLT_CHECK_EQ(::pread(fd, old.data(), bytes.size(), at), size);
+    BOLT_CHECK_EQ(::pwrite(fd, bytes.data(), bytes.size(), at), size);
+    ::close(fd);
+    return old;
+  };
+  // The message verify(`partitionLengths`) fails with while the data file
+  // holds `bytes` at `at`.
+  const auto errorWith = [&](uint64_t at,
+                             const std::string& bytes,
+                             const std::vector<int64_t>& partitionLengths) {
+    const auto old = overwrite(at, bytes);
+    std::string message;
+    try {
+      verify(partitionLengths);
+      ADD_FAILURE() << "verified without an error";
+    } catch (const BoltException& e) {
+      message = e.message();
+    }
+    overwrite(at, old);
+    return message;
+  };
+  const auto expectHas = [](const std::string& message,
+                            const std::string& part) {
+    EXPECT_NE(message.find(part), std::string::npos)
+        << "'" << part << "' not in: " << message;
+  };
+  // A partition's run: after the kind byte, the header, a null body of one
+  // tag byte and one byte of encoding tags. Its layout byte, its stored
+  // size, its decoded size, then its body.
+  const auto runAt = [&](int32_t pid) {
+    return starts[pid] + 1 + kPayloadFixedHeaderBytes + 2;
+  };
+
+  // One byte of partition 2's run header: its layout.
+  auto message = errorWith(runAt(2), "\x07", lengths);
+  expectHas(
+      message,
+      fmt::format(
+          "cell data file verification failed: partition 2, payload 0 "
+          "(block 0) at file offset {}: run 0 layout at file offset {}: "
+          "expected 0 (combined), 1 (separate) or 2 (combined uncompressed), "
+          "actual 7; 32 bytes at {}: 07 ",
+          starts[2],
+          runAt(2),
+          runAt(2)));
+
+  // One byte of partition 1's run header: its stored size's top byte.
+  message = errorWith(runAt(1) + 8, "\x01", lengths);
+  expectHas(
+      message,
+      fmt::format(
+          "cell data file verification failed: partition 1, payload 0 "
+          "(block 0) at file offset {}: run 0 stored size at file offset {}: "
+          "expected",
+          starts[1],
+          runAt(1) + 1));
+
+  // The boundary between partitions 1 and 2 a byte early: partition 1's
+  // run passes its end.
+  const uint64_t bodyAt = runAt(1) + 17;
+  const uint64_t stored = starts[2] - bodyAt;
+  auto shifted = lengths;
+  --shifted[1];
+  ++shifted[2];
+  message = errorWith(0, "", shifted);
+  expectHas(
+      message,
+      fmt::format(
+          "partition 1, payload 0 (block 0) at file offset {}: run 0 stored "
+          "size at file offset {}: expected at most {}, the partition's bytes "
+          "left at file offset {}, actual {}",
+          starts[1],
+          runAt(1) + 1,
+          stored - 1,
+          bodyAt,
+          stored));
+
+  // A patch over partition 3's header: its row count.
+  std::string rows(4, '\0');
+  folly::storeUnaligned<uint32_t>(rows.data(), 101);
+  message = errorWith(starts[3] + 1, rows, lengths);
+  expectHas(
+      message,
+      fmt::format(
+          "partition 3, payload 0 (block 0) at file offset {}: row count at "
+          "file offset {}: expected 100, actual 101",
+          starts[3],
+          starts[3] + 1));
+
+  // Partition lengths a byte longer than the file.
+  auto longer = lengths;
+  ++longer[3];
+  message = errorWith(0, "", longer);
+  expectHas(
+      message,
+      fmt::format(
+          "cell data file verification failed: file size: expected {}, the "
+          "partition lengths' sum, actual {}",
+          fileSize + 1,
+          fileSize));
+
+  // The writer's own check: every partition's payload is where it wrote
+  // it, and no other.
+  payloads.pop_back();
+  message = errorWith(0, "", lengths);
+  expectHas(
+      message,
+      fmt::format(
+          "partition 3, payload 0 (block 0) at file offset {}: payload at "
+          "file offset {}: expected none, the writer wrote no more",
+          starts[3],
+          starts[3]));
 }
 
 TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
