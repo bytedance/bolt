@@ -35,6 +35,18 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
 constexpr uint32_t kChunkBytes = 4 << 20;
+/// The least a reclaim's partial run writes. Memory goes back to the pool
+/// only in whole chunks: a run of less than a chunk leaves the cells it
+/// frees scattered over every chunk, so shrink() returns nothing, and
+/// compaction cannot empty a chunk either - moving one chunk's live cells
+/// takes about a chunk of free cells elsewhere - so the reclaim would fall
+/// through to a full run. Reclaims reach the writer with no minimum size,
+/// a few hundred KB at times. Two chunks leave a chunk of margin - the
+/// cells of an append in progress cannot move, and partitions go whole -
+/// and match maybeReserve()'s 8 MiB quantum. What is freed beyond the
+/// request stays free capacity of the task's root pool, so the next small
+/// allocation needs no reclaim.
+constexpr int64_t kMinReclaimRunBytes = 2 * kChunkBytes;
 /// Slice bound on a remote shuffle, where a window is released only whole
 /// at a batch boundary: one slice bounds how far memory runs past a failed
 /// reservation before the window can be pushed.
@@ -760,14 +772,15 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     ++pressure_.belowFloorReclaims;
     return arrow::Status::OK();
   }
-  // The largest partitions first, as much as the request asks. Their cells
-  // are spread over every chunk, so compaction then moves the remaining
-  // cells out of the emptiest chunks for shrink() to return. Only when that
-  // still falls short does the whole window go.
+  // The largest partitions first, as much as the request asks and at least
+  // kMinReclaimRunBytes. Their cells are spread over every chunk, so
+  // compaction then moves the remaining cells out of the emptiest chunks
+  // for shrink() to return. Only when that still falls short does the
+  // whole window go.
   if (size > 0) {
     ++pressure_.reclaimPartialRuns;
-    pressure_.reclaimPartialRunBytes +=
-        splitter_->spillPartitions(static_cast<uint64_t>(size - *actual));
+    pressure_.reclaimPartialRunBytes += splitter_->spillPartitions(
+        static_cast<uint64_t>(std::max(size - *actual, kMinReclaimRunBytes)));
     int64_t freed = allocator_->shrink();
     pressure_.freedByPartialRun += freed;
     *actual += freed;
