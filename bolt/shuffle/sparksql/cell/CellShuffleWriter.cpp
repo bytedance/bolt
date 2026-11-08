@@ -208,6 +208,16 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   const auto cellBytes = static_cast<uint32_t>(
       folly::prevPowTwo(static_cast<uint64_t>(std::clamp<int64_t>(
           perStream, kMinDataCellBytes, kMaxDataCellBytes))));
+  // Many small reclaims must not each write a run of a few bytes per
+  // partition: one of a given size waits for this much cell data, at most
+  // an eighth of the limit.
+  const int64_t runFloor = options_.cellOptions.reclaimRunFloorBytes;
+  BOLT_USER_CHECK_GE(
+      runFloor,
+      0,
+      "CellShuffleOptions::reclaimRunFloorBytes must not be negative");
+  reclaimRunFloorBytes_ =
+      limit > 0 ? std::min<int64_t>(limit / 8, runFloor) : runFloor;
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });
@@ -240,7 +250,9 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
                                            : "none")
             << ", limit=" << limit << " (" << memory.source
             << "), budget=" << budget << ", perStream=" << perStream
-            << ", cellBytes=" << cellBytes << ", spillMemory=" << spillMemory;
+            << ", cellBytes=" << cellBytes
+            << ", reclaimRunFloor=" << reclaimRunFloorBytes_
+            << ", spillMemory=" << spillMemory;
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(
@@ -737,6 +749,17 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
+  // A run must carry real data: under many small reclaims, a run each
+  // would write a few bytes per partition and re-grow every tail cell.
+  // Below the run floor, a reclaim of a given size returns what it freed
+  // above, and the arbitrator turns to other operators for the rest; one
+  // that asks for everything writes whatever the cells hold.
+  if (size > 0 &&
+      splitter_->cellDataBytes() <
+          static_cast<uint64_t>(reclaimRunFloorBytes_)) {
+    ++pressure_.belowFloorReclaims;
+    return arrow::Status::OK();
+  }
   // The largest partitions first, as much as the request asks. Their cells
   // are spread over every chunk, so compaction then moves the remaining
   // cells out of the emptiest chunks for shrink() to return. Only when that
@@ -880,14 +903,16 @@ std::string CellShuffleWriter::PressureStats::toString() const {
     return seals[static_cast<size_t>(reason)];
   };
   return fmt::format(
-      "reclaims={} (idle={} deferred={}) requested={:.1f}MB freed={:.1f}MB "
-      "[idle={:.1f}MB memory={:.1f}MB spill={:.1f}MB compaction={:.1f}MB "
-      "run={:.1f}MB push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) "
-      "growth={} ({:.1f}MB), growth flushes={}; compactions={} ({:.1f}MB "
-      "emptied); full runs={}; seals rows={} memory={} nulls={} flush={} "
-      "reserve={}; partition seals={} ({} partitions); null peak={:.1f}MB",
+      "reclaims={} (idle={} below floor={} deferred={}) requested={:.1f}MB "
+      "freed={:.1f}MB [idle={:.1f}MB memory={:.1f}MB spill={:.1f}MB "
+      "compaction={:.1f}MB run={:.1f}MB push={:.1f}MB]; partial runs "
+      "reclaim={} ({:.1f}MB) growth={} ({:.1f}MB), growth flushes={}; "
+      "compactions={} ({:.1f}MB emptied); full runs={}; seals rows={} "
+      "memory={} nulls={} flush={} reserve={}; partition seals={} ({} "
+      "partitions); null peak={:.1f}MB",
       reclaims,
       idleReclaims,
+      belowFloorReclaims,
       deferredReclaims,
       mb(requestedBytes),
       mb(freedBytes),

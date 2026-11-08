@@ -55,13 +55,14 @@ const char* rowFormatName(row::RowFormat format) {
 
 std::string CellShuffleOptions::toString() const {
   return fmt::format(
-      "cellMemorySpillBytes={} spillMemoryBytes={} "
+      "cellMemorySpillBytes={} spillMemoryBytes={} reclaimRunFloorBytes={} "
       "partitionSealBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} "
       "streamCompression={} adaptiveCompression={} nativeNestedTypes={} "
       "verifyDataFile={}",
       cellMemorySpillBytes,
       spillMemoryBytes,
+      reclaimRunFloorBytes,
       partitionSealBytes,
       nullMemLimitBytes,
       enableStringDictionary,
