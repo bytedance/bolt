@@ -30,7 +30,7 @@
 ///               nullDecodedSize, runCount and variableBytes all 0 (a
 ///               payload of its header alone); W > 0 requires
 ///               nullStoredSize >= 1. The reader limits rowCount to
-///               kMaxPayloadRows and runCount to 65536.
+///               kMaxPayloadRows and runCount to 2^24 (CellDecodeLimits).
 ///   null body   nullStoredSize bytes: one 2-bit NullTag per wire column,
 ///               four to a byte from the low bits, ceil(W / 4) bytes, the
 ///               unused high bits zero and kReserved rejected; then per

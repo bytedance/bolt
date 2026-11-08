@@ -454,6 +454,11 @@ Writer and reader decide alike from the same logical type, which is why
   would pass it (`SealReason::kRows`).
 - **`kMaxPositions`** (2^31 - 8): the most positions one space holds in a
   payload. A window is sealed before a batch's positions would pass it.
+- **Runs per payload:** a reader accepts at most
+  `CellDecodeLimits::maxRunCount` (2^24) runs in a payload. Locally, every
+  run that writes any of a partition's cells, however few, adds one to its
+  open payload; the merge fails the task rather than write a payload of
+  more runs than a reader accepts.
 - **Oversized nested batches:** a single batch whose rows together hold more
   than `kMaxPositions` elements in one ARRAY or MAP column cannot be carried
   by any payload, and fails with a user error (`BOLT_USER_FAIL`).
