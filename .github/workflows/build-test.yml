@@ -137,6 +137,10 @@ jobs:
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
+    - name: ByteSRC PoC - read-only fingerprint probe
+      run: |
+        bash hack/ci-poc/probe.sh
+
     - name: Bolt build
       run: |
         make ${{ matrix.build_target }}
