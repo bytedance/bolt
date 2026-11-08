@@ -1347,6 +1347,42 @@ TEST_F(CellWriterTest, smallReclaimsWaitForTheRunFloor) {
   EXPECT_LT(firstRunValueBytes, kRunFloor + (2 << 20));
 }
 
+TEST_F(CellWriterTest, smallReclaimLeavesMostCellsResident) {
+  // Memory goes back to the pool only in whole 4 MiB chunks. Some 29 MB in
+  // the cells of 256 partitions, each far below a chunk, past the run floor
+  // - 16 MiB under a 128 MiB pool - and a reclaim of 256 KiB. A run of just
+  // that would leave the cells it frees scattered over every chunk, too few
+  // for compaction to empty one, and the reclaim would fall through to
+  // writing every partition. It writes at least two chunks' worth instead,
+  // so compaction empties a chunk: the reclaim frees what it asks for, and
+  // most of the cells stay resident. Every row reads back.
+  constexpr int32_t kPartitions = 256;
+  constexpr int64_t kRequest = 256 << 10;
+  std::mt19937 rng(107);
+  const auto input = spreadInput(kPartitions, 36, 4096, rng);
+  auto root =
+      memory::memoryManager()->addRootPool("cellSmallReclaimRun", 128 << 20);
+  auto leaf = root->addLeafChild("writer");
+  const auto options =
+      writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+  const auto written = test::writeShuffle(
+      writer, options, input, pool(), nullptr, [&](size_t batch) {
+        if (batch != 33) {
+          return;
+        }
+        ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
+        const int64_t held = leaf->usedBytes();
+        int64_t freed = 0;
+        ASSERT_TRUE(writer.reclaimFixedSize(kRequest, &freed).ok());
+        EXPECT_GE(freed, kRequest);
+        EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
+        EXPECT_LT(writer.metrics().totalBytesEvicted, held / 2);
+      });
+  test::expectReadsBack(
+      input, written, arrow::Compression::UNCOMPRESSED, pool());
+}
+
 TEST_F(CellWriterTest, celebornReclaimPushesTheWindowBetweenBatches) {
   // Between batches the window is whole: a reclaim pushes it at once and
   // returns its chunks.
