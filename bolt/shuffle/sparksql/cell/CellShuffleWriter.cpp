@@ -815,7 +815,14 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   BOLT_CHECK(!stopped_, "stop called twice");
   stopped_ = true;
   if (initialized_) {
-    splitter_->finish(metrics_);
+    try {
+      splitter_->finish(metrics_);
+    } catch (...) {
+      // A failed merge or data file verification needs the pressure line
+      // most: what memory pressure made the writer do.
+      logPressure();
+      throw;
+    }
   } else {
     // No ordinary batch ever came: the block output alone writes the data file
     // - empty, or the composite rows - or ends the Celeborn attempt.
@@ -832,23 +839,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   metrics_.peakBytes = boltPool_->peakBytes();
   metrics_.sealSpillTime += static_cast<int64_t>(sealSpillNs_);
   if (initialized_) {
-    std::string spillMemory;
-    if (spillMemory_ != nullptr) {
-      const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
-      spillMemory = fmt::format(
-          ", spill memory: held peak={:.1f}MB flushed={:.1f}MB ({} flushes) "
-          "direct={:.1f}MB",
-          mb(spillMemory_->peakBytes()),
-          mb(spillMemory_->flushedBytes()),
-          spillMemory_->flushes(),
-          mb(spillMemory_->directBytes()));
-    }
-    LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
-              << fmt::format(
-                     ", nullClassify={:.1f}ms, sealSpill={:.1f}ms",
-                     nullClassifyNs_ / 1e6,
-                     sealSpillNs_ / 1e6)
-              << spillMemory;
+    logPressure();
   }
 
   // The splitter has released its window; return idle chunks, the
@@ -861,6 +852,26 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   }
   boltPool_->release();
   return arrow::Status::OK();
+}
+
+void CellShuffleWriter::logPressure() const {
+  std::string spillMemory;
+  if (spillMemory_ != nullptr) {
+    const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
+    spillMemory = fmt::format(
+        ", spill memory: held peak={:.1f}MB flushed={:.1f}MB ({} flushes) "
+        "direct={:.1f}MB",
+        mb(spillMemory_->peakBytes()),
+        mb(spillMemory_->flushedBytes()),
+        spillMemory_->flushes(),
+        mb(spillMemory_->directBytes()));
+  }
+  LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
+            << fmt::format(
+                   ", nullClassify={:.1f}ms, sealSpill={:.1f}ms",
+                   nullClassifyNs_ / 1e6,
+                   sealSpillNs_ / 1e6)
+            << spillMemory;
 }
 
 std::string CellShuffleWriter::PressureStats::toString() const {
