@@ -93,7 +93,11 @@ class MemoryByteSource final : public CellByteSource {
 /// pool, so a corrupt size fails on the pool's capacity.
 struct CellDecodeLimits {
   uint32_t maxRowCount{kMaxPayloadRows};
-  uint32_t maxRunCount{1u << 16};
+  /// runCount is a u32 header field and runs are parsed one at a time, so
+  /// this bound guards no memory: it reports a corrupt count early. It must
+  /// stay far above the runs a writer under memory pressure legitimately
+  /// spills into one payload (66105 were seen); the writer checks it too.
+  uint32_t maxRunCount{1u << 24};
 };
 
 /// The codec, decompression side. The format never identifies a codec;
