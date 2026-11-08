@@ -254,6 +254,31 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     return input;
   }
 
+  /// `numBatches` batches of `rows` rows, partition by partition in turn: a
+  /// random bigint and a string of 100 to 299 letters, about 210 bytes a
+  /// row.
+  ShuffleInput spreadInput(
+      int32_t numPartitions,
+      int numBatches,
+      vector_size_t rows,
+      std::mt19937& rng) {
+    ShuffleInput input;
+    for (int batch = 0; batch < numBatches; ++batch) {
+      input.pids.push_back(roundRobinPids(rows, numPartitions));
+      std::vector<std::string> strings(rows);
+      for (auto& value : strings) {
+        value.assign(100 + rng() % 200, static_cast<char>('a' + rng() % 26));
+      }
+      input.data.push_back(makeRowVector(
+          {"v", "s"},
+          {makeFlatVector<int64_t>(
+               rows, [&](auto) { return static_cast<int64_t>(rng()); }),
+           makeFlatVector<std::string>(
+               rows, [&](auto row) { return strings[row]; })}));
+    }
+    return input;
+  }
+
   /// Expects every partition of `written` to read back, in order, the rows
   /// of `input` that ordinary batches sent it and, as CompositeRowVectors,
   /// those of the batches `composite` marks.
@@ -1168,8 +1193,10 @@ TEST_F(CellWriterTest, reclaimCompactsAndKeepsAppending) {
   // The writer's pool shows its memory alone.
   auto root = memory::memoryManager()->addRootPool("cellReclaimCompacts");
   auto leaf = root->addLeafChild("writer");
-  const auto options =
+  auto options =
       writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+  // No run floor: the cells stay below it, where a reclaim writes no run.
+  options.cellOptions.reclaimRunFloorBytes = 0;
   CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
   const auto reclaim = [&](int64_t size) {
     int64_t freed = 0;
@@ -1189,6 +1216,135 @@ TEST_F(CellWriterTest, reclaimCompactsAndKeepsAppending) {
       });
   test::expectReadsBack(
       input, written, arrow::Compression::UNCOMPRESSED, pool());
+}
+
+TEST_F(CellWriterTest, reclaimBelowTheRunFloorWritesNoRun) {
+  // Some 10 MB in cells - three chunks and more - under a 128 MiB pool,
+  // whose run floor is 16 MiB: a reclaim of a given size writes no run,
+  // returning only what it frees without one. A reclaim that asks for
+  // everything still writes whatever the cells hold. Every row reads back.
+  constexpr int32_t kPartitions = 8;
+  std::mt19937 rng(101);
+  const auto input = spreadInput(kPartitions, 14, 4096, rng);
+  auto root =
+      memory::memoryManager()->addRootPool("cellBelowRunFloor", 128 << 20);
+  auto leaf = root->addLeafChild("writer");
+  const auto options =
+      writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+  const auto written = test::writeShuffle(
+      writer, options, input, pool(), nullptr, [&](size_t batch) {
+        if (batch != 11) {
+          return;
+        }
+        int64_t freed = 0;
+        ASSERT_TRUE(writer.reclaimFixedSize(1 << 20, &freed).ok());
+        EXPECT_EQ(writer.metrics().totalBytesEvicted, 0);
+        ASSERT_TRUE(writer.reclaimFixedSize(0, &freed).ok());
+        EXPECT_GT(freed, 0);
+        EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
+      });
+  test::expectReadsBack(
+      input, written, arrow::Compression::UNCOMPRESSED, pool());
+  EXPECT_EQ(written.metrics.totalSpillFiles, 1);
+}
+
+TEST_F(CellWriterTest, runFloorFollowsReclaimRunFloorBytes) {
+  // The rows of reclaimBelowTheRunFloorWritesNoRun, some 10 MB in cells
+  // when a reclaim of 1 MiB comes. Without a pool cap the run floor is
+  // reclaimRunFloorBytes itself: at the default, 64 MiB, the reclaim writes
+  // no run, while 4 MiB, or 0 (off), lets it write one. Under a 32 MiB
+  // pool the floor is at most an eighth of it, 4 MiB, so 1 GiB lets the
+  // reclaim write a run too. Every row reads back. A negative floor fails
+  // the first batch.
+  constexpr int32_t kPartitions = 8;
+  std::mt19937 rng(101);
+  const auto input = spreadInput(kPartitions, 14, 4096, rng);
+  struct Floor {
+    int64_t optionBytes;
+    int64_t poolCap;
+    bool runs;
+  };
+  const std::vector<Floor> floors{
+      {int64_t{64} << 20, memory::kMaxMemory, false},
+      {int64_t{4} << 20, memory::kMaxMemory, true},
+      {0, memory::kMaxMemory, true},
+      {int64_t{1} << 30, int64_t{32} << 20, true}};
+  for (size_t i = 0; i < floors.size(); ++i) {
+    const auto& floor = floors[i];
+    SCOPED_TRACE(fmt::format(
+        "reclaimRunFloorBytes {}, pool cap {}",
+        floor.optionBytes,
+        floor.poolCap));
+    auto root = memory::memoryManager()->addRootPool(
+        fmt::format("cellRunFloorOption{}", i), floor.poolCap);
+    auto leaf = root->addLeafChild("writer");
+    auto options =
+        writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+    options.cellOptions.reclaimRunFloorBytes = floor.optionBytes;
+    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+    const auto written = test::writeShuffle(
+        writer, options, input, pool(), nullptr, [&](size_t batch) {
+          if (batch != 11) {
+            return;
+          }
+          ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
+          int64_t freed = 0;
+          ASSERT_TRUE(writer.reclaimFixedSize(1 << 20, &freed).ok());
+          EXPECT_EQ(writer.metrics().totalBytesEvicted > 0, floor.runs);
+        });
+    test::expectReadsBack(
+        input, written, arrow::Compression::UNCOMPRESSED, pool());
+  }
+
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.reclaimRunFloorBytes = -1;
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  BOLT_ASSERT_USER_THROW(
+      writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
+      "reclaimRunFloorBytes must not be negative");
+}
+
+TEST_F(CellWriterTest, smallReclaimsWaitForTheRunFloor) {
+  // Under memory pressure the arbitrator may take a little from the writer
+  // after every batch. A run must carry real data: a reclaim of a given
+  // size writes none while the cells hold less than the run floor -
+  // min(reclaimRunFloorBytes, memory limit / 8), 16 MiB under a 128 MiB
+  // pool. With a reclaim of 1 MiB after each batch of some 0.85 MB, nothing
+  // reaches the disk before the rows written pass the floor, and a run
+  // comes as soon as they have. Every row reads back.
+  constexpr int32_t kPartitions = 8;
+  constexpr int64_t kLimit = 128 << 20;
+  constexpr int64_t kRunFloor = kLimit / 8;
+  std::mt19937 rng(89);
+  const auto input = spreadInput(kPartitions, 32, 4096, rng);
+  auto root = memory::memoryManager()->addRootPool("cellSmallReclaims", kLimit);
+  auto leaf = root->addLeafChild("writer");
+  const auto options =
+      writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+  // The value bytes of the rows written so far - their bigints and string
+  // bytes, a little less than the cells hold - and those at the first run.
+  int64_t valueBytes = 0;
+  int64_t firstRunValueBytes = 0;
+  const auto written = test::writeShuffle(
+      writer, options, input, pool(), nullptr, [&](size_t batch) {
+        const auto* strings =
+            input.data[batch]->childAt(1)->asFlatVector<StringView>();
+        for (vector_size_t row = 0; row < strings->size(); ++row) {
+          valueBytes += sizeof(int64_t) + strings->valueAt(row).size();
+        }
+        int64_t freed = 0;
+        ASSERT_TRUE(writer.reclaimFixedSize(1 << 20, &freed).ok());
+        if (firstRunValueBytes == 0 && writer.metrics().totalBytesEvicted > 0) {
+          firstRunValueBytes = valueBytes;
+        }
+      });
+  test::expectReadsBack(
+      input, written, arrow::Compression::UNCOMPRESSED, pool());
+  // Not before the floor, and within two batches past it.
+  EXPECT_GE(firstRunValueBytes, kRunFloor * 9 / 10);
+  EXPECT_LT(firstRunValueBytes, kRunFloor + (2 << 20));
 }
 
 TEST_F(CellWriterTest, celebornReclaimPushesTheWindowBetweenBatches) {
@@ -1456,6 +1612,8 @@ TEST_F(CellWriterTest, reclaimWritesSpillMemoryOutFirst) {
   auto leaf = root->addLeafChild("writer");
   auto options = writerOptions(kPartitions);
   options.cellOptions.partitionSealBytes = 2 << 20;
+  // No run floor: the cells stay below it, where a reclaim writes no run.
+  options.cellOptions.reclaimRunFloorBytes = 0;
   CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
   const auto reclaim = [&](int64_t size) {
     int64_t freed = 0;
@@ -1658,6 +1816,8 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
       test::expectReadsBack(input, busy, arrow::Compression::LZ4_FRAME, pool());
 
       options = quietOptions();
+      // No run floor: the cells stay below it, where a reclaim writes no run.
+      options.cellOptions.reclaimRunFloorBytes = 0;
       CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
       const auto reclaimed = test::writeShuffle(
           writer, options, input, pool(), nullptr, [&](size_t batch) {

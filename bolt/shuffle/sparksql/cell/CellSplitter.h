@@ -97,6 +97,12 @@ class CellSplitter {
   /// cell bytes written.
   uint64_t spillPartitions(uint64_t targetBytes);
 
+  /// The data bytes the cells hold, every partition's: what spillRun()
+  /// writes.
+  uint64_t cellDataBytes() const {
+    return cells_.totalBytes();
+  }
+
   /// DataCells::compact() between output calls: empties chunks for shrink()
   /// to return. Returns the bytes of the chunks emptied.
   uint64_t compactCells(uint64_t targetBytes);
