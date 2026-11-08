@@ -51,7 +51,7 @@ struct CellDataFileSummary {
 /// layout of `numWireColumns` wire columns and `numStreams` streams. Every
 /// read must stay within its partition, and the last block end exactly at
 /// its end; every header field must be one the writer writes - rows >= 1,
-/// runCount <= 65536, a known layout, sizes within the partition, a run
+/// runCount <= 2^24, a known layout, sizes within the partition, a run
 /// not empty - and the lengths must add up to the file's size. With
 /// `written`, the file's payloads must be those, in order: at the same
 /// offsets, with the same row and run counts. Otherwise fails with "cell
@@ -226,9 +226,10 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid,
       size_t from);
 
-  /// Appends one partition's sealed payload.
+  /// Appends partition `pid`'s sealed payload `payload`.
   void writeSealedPayload(
       DataFileWriter& out,
+      uint32_t pid,
       const SealedPayload& payload,
       std::span<const uint8_t> encodingTags);
 

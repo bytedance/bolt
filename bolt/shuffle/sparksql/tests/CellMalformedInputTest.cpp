@@ -28,6 +28,7 @@
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/tests/CellTestUtils.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -378,9 +379,9 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
        bigint,
        with(bigints, kRowCountAt, kMaxPayloadRows + 1),
        "row count beyond the configured limit"},
-      {"runs past 65536",
+      {"runs past the reader's limit",
        bigint,
-       with(bigints, kRunCountAt, uint32_t{(1 << 16) + 1}),
+       with(bigints, kRunCountAt, CellDecodeLimits{}.maxRunCount + 1),
        "run count beyond the configured limit"},
       {"no null body",
        bigint,
@@ -697,11 +698,12 @@ TEST_F(CellMalformedInputTest, malformedBlocksTellWhereTheReaderWas) {
         field(16),
         field(20));
   };
-  // After a payload, a payload header of 5 rows, 2^17 runs and a null body
-  // of one byte, then the bytes `tail` the error shows the first 32 of.
+  // After a payload, a payload header of 5 rows, one run more than a reader
+  // takes and a null body of one byte, then the bytes `tail` the error
+  // shows the first 32 of.
   std::string tooManyRuns(1, static_cast<char>(CellBlockKind::kPayload));
   put(tooManyRuns, uint32_t{5});
-  put(tooManyRuns, uint32_t{1} << 17);
+  put(tooManyRuns, CellDecodeLimits{}.maxRunCount + 1);
   put(tooManyRuns, uint64_t{0});
   put(tooManyRuns, uint32_t{1});
   put(tooManyRuns, uint32_t{0});
@@ -814,6 +816,32 @@ TEST_F(CellMalformedInputTest, edgesOfTheFormatAreRead) {
   ASSERT_EQ(batch->size(), 4096);
   for (vector_size_t row = 0; row < batch->size(); ++row) {
     ASSERT_TRUE(batch->childAt(0)->isNullAt(row));
+  }
+}
+
+TEST_F(CellMalformedInputTest, payloadsOfManyRunsAreRead) {
+  // A writer under memory pressure adds a run to a partition's payload for
+  // every spill that writes some of its cells, however few, and a payload
+  // of 66105 runs was seen, more than the 65536 a reader once took. Here
+  // as many runs, one DOUBLE row each in its raw stream: every row reads
+  // back, in order.
+  constexpr uint32_t kRuns = 66'105;
+  std::vector<double> values;
+  std::vector<std::string> runs;
+  for (uint32_t i = 0; i < kRuns; ++i) {
+    values.push_back(i * 0.5);
+    runs.push_back(storedRun({bytesOf(std::vector<double>{values.back()})}));
+  }
+  const auto manyRuns =
+      payload(kRuns, nullBody({NullTag::kNoNull}), std::string(1, '\0'), runs);
+  const auto expected = makeRowVector({makeFlatVector<double>(values)});
+  for (const int32_t batchSize : {4096, 7}) {
+    SCOPED_TRACE(batchSize);
+    test::expectPartitionRows(
+        test::rowsIn({expected}),
+        read(manyRuns, ROW({"a"}, {DOUBLE()}), false, batchSize),
+        0,
+        batchSize);
   }
 }
 

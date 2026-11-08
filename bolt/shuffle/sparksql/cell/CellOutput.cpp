@@ -104,6 +104,20 @@ void logCompression(const RunCompressor& compressor, const CellLayout& layout) {
   }
 }
 
+/// Fails unless a reader takes a payload of partition `pid` holding
+/// `runCount` runs: written, it would fail every reader of the partition.
+void checkPayloadRuns(uint32_t pid, uint64_t runCount) {
+  constexpr uint32_t kMaxRunCount = CellDecodeLimits{}.maxRunCount;
+  BOLT_CHECK_LE(
+      runCount,
+      kMaxRunCount,
+      "Cell payload of partition {} holds {} runs, more than the {} a reader "
+      "accepts (CellDecodeLimits::maxRunCount)",
+      pid,
+      runCount,
+      kMaxRunCount);
+}
+
 /// Writes partition `pid`'s resident cells to `sink` as one run; nothing
 /// when it has none.
 void writeCells(
@@ -737,10 +751,12 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
 
 void LocalCellOutput::writeSealedPayload(
     DataFileWriter& out,
+    uint32_t pid,
     const SealedPayload& payload,
     std::span<const uint8_t> encodingTags) {
   const uint32_t rows = payload.rows;
   const auto& segments = payload.segments;
+  checkPayloadRuns(pid, segments.size());
   const uint32_t runCount = static_cast<uint32_t>(segments.size());
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
@@ -824,8 +840,9 @@ void LocalCellOutput::writeResidentPayload(
     uint32_t pid) {
   const uint64_t total = residentBytes(in, pid);
   const auto segments = partitionSegments(runs_, pid, openFrom_[pid]);
-  const uint32_t runCount =
-      (total > 0 ? 1 : 0) + static_cast<uint32_t>(segments.size());
+  const uint64_t runs = segments.size() + (total > 0 ? 1 : 0);
+  checkPayloadRuns(pid, runs);
+  const auto runCount = static_cast<uint32_t>(runs);
 
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
@@ -979,7 +996,7 @@ void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
   BOLT_CHECK_NOT_NULL(resident_, "Cell payloads merged outside finalize()");
   const uint64_t rawStart = rawBytesWritten_;
   for (const auto& payload : sealed_[pid]) {
-    writeSealedPayload(out, payload, resident_->encodingTags);
+    writeSealedPayload(out, pid, payload, resident_->encodingTags);
   }
   if (residentHasData_ && resident_->rowCounts[pid] > 0) {
     writeResidentPayload(out, *resident_, pid);
