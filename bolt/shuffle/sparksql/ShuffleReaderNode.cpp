@@ -15,6 +15,7 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
+#include <fmt/format.h>
 #include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -233,10 +234,28 @@ void SparkShuffleReader::close() {
 
   if (cellShuffleReader_) {
     // Report decompression and deserialization disjointly, matching the
-    // legacy reader's accounting.
-    const uint64_t decompressNs = cellShuffleReader_->decompressTimeNs();
+    // legacy reader's accounting: deserialization is the decode time less
+    // decompression and reading the input. The legacy reader counts its
+    // reads of the streams in the total read time alone, which holds the
+    // Cell reader's too.
+    const auto& reader = *cellShuffleReader_;
+    const uint64_t decodeNs = reader.decodeTimeNs();
+    const uint64_t decompressNs = reader.decompressTimeNs();
+    const uint64_t readNs = reader.readTimeNs();
+    const uint64_t deserializeNs =
+        decodeNs > decompressNs + readNs ? decodeNs - decompressNs - readNs : 0;
     decompressTime_ += decompressNs;
-    deserializeTime_ += cellShuffleReader_->decodeTimeNs() - decompressNs;
+    deserializeTime_ += deserializeNs;
+    // The three times are disjoint: decode is the deserialization above.
+    LOG(INFO) << fmt::format(
+        "CellShuffleReader totals: rows={}, payloads={}, streams={}, "
+        "read={:.3f}ms, decompress={:.3f}ms, decode={:.3f}ms",
+        reader.rowsRead(),
+        reader.payloadsRead(),
+        reader.streamsRead(),
+        readNs / 1e6,
+        decompressNs / 1e6,
+        deserializeNs / 1e6);
     cellShuffleReader_.reset();
   }
   {
