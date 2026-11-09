@@ -81,8 +81,9 @@ class CellShuffleReader {
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
 
-  /// Total decode time: payload parsing, decompression, vector building
-  /// and complex-column restoration together.
+  /// Total decode time: reading the input, payload parsing,
+  /// decompression, vector building and complex-column restoration
+  /// together.
   uint64_t decodeTimeNs() const {
     return decodeTimeNs_;
   }
@@ -92,6 +93,31 @@ class CellShuffleReader {
   /// disjoint metrics, matching the legacy reader's accounting.
   uint64_t decompressTimeNs() const {
     return decompressor_ == nullptr ? 0 : decompressor_->decompressTimeNs();
+  }
+
+  /// The input's share of decodeTimeNs(), disjoint from decompressTimeNs():
+  /// opening each stream and reading each block - its bytes read, its
+  /// headers parsed, its buffers allocated and its columns opened - up to
+  /// building vectors from it. In a Spark task the reads are calls into
+  /// the shuffle fetch's Java streams; the legacy reader leaves all of
+  /// this out of its deserialize time too.
+  uint64_t readTimeNs() const {
+    return readTimeNs_;
+  }
+
+  /// Rows next() returned so far.
+  uint64_t rowsRead() const {
+    return rowsRead_;
+  }
+
+  /// Payloads read so far, CompositeRows blocks aside.
+  uint64_t payloadsRead() const {
+    return payloadsRead_;
+  }
+
+  /// Streams opened so far.
+  uint64_t streamsRead() const {
+    return streamsOpened_;
   }
 
  private:
@@ -190,6 +216,9 @@ class CellShuffleReader {
   std::unique_ptr<StreamSource> source_;
   bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
+  uint64_t readTimeNs_{0};
+  uint64_t rowsRead_{0};
+  uint64_t payloadsRead_{0};
 
   // Where the reader is, for a malformed block's error.
   /// Streams opened, the current one last.

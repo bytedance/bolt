@@ -18,6 +18,7 @@
 
 #include <arrow/io/interfaces.h>
 #include <fmt/format.h>
+#include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 #include <algorithm>
 #include <cstring>
@@ -142,6 +143,16 @@ CellShuffleReader::CellShuffleReader(
       compositeConverter_(outputType, pool_) {}
 
 CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
+  // Opening streams and reading blocks is the input's share of the decode
+  // time, decompression aside. Timed per block, not per read: a payload
+  // takes a dozen small reads, and from memory two clock reads around
+  // each would cost more than the reads.
+  const uint64_t start = currentTimeNs();
+  const uint64_t decompressStart = decompressTimeNs();
+  SCOPE_EXIT {
+    readTimeNs_ +=
+        currentTimeNs() - start - (decompressTimeNs() - decompressStart);
+  };
   while (!exhausted_) {
     if (source_ == nullptr) {
       auto in = streams_->nextStream(arrowPool_);
@@ -197,6 +208,7 @@ CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
         : std::span<const uint8_t>(decoder_.payloadHeader());
     ::memcpy(lastPayloadHeader_, header.data(), sizeof(lastPayloadHeader_));
     ++streamBlocks_;
+    ++payloadsRead_;
     return NextBlock::kPayload;
   }
   return NextBlock::kEnd;
@@ -368,6 +380,7 @@ RowVectorPtr CellShuffleReader::nextComposite() {
   auto output = compositeConverter_.convertToComposite(
       slice, static_cast<int32_t>(total));
   decodeTimeNs_ += currentTimeNs() - start;
+  rowsRead_ += output->size();
   return output;
 }
 
@@ -393,6 +406,9 @@ RowVectorPtr CellShuffleReader::next() {
   }
   if (output == nullptr && hasCompositeRows()) {
     return nextComposite();
+  }
+  if (output != nullptr) {
+    rowsRead_ += output->size();
   }
   return output;
 }
