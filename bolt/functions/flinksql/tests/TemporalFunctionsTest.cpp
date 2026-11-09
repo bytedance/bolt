@@ -210,6 +210,123 @@ TEST_F(TemporalFunctionsTest, formattedTimestampFallback) {
       evaluate("to_timestamp(c0, c1)", makeRowVector({texts, formats})));
 }
 
+TEST_F(TemporalFunctionsTest, smartDateCrossChecks) {
+  for (const auto& [pattern, text] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"yyyy/MM/dd HH:mm:ss D", "2024/02/30 00:00:00 60"},
+           {"D yyyy/MM/dd HH:mm:ss", "60 2024/02/30 00:00:00"}}) {
+    EXPECT_EQ(
+        Timestamp(1709164800, 0),
+        parseString("to_timestamp(c0, '" + pattern + "')", text));
+    EXPECT_EQ(
+        Timestamp(1709164800, 0),
+        evaluateOnce<Timestamp>(
+            "to_timestamp(c0, c1)",
+            std::optional<std::string>{text},
+            std::optional<std::string>{pattern}));
+  }
+}
+
+TEST_F(TemporalFunctionsTest, formattedNanoseconds) {
+  std::vector<std::string> texts;
+  std::vector<std::string> formats;
+  std::vector<Timestamp> expected;
+  for (const auto& date :
+       {std::string("1969-12-31 23:59:59"),
+        std::string("2024-02-29 12:34:56")}) {
+    for (int precision = 1; precision <= 9; ++precision) {
+      texts.push_back(
+          date + "." + std::string("123456789").substr(0, precision));
+      formats.push_back("yyyy-MM-dd HH:mm:ss." + std::string(precision, 'S'));
+      expected.push_back(timestamp(texts.back()));
+      EXPECT_EQ(
+          expected.back(),
+          parseString(
+              "to_timestamp(c0, '" + formats.back() + "')", texts.back()));
+    }
+  }
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>(texts),
+       makeFlatVector<std::string>(formats)});
+  testEncodings(
+      parseExpression("to_timestamp(c0,c1)", asRowType(input->type())),
+      input->children(),
+      makeFlatVector<Timestamp>(expected));
+  EXPECT_EQ(
+      Timestamp(0, 123456789),
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')",
+          "1970/01/01 00:00:00.123456789"));
+  EXPECT_EQ(
+      Timestamp(0, 123456700),
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSS', 'UTC', cast(0 as integer))",
+          "1970/01/01 00:00:00.1234567"));
+  EXPECT_EQ(
+      Timestamp(0, 120000000),
+      parseString(
+          "to_timestamp(c0, 'yyyy-MM-dd HH:mm:ss.S')",
+          "1970-01-01 00:00:00.12"));
+  for (const auto& invalid :
+       {"1970/01/01 00:00:00.", "1970/01/01 00:00:00.1234567890", "invalid"}) {
+    EXPECT_EQ(
+        std::nullopt,
+        parseString(
+            "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')", invalid));
+  }
+  EXPECT_EQ(
+      std::nullopt,
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')", std::nullopt));
+}
+
+TEST_F(TemporalFunctionsTest, formattedTimeZonePatterns) {
+  struct Case {
+    const char* pattern;
+    const char* zone;
+    bool valid;
+  };
+  const std::vector<Case> cases = {
+      {"Z", "+1800", true},
+      {"ZZZ", "+0530", true},
+      {"ZZZ", "Asia/Shanghai", false},
+      {"ZZZZ", "GMT+05:30", true},
+      {"XX", "+0530", true},
+      {"XX", "+05:30", false},
+      {"XXX", "+0530", false},
+      {"XXX", "+05:30", true},
+      {"XXXXX", "+05:30:15", true},
+      {"XXXXX", "+18:00:01", false},
+      {"x", "Z", false},
+      {"x", "+00", true},
+      {"VV", "Asia/Shanghai", true},
+      {"VV", "US/Pacific", true},
+      {"VV", "UTC+05:30", true},
+      {"VV", "Asia/ShanghaiX", false}};
+  std::vector<std::string> texts, formats;
+  std::vector<std::optional<Timestamp>> expected;
+  for (const auto& test : cases) {
+    const auto text = std::string("1970/01/01 00:00:00.123456789 ") + test.zone;
+    const auto format =
+        std::string("yyyy/MM/dd HH:mm:ss.SSSSSSSSS ") + test.pattern;
+    const auto value = test.valid
+        ? std::optional<Timestamp>(Timestamp(0, 123456789))
+        : std::nullopt;
+    SCOPED_TRACE(format + ":" + text);
+    EXPECT_EQ(value, parseString("to_timestamp(c0,'" + format + "')", text));
+    texts.push_back(text);
+    formats.push_back(format);
+    expected.push_back(value);
+  }
+  assertEqualVectors(
+      makeNullableFlatVector<Timestamp>(expected),
+      evaluate(
+          "to_timestamp(c0,c1)",
+          makeRowVector(
+              {makeFlatVector<std::string>(texts),
+               makeFlatVector<std::string>(formats)})));
+}
+
 TEST_F(TemporalFunctionsTest, formattedTimestampDefaultJvmZone) {
   const std::string input = "2021-03-14 02:30:00.123";
   EXPECT_EQ(

@@ -122,6 +122,7 @@ check_basic_tools() {
 
 find_installed_clang() {
   CLANG_COMPILER=""
+  CLANG_LINKER=""
   local search_dirs=()
   IFS=: read -r -a search_dirs <<< "$PATH"
   search_dirs+=(/usr/lib/llvm-*/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
@@ -141,12 +142,17 @@ find_installed_clang() {
         # A versioned executable can coexist with an older unversioned clang.
         CLANG_COMPILER="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
       fi
-      break 2
+      find_clang_linker
+      if check_llvm_toolchain; then
+        echo "✅ Found complete Clang $LLVM_VERSION toolchain: $CLANG_COMPILER."
+        return
+      fi
+      echo "⚠️  Clang $LLVM_VERSION toolchain at $CLANG_COMPILER is incomplete; continuing the search."
+      CLANG_COMPILER=""
+      CLANG_LINKER=""
     done
   done
-  [[ -n "$CLANG_COMPILER" ]] || return 1
-
-  echo "✅ Found Clang $LLVM_VERSION: $CLANG_COMPILER; skipping LLVM installation."
+  return 1
 }
 
 find_clang_linker() {
@@ -168,12 +174,13 @@ install_llvm_macos() {
     echo "❌ Install Homebrew (https://brew.sh) before running setup."
     return 1
   fi
+  local llvm_formula="llvm@${LLVM_VERSION}"
   brew update
-  brew install llvm lld
-  brew upgrade llvm lld
-  CLANG_COMPILER="$(brew --prefix llvm)/bin/clang"
+  brew install "$llvm_formula" lld
+  brew upgrade "$llvm_formula" lld
+  CLANG_COMPILER="$(brew --prefix "$llvm_formula")/bin/clang"
   CLANG_LINKER="$(brew --prefix lld)/bin/ld64.lld"
-  export PATH="$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+  export PATH="$(brew --prefix "$llvm_formula")/bin:$(brew --prefix lld)/bin:$PATH"
 }
 
 install_llvm_debian() {
@@ -208,8 +215,11 @@ check_llvm_toolchain() {
 
 install_clang() {
   if find_installed_clang; then
-    find_clang_linker
-  elif [[ "$OS_TYPE" == "Darwin" ]]; then
+    echo "✅ Existing Clang, LLD, libc++, and libc++abi are usable; skipping LLVM installation."
+    return
+  fi
+
+  if [[ "$OS_TYPE" == "Darwin" ]]; then
     install_llvm_macos
   elif command -v apt-get > /dev/null 2>&1; then
     install_llvm_debian
