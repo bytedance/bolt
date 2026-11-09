@@ -310,6 +310,9 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
       }
       test::expectPartitionRows(expected[0][pid], batches[0], pid, 1000);
       test::expectPartitionRows(expected[1][pid], batches[1], pid, 1000);
+      EXPECT_EQ(
+          reader->rowsRead(),
+          expected[0][pid].size() + expected[1][pid].size());
     }
   }
 
@@ -1069,6 +1072,50 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
     batches = test::readPartition(
         written.partitions[pid], stringsType, codec.get(), pool(), 0, 1 << 20);
     test::expectPartitionRows(rows[pid], batches, pid, 1);
+  }
+}
+
+TEST_F(CellWriterTest, readerCountsWhatItReads) {
+  // The reader counts the rows it returned and the payloads and streams it
+  // read. Reading the streams is a share of its decode time of its own,
+  // apart from decompression. Each of three windows is a payload of every
+  // partition; a partition's bytes read twice, as from two map tasks, are
+  // twice its payloads and rows.
+  constexpr int32_t kPartitions = 2;
+  constexpr vector_size_t kRows = 3000;
+  const auto data = makeRowVector(
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row * 7919; }),
+       makeFlatVector<std::string>(
+           kRows, [](auto row) { return fmt::format("value {}", row % 97); })});
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.partitionSealBytes = 1;
+  const auto input =
+      sliceBatches(data, roundRobinPids(kRows, kPartitions), kRows / 3);
+  const auto written = test::writeShuffle(options, input, pool());
+  const auto rows = input.rowsOf(kPartitions);
+  const auto type = asRowType(data->type());
+  const auto codec = test::lz4Codec();
+  for (int32_t pid = 0; pid < kPartitions; ++pid) {
+    SCOPED_TRACE(fmt::format("partition {}", pid));
+    const auto& bytes = written.partitions[pid];
+    const auto reader = test::makeReader(
+        std::vector<std::string>{bytes, bytes},
+        type,
+        codec.get(),
+        pool(),
+        1000,
+        1 << 20);
+    uint64_t numRows = 0;
+    while (auto batch = reader->next()) {
+      numRows += batch->size();
+    }
+    EXPECT_EQ(numRows, 2 * rows[pid].size());
+    EXPECT_EQ(reader->rowsRead(), numRows);
+    EXPECT_EQ(reader->payloadsRead(), uint64_t{6});
+    EXPECT_EQ(reader->streamsRead(), uint64_t{2});
+    EXPECT_LE(
+        reader->readTimeNs() + reader->decompressTimeNs(),
+        reader->decodeTimeNs());
   }
 }
 

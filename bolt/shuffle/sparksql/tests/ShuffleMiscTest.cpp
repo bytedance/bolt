@@ -16,13 +16,21 @@
 
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
+#include <arrow/buffer.h>
+#include <arrow/io/interfaces.h>
 #include <arrow/memory_pool.h>
+#include <chrono>
+#include <cstring>
 #include <numeric>
 
+#include "bolt/exec/tests/utils/Cursor.h"
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/row/CompactRow.h"
 #include "bolt/row/dense/DenseRow.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/Utils.h"
+#include "bolt/shuffle/sparksql/tests/CellTestUtils.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 
@@ -429,6 +437,177 @@ TEST_F(ShuffleMiscTest, ColumnarToRowSlicedStatsReusesComplexDenseRow) {
   for (auto row = 0; row < actual->size(); ++row) {
     EXPECT_TRUE(expected->equalValueAt(actual.get(), row, row));
   }
+}
+
+namespace {
+
+/// Busy-waits until `delay` has passed by the steady clock, the clock of
+/// the shuffle reader's timers.
+void spinFor(std::chrono::nanoseconds delay) {
+  const auto end = std::chrono::steady_clock::now() + delay;
+  while (std::chrono::steady_clock::now() < end) {
+  }
+}
+
+/// `bytes` as an input stream every Read() of which takes `delay` at least,
+/// as a call into a shuffle fetch's Java stream takes its time; `calls`
+/// counts them.
+class SlowInputStream final : public arrow::io::InputStream {
+ public:
+  SlowInputStream(
+      std::string bytes,
+      std::chrono::nanoseconds delay,
+      uint64_t& calls)
+      : bytes_(std::move(bytes)), delay_(delay), calls_(calls) {}
+
+  arrow::Status Close() override {
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  bool closed() const override {
+    return closed_;
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    return position_;
+  }
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    ++calls_;
+    spinFor(delay_);
+    const int64_t n = std::min<int64_t>(
+        nbytes, static_cast<int64_t>(bytes_.size()) - position_);
+    std::memcpy(out, bytes_.data() + position_, n);
+    position_ += n;
+    return n;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(nbytes));
+    ARROW_ASSIGN_OR_RAISE(
+        const int64_t n, Read(nbytes, buffer->mutable_data()));
+    RETURN_NOT_OK(buffer->Resize(n));
+    return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+  }
+
+ private:
+  const std::string bytes_;
+  const std::chrono::nanoseconds delay_;
+  uint64_t& calls_;
+  int64_t position_{0};
+  bool closed_{false};
+};
+
+/// `streams` in turn as SlowInputStreams, each also opened after `delay`;
+/// keeps the metrics the reader reports.
+class SlowStreamIterator final : public ReaderStreamIterator {
+ public:
+  SlowStreamIterator(
+      std::vector<std::string> streams,
+      std::chrono::nanoseconds delay)
+      : streams_(std::move(streams)), delay_(delay) {}
+
+  std::shared_ptr<arrow::io::InputStream> nextStream(
+      arrow::MemoryPool* /*pool*/) override {
+    ++calls;
+    spinFor(delay_);
+    if (next_ == streams_.size()) {
+      return nullptr;
+    }
+    return std::make_shared<SlowInputStream>(streams_[next_++], delay_, calls);
+  }
+
+  void close() override {}
+
+  void updateMetrics(
+      int64_t numRows,
+      int64_t /*numBatches*/,
+      int64_t decompressTime,
+      int64_t deserializeTime,
+      int64_t /*deserializerCreateTime*/,
+      int64_t /*deserializerDestroyTime*/,
+      int64_t /*mergeTime*/,
+      int64_t totalReadTime) override {
+    rows = numRows;
+    decompressNs = decompressTime;
+    deserializeNs = deserializeTime;
+    totalReadNs = totalReadTime;
+  }
+
+  /// nextStream() calls, and Read() calls of the streams.
+  uint64_t calls{0};
+  int64_t rows{-1};
+  int64_t decompressNs{0};
+  int64_t deserializeNs{0};
+  int64_t totalReadNs{0};
+
+ private:
+  const std::vector<std::string> streams_;
+  const std::chrono::nanoseconds delay_;
+  size_t next_{0};
+};
+
+} // namespace
+
+TEST_F(ShuffleMiscTest, CellReaderLeavesStreamReadsOutOfDeserializeTime) {
+  // A Spark task reads its shuffle input through calls into the fetch's
+  // Java streams, which the legacy reader counts in the total read time
+  // alone. So does the Cell reader: the deserialize time it reports is its
+  // decode time less decompression and the reads. With streams taking
+  // their time on every call, the reads, decompression and deserialization
+  // fit in the total read time together.
+  constexpr int32_t kPartitions = 2;
+  constexpr vector_size_t kBatchRows = 1000;
+  constexpr std::chrono::microseconds kDelay{500};
+  std::vector<RowVectorPtr> batches;
+  for (int64_t batch = 0; batch < 3; ++batch) {
+    batches.push_back(makeRowVector(
+        {makeFlatVector<int64_t>(
+             kBatchRows,
+             [&](auto row) { return (batch * kBatchRows + row) * 7919; }),
+         makeFlatVector<std::string>(kBatchRows, [](auto row) {
+           return fmt::format("value {}", row % 97);
+         })}));
+  }
+  const auto type = asRowType(batches[0]->type());
+  const auto input = cell::test::roundRobin(batches, kPartitions);
+  const auto dir = exec::test::TempDirectoryPath::create();
+  auto writerOptions = cell::test::shuffleOptions(
+      dir->path + "/data",
+      kPartitions,
+      arrow::Compression::LZ4_FRAME,
+      /*rss=*/false);
+  // A payload of each partition per batch.
+  writerOptions.cellOptions.partitionSealBytes = 1;
+  const auto written = cell::test::writeShuffle(writerOptions, input, pool());
+
+  const auto streams =
+      std::make_shared<SlowStreamIterator>(written.partitions, kDelay);
+  ShuffleReaderOptions readerOptions;
+  readerOptions.numPartitions = kPartitions;
+  readerOptions.partitionShortName = "hash";
+  readerOptions.forceShuffleWriterType =
+      static_cast<int32_t>(ShuffleWriterType::Cell);
+  exec::test::CursorParameters params;
+  params.planNode = std::make_shared<SparkShuffleReaderNode>(
+      "reader", type, readerOptions, streams);
+  params.serialExecution = true;
+  int64_t numRows = 0;
+  {
+    auto cursor = exec::test::TaskCursor::create(params);
+    while (cursor->moveNext()) {
+      numRows += cursor->current()->size();
+    }
+  }
+  EXPECT_EQ(numRows, 3 * kBatchRows);
+  EXPECT_EQ(streams->rows, 3 * kBatchRows);
+  // Each call took kDelay at least, all of it read time.
+  const auto readNs = static_cast<int64_t>(streams->calls) *
+      std::chrono::nanoseconds(kDelay).count();
+  EXPECT_LE(
+      streams->deserializeNs + streams->decompressNs + readNs,
+      streams->totalReadNs);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
