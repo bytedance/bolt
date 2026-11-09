@@ -50,6 +50,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/exec/Operator.h"
+#include "bolt/type/FloatingPointUtil.h"
 #include "bolt/type/Type.h"
 
 #ifdef ENABLE_BOLT_JIT
@@ -1316,6 +1317,8 @@ void RowContainer::hashTyped(
           Kind == TypeKind::MAP) {
         auto in = prepareRead(row, offset);
         hash = ContainerRowSerde::hash(*in, type);
+      } else if constexpr (std::is_floating_point_v<T>) {
+        hash = util::floating_point::NaNAwareHash<T>{}(valueAt<T>(row, offset));
       } else {
         hash = folly::hasher<T>()(valueAt<T>(row, offset));
       }

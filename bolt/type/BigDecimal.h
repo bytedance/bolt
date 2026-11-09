@@ -25,6 +25,9 @@ namespace bytedance::bolt {
 
 class BigDecimal {
  public:
+  // Java BigInteger limits coefficients to a signed 32-bit bit count.
+  static constexpr int32_t kMaxScaleChange = 646456992;
+
   template <typename Tfloat>
   BigDecimal(Tfloat val) {
     static_assert(
@@ -91,6 +94,8 @@ class BigDecimal {
 
   void setScale(int newScale);
 
+  void truncateScale(int newScale);
+
   int getScale() {
     return scale;
   }
@@ -108,6 +113,9 @@ class BigDecimal {
   }
 
  private:
+  template <bool roundUp>
+  void setScaleImpl(int newScale);
+
   int128_t intCompact = -1;
   int scale = 0;
   boost::multiprecision::cpp_int intVal;

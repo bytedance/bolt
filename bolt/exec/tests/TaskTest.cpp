@@ -45,6 +45,7 @@
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
+#include "folly/synchronization/Baton.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
 namespace bytedance::bolt::exec::test {
@@ -300,10 +301,12 @@ class TestExternalBlockableNode : public core::PlanNode {
   TestExternalBlockableNode(
       const core::PlanNodeId& id,
       core::PlanNodePtr source,
-      std::shared_ptr<ExternalBlocker> externalBlocker)
+      std::shared_ptr<ExternalBlocker> externalBlocker,
+      std::function<void()> onClose = nullptr)
       : PlanNode(id),
         sources_{std::move(source)},
-        externalBlocker_(std::move(externalBlocker)) {}
+        externalBlocker_(std::move(externalBlocker)),
+        onClose_(std::move(onClose)) {}
 
   const RowTypePtr& outputType() const override {
     return sources_[0]->outputType();
@@ -321,11 +324,16 @@ class TestExternalBlockableNode : public core::PlanNode {
     return externalBlocker_.get();
   }
 
+  const std::function<void()>& onClose() const {
+    return onClose_;
+  }
+
  private:
   void addDetails(std::stringstream& /* stream */) const override {}
 
   std::vector<core::PlanNodePtr> sources_;
   std::shared_ptr<ExternalBlocker> externalBlocker_;
+  std::function<void()> onClose_;
 };
 
 class TestExternalBlockableOperator : public exec::Operator {
@@ -340,7 +348,8 @@ class TestExternalBlockableOperator : public exec::Operator {
             operatorId,
             node->id(),
             "ExternalBlockable"),
-        externalBlocker_(node->externalBlocker()) {}
+        externalBlocker_(node->externalBlocker()),
+        onClose_(node->onClose()) {}
 
   bool needsInput() const override {
     return !noMoreInput_;
@@ -373,10 +382,18 @@ class TestExternalBlockableOperator : public exec::Operator {
     return noMoreInput_;
   }
 
+  void close() override {
+    if (onClose_) {
+      onClose_();
+    }
+    Operator::close();
+  }
+
  private:
   RowVectorPtr input_;
   ExternalBlocker* externalBlocker_;
   folly::SemiFuture<folly::Unit> continueFuture_;
+  std::function<void()> onClose_;
 };
 
 class TestExternalBlockableTranslator
@@ -988,6 +1005,101 @@ TEST_F(TaskTest, singleThreadedExecutionExternalBlockable) {
     results.push_back(std::move(result));
   }
   EXPECT_EQ(3, results.size());
+}
+
+TEST_F(TaskTest, finishedDriversWaitForOperatorClose) {
+  Operator::registerOperator(
+      std::make_unique<TestExternalBlockableTranslator>());
+  const auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  for (const bool paused : {false, true}) {
+    for (const auto terminalState :
+         {TaskState::kFinished, TaskState::kCanceled, TaskState::kAborted}) {
+      SCOPED_TRACE(fmt::format(
+          "paused: {}, state: {}", paused, taskStateString(terminalState)));
+      folly::Baton<> closeStarted;
+      folly::Baton<> finishClose;
+      auto blocker = std::make_shared<ExternalBlocker>();
+      blocker->block();
+      auto plan = PlanBuilder()
+                      .values({data})
+                      .addNode([&](std::string id, core::PlanNodePtr input) {
+                        return std::make_shared<TestExternalBlockableNode>(
+                            id, input, blocker, [&]() {
+                              closeStarted.post();
+                              finishClose.wait();
+                            });
+                      })
+                      .project({"c0"})
+                      .planFragment();
+      auto task = Task::create(
+          "task.close",
+          std::move(plan),
+          0,
+          core::QueryCtx::create(),
+          Task::ExecutionMode::kSerial);
+      ContinueFuture future = ContinueFuture::makeEmpty();
+      ASSERT_EQ(nullptr, task->next(&future));
+      ASSERT_TRUE(future.valid());
+      ASSERT_EQ(task->numTotalDrivers(), 1);
+
+      auto terminate = [&]() {
+        switch (terminalState) {
+          case TaskState::kFinished:
+            task->testingFinish();
+            break;
+          case TaskState::kCanceled:
+            task->requestCancel().wait();
+            break;
+          case TaskState::kAborted:
+            task->requestAbort().wait();
+            break;
+          default:
+            BOLT_UNREACHABLE();
+        }
+      };
+      if (paused) {
+        task->requestPause().wait();
+        terminate();
+      }
+      std::exception_ptr closeError;
+      std::thread closeThread([&]() {
+        try {
+          if (paused) {
+            Task::resume(task);
+          } else {
+            terminate();
+          }
+        } catch (...) {
+          closeError = std::current_exception();
+        }
+      });
+      auto closeGuard = folly::makeGuard([&]() {
+        finishClose.post();
+        closeThread.join();
+      });
+      ASSERT_TRUE(closeStarted.try_wait_for(std::chrono::seconds(5)));
+      EXPECT_EQ(task->state(), terminalState);
+      EXPECT_EQ(task->numFinishedDrivers(), 0);
+
+      finishClose.post();
+      closeThread.join();
+      closeGuard.dismiss();
+      if (closeError) {
+        std::rethrow_exception(closeError);
+      }
+      EXPECT_EQ(task->numFinishedDrivers(), task->numTotalDrivers());
+      bool foundOperator = false;
+      for (const auto& pipeline : task->taskStats().pipelineStats) {
+        for (const auto& stats : pipeline.operatorStats) {
+          EXPECT_EQ(stats.numDrivers, 1);
+          if (stats.operatorType == "ExternalBlockable") {
+            foundOperator = true;
+          }
+        }
+      }
+      EXPECT_TRUE(foundOperator);
+    }
+  }
 }
 
 TEST_F(TaskTest, supportSerialExecutionMode) {

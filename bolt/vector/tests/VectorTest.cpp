@@ -3168,6 +3168,59 @@ TEST_F(VectorTest, toCopyRanges) {
   testRoundTrip();
 }
 
+TEST_F(VectorTest, arrayBulkCopyOverflow) {
+  for (const bool dictionary : {false, true}) {
+    for (const bool append : {false, true}) {
+      SCOPED_TRACE(fmt::format("dictionary={}, append={}", dictionary, append));
+      // Constant elements provide a large logical array without allocating its
+      // contents. Copying it twice exceeds vector_size_t, including the two
+      // existing elements in the append case.
+      const vector_size_t arraySize =
+          std::numeric_limits<vector_size_t>::max() / 2 + (append ? 0 : 1);
+      auto source = makeArrayVector({0}, makeConstant<int64_t>(7, arraySize));
+      VectorPtr repeated = dictionary
+          ? BaseVector::wrapInDictionary(
+                nullptr, makeIndices({0, 0}), 2, source)
+          : BaseVector::wrapInConstant(2, 0, source);
+      auto target = append ? makeArrayVector<int64_t>({{9, 10}, {}, {}})
+                           : makeArrayVector<int64_t>({{}, {}});
+      const vector_size_t existingSize = target->elements()->size();
+      BOLT_ASSERT_THROW(
+          target->copy(repeated.get(), append ? 1 : 0, 0, 2),
+          "integer overflow");
+      EXPECT_EQ(existingSize, target->elements()->size());
+    }
+  }
+}
+
+TEST_F(VectorTest, mapBulkCopyOverflow) {
+  constexpr vector_size_t kMapSize = 1 << 30;
+  // Map and Array share the child-count accumulation in copyRangesImpl.
+  auto source = std::make_shared<MapVector>(
+      pool(),
+      MAP(BIGINT(), BIGINT()),
+      nullptr,
+      1,
+      makeIndices({0}),
+      makeIndices({kMapSize}),
+      makeConstant<int64_t>(1, kMapSize),
+      makeConstant<int64_t>(2, kMapSize));
+  auto target = BaseVector::create(source->type(), 2, pool());
+  const std::vector<BaseVector::CopyRange> ranges{{0, 0, 1}, {0, 1, 1}};
+  BOLT_ASSERT_THROW(
+      target->copyRanges(source.get(), ranges), "integer overflow");
+  EXPECT_EQ(0, target->as<MapVector>()->mapKeys()->size());
+  EXPECT_EQ(0, target->as<MapVector>()->mapValues()->size());
+}
+
+TEST_F(VectorTest, arrayBulkCopyAppendsMergedRanges) {
+  auto source = makeArrayVector<int64_t>({{1, 2}, {3, 4}, {5, 6}});
+  auto target = makeArrayVector<int64_t>({{9}, {}, {}, {}});
+  target->copy(source.get(), 1, 0, 3);
+  auto expected = makeArrayVector<int64_t>({{9}, {1, 2}, {3, 4}, {5, 6}});
+  test::assertEqualVectors(expected, target);
+}
+
 TEST_F(VectorTest, rowCopyRanges) {
   RowVectorPtr rowVectorDest = makeRowVector(
       {makeFlatVector<int32_t>({1, 2}), makeFlatVector<int32_t>({1, 2})});

@@ -21,6 +21,7 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
+#include "bolt/functions/sparksql/aggregates/PercentileAggregate.h"
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::functions::aggregate::test;
@@ -77,7 +78,6 @@ class PercentileTest : public AggregationTestBase {
     AggregationTestBase::SetUp();
     random::setSeed(0);
     allowInputShuffle();
-    AggregationTestBase::disableTestIncremental();
   }
 
   template <typename T>
@@ -387,6 +387,30 @@ TEST_F(PercentileTest, groupByAgg) {
       weightsWithNulls,
       0.75,
       expectedResultWithWeightNullsSecond);
+}
+
+TEST_F(PercentileTest, releasesSortScratch) {
+  HashStringAllocator allocator(pool());
+  detail::Accumulator<int32_t> accumulator(1, &allocator);
+  for (int32_t value = 0; value < 1'024; ++value) {
+    accumulator.append(value, &allocator);
+  }
+
+  EXPECT_EQ(accumulator.estimatePercentile(0.5), 511.5);
+  ASSERT_GT(accumulator.keys_.capacity(), 0);
+  ASSERT_GT(accumulator.counts_.capacity(), 0);
+
+  accumulator.freeSortData();
+  EXPECT_EQ(accumulator.keys_.capacity(), 0);
+  EXPECT_EQ(accumulator.counts_.capacity(), 0);
+  EXPECT_EQ(accumulator.estimatePercentile(0.5), 511.5);
+}
+
+TEST_F(PercentileTest, accumulatorAlignment) {
+  detail::PercentileAggregate<int32_t, int64_t> aggregate(false, DOUBLE());
+  EXPECT_EQ(
+      aggregate.accumulatorAlignmentSize(),
+      alignof(detail::Accumulator<int32_t>));
 }
 
 TEST_F(PercentileTest, partialFull) {

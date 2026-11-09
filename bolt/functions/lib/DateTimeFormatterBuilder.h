@@ -56,6 +56,7 @@ class DateTimeFormatterBuilder {
 
   /// Appends era to formatter builder, e.g: "AD"
   DateTimeFormatterBuilder& appendEra();
+  DateTimeFormatterBuilder& appendEra(size_t minDigits);
 
   /// Appends century of era (>=0) to formatter builder, e.g: 20
   ///
@@ -276,6 +277,14 @@ class DateTimeFormatterBuilder {
   /// use as few digits as possible greater than or equal to minDigits to
   /// represent time zone offset id.
   DateTimeFormatterBuilder& appendTimeZoneOffsetId(size_t minDigits);
+
+  DateTimeFormatterBuilder& appendTimeZoneId();
+
+  DateTimeFormatterBuilder& appendISOTimeZoneOffsetId(
+      size_t minDigits,
+      bool zeroAsZ);
+
+  DateTimeFormatterBuilder& appendRFC822TimeZoneOffsetId(size_t minDigits);
 
   DateTimeFormatterBuilder& appendLiteral(const std::string_view& literal);
 

@@ -1099,7 +1099,6 @@ void Task::resume(std::shared_ptr<Task> self) {
         }
         driver->state().isTerminated = true;
         driver->state().setThread();
-        self->driverClosedLocked();
         offThreadDrivers.push_back(std::move(driver));
       }
     }
@@ -1109,6 +1108,8 @@ void Task::resume(std::shared_ptr<Task> self) {
   for (auto& driver : offThreadDrivers) {
     self->driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
+    std::lock_guard<std::timed_mutex> l(self->mutex_);
+    self->driverClosedLocked();
   }
 }
 
@@ -2158,7 +2159,6 @@ ContinueFuture Task::terminate(TaskState terminalState) {
         if (enterForTerminateLocked(driver->state()) ==
             StopReason::kTerminate) {
           offThreadDrivers.push_back(std::move(driver));
-          driverClosedLocked();
         }
       }
     }
@@ -2173,6 +2173,8 @@ ContinueFuture Task::terminate(TaskState terminalState) {
   for (auto& driver : offThreadDrivers) {
     driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
+    std::lock_guard<std::timed_mutex> l(mutex_);
+    driverClosedLocked();
   }
 
   // We continue all Drivers waiting for promises known to the
