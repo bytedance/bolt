@@ -952,12 +952,15 @@ TEST_F(BmRowContainerTest, BatchStoreSkewedDictionaryStrings) {
   std::vector<char*> rows;
   container.appendBatch(input, kDefaultPartition, &rows);
   ASSERT_EQ(kRows, rows.size());
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  EXPECT_GT(chunkRowCounts(session.listRowIds()).size(), 1);
   auto result = BaseVector::create(VARCHAR(), kRows, pool());
   container.extractColumnResident(rows.data(), rows.size(), 0, result);
   test::assertEqualVectors(dictionary, result);
 }
 
-TEST_F(BmRowContainerTest, SkewedDictionarySealsAtHeapTarget) {
+TEST_F(BmRowContainerDiskIoTest, SkewedDictionarySealsAtHeapTarget) {
   bufferManager_.reset();
   root_ = memory::memoryManager()->addRootPool(
       "dictionary-skewed-wide-strings",
