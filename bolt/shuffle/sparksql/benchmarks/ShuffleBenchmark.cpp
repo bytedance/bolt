@@ -36,7 +36,10 @@
 ///      clustered order), a store_sales-like mix, 100 wide columns, complex
 ///      types, and the production shape (P=30000, dictionary-wrapped input);
 ///      nested types: arrays of structs, maps of arrays, long arrays, the
-///      complex types with nulls, four levels deep
+///      complex types with nulls, four levels deep; BIGINT encoding
+///      references at P=500: user ids and version codes as in
+///      production, a hash-split sequence, event timestamps, wide random
+///      values, clustered and 33-40-bit ids repeating with Zipf frequencies
 ///   B  partition counts 200/4096/30000 on ints, strings, dictionary
 ///      strings, P=30000 on the complex types with and without the struct;
 ///      P=1 on the mix
@@ -53,10 +56,11 @@
 ///   F  a 256 MiB task memory limit enforced by the Spark memory manager,
 ///      so every writer spills through reclaim: ints, medium and long
 ///      strings, dictionary strings; the complex types, nested nulls, 50%
-///      nulls, optional fields
+///      nulls, optional fields; the production user-id shape
 ///
 /// --bolt_benchmark_shuffle_tier picks the set: smoke (A1, A5, A7, A8 at
-/// 64 MiB), standard (A, B, C) or full (A to F). --bm_regex narrows it.
+/// 64 MiB), standard (A, B, C and F11) or full (A to F). --bm_regex
+/// narrows it.
 /// Compare versions by running each build's binary alternately on one
 /// pinned core, two rounds or more, and comparing the counters.
 
@@ -72,8 +76,10 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <unordered_set>
 
 #include <arrow/io/memory.h>
+#include <fmt/format.h>
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
@@ -208,6 +214,12 @@ enum class Family {
   kStrDate8,
   kStrDate10,
   kEvents,
+  kUidZipf,
+  kSeqHash,
+  kTsEvent,
+  kWideRandom,
+  kClusteredIds,
+  kIds33To40Bit,
 };
 
 /// The families an extra Cell writer joins: CellNoDict the dictionary ones,
@@ -259,6 +271,12 @@ constexpr FamilyInfo kFamilies[] = {
     {Family::kStrDate8, "str_date8", kDictionary},
     {Family::kStrDate10, "str_date10", kDictionary},
     {Family::kEvents, "events"},
+    {Family::kUidZipf, "uid_zipf"},
+    {Family::kSeqHash, "seq_hash"},
+    {Family::kTsEvent, "ts_event"},
+    {Family::kWideRandom, "wide_random"},
+    {Family::kClusteredIds, "clustered_ids"},
+    {Family::kIds33To40Bit, "ids_33_40bit"},
 };
 
 const FamilyInfo& familyInfo(Family family) {
@@ -480,6 +498,28 @@ std::vector<CaseSpec> caseSpecs() {
   // skewed stages do.
   add("E-skew-seal", Family::kEvents, 500, kFull, 0, 600);
   c.back().hotPartitions = 6;
+  // BIGINT encoding references: 500 partitions, synthetic values.
+  // The production shape: user ids of 11 to 16 digits, Zipf per partition,
+  // beside 8-digit version codes.
+  add("A20", Family::kUidZipf, 500, kStd);
+  // Auto-increment ids hashed to partitions: guards FOR on hash-split
+  // sequences.
+  add("A21", Family::kSeqHash, 500, kStd);
+  // Millisecond event times in arrival order, minutes of jitter, random
+  // partitions: guards FOR on timestamps.
+  add("A22", Family::kTsEvent, 500, kStd);
+  // Distinct random values in [2^40, 2^47), random partitions: the known
+  // cost of the 48-bit kPlain cutoff.
+  add("A23", Family::kWideRandom, 500, kStd);
+  // Repeated ids clustered in [1.1e12, 1.9e12), Zipf per partition: guards
+  // the FOR tie at 40-bit residuals.
+  add("A24", Family::kClusteredIds, 500, kStd);
+  // Repeated ids of 33 to 40 bits, Zipf per partition: the remaining gap,
+  // 5-byte fields under zstd's minMatch of 7.
+  add("A25", Family::kIds33To40Bit, 500, kStd);
+  // The production shape under the 256 MiB limit: the spill path seen in
+  // production.
+  add("F11", Family::kUidZipf, 500, kStd, 0, 1024, false, 256);
   return c;
 }
 
@@ -971,6 +1011,193 @@ VectorPtr wideColumn(int col, int32_t nulls, Rng& rng) {
     default:
       return randomInts<int16_t>(SMALLINT(), nulls, rng, 30'000);
   }
+}
+
+// ---- BIGINT encoding references --------------------------------------------
+//
+// Synthetic values only. The id pools are drawn once, on first use, from
+// fixed seeds of their own, so a family's cases share them; each case's
+// rows are drawn from its own generator.
+
+/// The partition of `id` among `partitions` under a hash partitioning.
+int32_t hashPartition(int64_t id, int32_t partitions) {
+  return static_cast<int32_t>(
+      folly::hash::twang_mix64(static_cast<uint64_t>(id)) % partitions);
+}
+
+/// A double in [0, 1) from one draw, the same with every standard library.
+double unitInterval(Rng& rng) {
+  return static_cast<double>(rng() >> 11) * 0x1.0p-53;
+}
+
+/// Ids repeating with Zipf frequencies (s = 1) within their partitions:
+/// each partition holds the ids that hash to it, the k-th drawn of them
+/// 1/k as frequent as the first.
+struct ZipfIds {
+  /// Per partition: its ids in the order drawn, their cumulative weights.
+  std::vector<std::vector<int64_t>> ids;
+  std::vector<std::vector<double>> cumulative;
+
+  /// A row's partition, uniform, and the index of its id there, by the
+  /// Zipf law.
+  std::pair<int32_t, size_t> sample(Rng& rng) const {
+    const auto partition = static_cast<int32_t>(rng() % ids.size());
+    const auto& weights = cumulative[partition];
+    const double at = unitInterval(rng) * weights.back();
+    const auto index = static_cast<size_t>(
+        std::upper_bound(weights.begin(), weights.end(), at) - weights.begin());
+    return {partition, std::min(index, weights.size() - 1)};
+  }
+};
+
+/// `perPartition` times `partitions` distinct ids, drawn by `draw` from a
+/// generator seeded with `seed`: about `perPartition` to a partition.
+ZipfIds zipfIds(
+    int32_t partitions,
+    int32_t perPartition,
+    uint64_t seed,
+    const std::function<int64_t(Rng&)>& draw) {
+  ZipfIds result;
+  result.ids.resize(partitions);
+  result.cumulative.resize(partitions);
+  Rng rng(seed);
+  std::unordered_set<int64_t> seen;
+  const auto total = static_cast<size_t>(partitions) * perPartition;
+  while (seen.size() < total) {
+    const int64_t id = draw(rng);
+    if (seen.insert(id).second) {
+      result.ids[hashPartition(id, partitions)].push_back(id);
+    }
+  }
+  for (int32_t p = 0; p < partitions; ++p) {
+    BOLT_CHECK(!result.ids[p].empty(), "no id hashes to partition {}", p);
+    double sum = 0;
+    for (size_t k = 1; k <= result.ids[p].size(); ++k) {
+      sum += 1.0 / static_cast<double>(k);
+      result.cumulative[p].push_back(sum);
+    }
+  }
+  return result;
+}
+
+/// The uid_zipf family's users and versions: user ids of 11 to 16 digits,
+/// each length as likely, about 1000 to a partition; 2000 version codes.
+struct Users {
+  ZipfIds ids;
+  /// Per partition and user, the index of its primary version.
+  std::vector<std::vector<uint16_t>> primary;
+  /// 1500 codes in [18.0M, 18.9M), then 500 in [9M, 18M), as 8 digits,
+  /// zero-padded.
+  std::vector<std::string> versions;
+};
+
+/// A version's index: one of the 1500 high codes, uniformly, 85 times in
+/// 100, else one of the 500 low ones.
+uint16_t versionIndex(Rng& rng) {
+  return static_cast<uint16_t>(
+      rng() % 100 < 85 ? rng() % 1500 : 1500 + rng() % 500);
+}
+
+const Users& uidUsers(int32_t partitions) {
+  static const Users users = [&] {
+    Users built;
+    built.ids = zipfIds(partitions, 1000, 0xA20, [](Rng& rng) {
+      const auto digits = 11 + static_cast<int32_t>(rng() % 6);
+      int64_t low = 1;
+      for (int32_t d = 1; d < digits; ++d) {
+        low *= 10;
+      }
+      return low + static_cast<int64_t>(rng() % static_cast<uint64_t>(9 * low));
+    });
+    Rng rng(0xA20 + 1);
+    std::unordered_set<int64_t> seen;
+    std::vector<int64_t> codes;
+    while (codes.size() < 2000) {
+      const int64_t code = codes.size() < 1500
+          ? 18'000'000 + static_cast<int64_t>(rng() % 900'000)
+          : 9'000'000 + static_cast<int64_t>(rng() % 9'000'000);
+      if (seen.insert(code).second) {
+        codes.push_back(code);
+      }
+    }
+    for (const auto code : codes) {
+      built.versions.push_back(fmt::format("{:08d}", code));
+    }
+    built.primary.resize(partitions);
+    for (int32_t p = 0; p < partitions; ++p) {
+      for (size_t k = 0; k < built.ids.ids[p].size(); ++k) {
+        built.primary[p].push_back(versionIndex(rng));
+      }
+    }
+    return built;
+  }();
+  BOLT_CHECK_EQ(users.ids.ids.size(), partitions);
+  return users;
+}
+
+/// The clustered_ids family's ids: in [1.1e12, 1.9e12), about 1000 to a
+/// partition.
+const ZipfIds& clusteredIds(int32_t partitions) {
+  static const ZipfIds ids = zipfIds(partitions, 1000, 0xA24, [](Rng& rng) {
+    return 1'100'000'000'000LL +
+        static_cast<int64_t>(rng() % 800'000'000'000ULL);
+  });
+  BOLT_CHECK_EQ(ids.ids.size(), partitions);
+  return ids;
+}
+
+/// The ids_33_40bit family's ids: of 33 to 40 bits, each length as likely,
+/// about 1000 to a partition.
+const ZipfIds& ids33To40Bit(int32_t partitions) {
+  static const ZipfIds ids = zipfIds(partitions, 1000, 0xA25, [](Rng& rng) {
+    const auto bits = 33 + static_cast<int32_t>(rng() % 8);
+    const int64_t low = int64_t{1} << (bits - 1);
+    return low + static_cast<int64_t>(rng() % static_cast<uint64_t>(low));
+  });
+  BOLT_CHECK_EQ(ids.ids.size(), partitions);
+  return ids;
+}
+
+/// The wide_random family's value of row `row`: in [2^40, 2^47), distinct
+/// for every row below 2^47 - 2^40. A bijection of [0, 2^47) - odd
+/// multiplications and xor-shifts - walked until it lands below
+/// 2^47 - 2^40.
+int64_t wideRandomValue(int64_t row) {
+  constexpr uint64_t kMask = (uint64_t{1} << 47) - 1;
+  constexpr uint64_t kSpan = (uint64_t{1} << 47) - (uint64_t{1} << 40);
+  uint64_t x = static_cast<uint64_t>(row);
+  do {
+    x = (x * 0x9E3779B97F4A7C15ULL) & kMask;
+    x ^= x >> 23;
+    x = (x * 0xBF58476D1CE4E5B9ULL) & kMask;
+    x ^= x >> 29;
+  } while (x >= kSpan);
+  return static_cast<int64_t>((uint64_t{1} << 40) + x);
+}
+
+/// The first id of the seq_hash family's sequence.
+constexpr int64_t kFirstSequenceId = 6'000'000'000LL;
+
+/// The ts_event family's first arrival, 2026-01-01T00:00:00Z in
+/// milliseconds; three rows arrive a millisecond.
+constexpr int64_t kFirstArrivalMs = 1'767'225'600'000LL;
+
+/// A BIGINT column of `n` rows, row i `value(i)`.
+VectorPtr bigints(
+    Rng& rng,
+    const std::function<int64_t(vector_size_t)>& value,
+    vector_size_t n = kRowsPerBatch) {
+  return flat<int64_t>(BIGINT(), 0, rng, value, n);
+}
+
+/// A pid column, row i in partition `partition[i]`.
+VectorPtr partitionColumn(Rng& rng, const std::vector<int32_t>& partition) {
+  return flat<int32_t>(
+      INTEGER(),
+      0,
+      rng,
+      [&](vector_size_t i) { return partition[i]; },
+      static_cast<vector_size_t>(partition.size()));
 }
 
 RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
@@ -1723,6 +1950,74 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
                out += words[rng() % words.size()];
              }
            })});
+    }
+    case Family::kUidZipf: {
+      // A user's rows, interleaved at random with the others', carry its
+      // primary version 95 times in 100, else any version.
+      const auto& users = uidUsers(spec.partitions);
+      std::vector<int32_t> partition(kRowsPerBatch);
+      std::vector<int64_t> user(kRowsPerBatch);
+      std::vector<uint16_t> version(kRowsPerBatch);
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        const auto [p, k] = users.ids.sample(rng);
+        partition[i] = p;
+        user[i] = users.ids.ids[p][k];
+        version[i] = rng() % 100 < 95 ? users.primary[p][k] : versionIndex(rng);
+      }
+      return makeRow(
+          {"pid", "user_id", "version_id"},
+          {partitionColumn(rng, partition),
+           bigints(rng, [&](vector_size_t i) { return user[i]; }),
+           strings(0, rng, [&](vector_size_t i, std::string& out) {
+             out = users.versions[version[i]];
+           })});
+    }
+    case Family::kSeqHash: {
+      // Ids of an auto-increment sequence, gap 1, hashed to partitions.
+      std::vector<int32_t> partition(kRowsPerBatch);
+      std::vector<int64_t> id(kRowsPerBatch);
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        id[i] = kFirstSequenceId + int64_t{batch} * kRowsPerBatch + i;
+        partition[i] = hashPartition(id[i], spec.partitions);
+      }
+      return makeRow(
+          {"pid", "id"},
+          {partitionColumn(rng, partition),
+           bigints(rng, [&](vector_size_t i) { return id[i]; })});
+    }
+    case Family::kTsEvent: {
+      // Event times in milliseconds: rows arrive in order, three a
+      // millisecond, each event up to five minutes either side of its
+      // arrival.
+      auto ts = bigints(rng, [&](vector_size_t i) {
+        const int64_t row = int64_t{batch} * kRowsPerBatch + i;
+        return kFirstArrivalMs + row / 3 +
+            static_cast<int64_t>(rng() % 600'000) - 300'000;
+      });
+      return makeRow({"pid", "ts"}, {pid, std::move(ts)});
+    }
+    case Family::kWideRandom:
+      return makeRow(
+          {"pid", "value"},
+          {pid, bigints(rng, [&](vector_size_t i) {
+             return wideRandomValue(int64_t{batch} * kRowsPerBatch + i);
+           })});
+    case Family::kClusteredIds:
+    case Family::kIds33To40Bit: {
+      const auto& ids = spec.family == Family::kClusteredIds
+          ? clusteredIds(spec.partitions)
+          : ids33To40Bit(spec.partitions);
+      std::vector<int32_t> partition(kRowsPerBatch);
+      std::vector<int64_t> id(kRowsPerBatch);
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        const auto [p, k] = ids.sample(rng);
+        partition[i] = p;
+        id[i] = ids.ids[p][k];
+      }
+      return makeRow(
+          {"pid", "id"},
+          {partitionColumn(rng, partition),
+           bigints(rng, [&](vector_size_t i) { return id[i]; })});
     }
   }
   BOLT_UNREACHABLE();
