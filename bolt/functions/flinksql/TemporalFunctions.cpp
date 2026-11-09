@@ -20,6 +20,7 @@
 #include <unicode/uchar.h>
 #include <unicode/utf8.h>
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -27,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
@@ -372,6 +374,18 @@ class TimestampPrecisionFunction final : public exec::VectorFunction {
   }
 };
 
+template <bool javaTruncate, size_t... precisions>
+constexpr auto makeTimestampPrecisionFactories(
+    std::index_sequence<precisions...>) {
+  using Factory = std::shared_ptr<exec::VectorFunction> (*)();
+  return std::array<Factory, sizeof...(precisions)>{
+      []() -> std::shared_ptr<exec::VectorFunction> {
+        return std::make_shared<TimestampPrecisionFunction<
+            static_cast<int32_t>(precisions),
+            javaTruncate>>();
+      }...};
+}
+
 template <bool javaTruncate>
 std::shared_ptr<exec::VectorFunction> makeTimestampPrecision(
     const std::string&,
@@ -379,29 +393,12 @@ std::shared_ptr<exec::VectorFunction> makeTimestampPrecision(
     const core::QueryConfig&) {
   const auto& precision = args[1].constantValue;
   if (precision != nullptr && !precision->isNullAt(0)) {
-    switch (precision->as<SimpleVector<int32_t>>()->valueAt(0)) {
-      case 0:
-        return std::make_shared<TimestampPrecisionFunction<0, javaTruncate>>();
-      case 1:
-        return std::make_shared<TimestampPrecisionFunction<1, javaTruncate>>();
-      case 2:
-        return std::make_shared<TimestampPrecisionFunction<2, javaTruncate>>();
-      case 3:
-        return std::make_shared<TimestampPrecisionFunction<3, javaTruncate>>();
-      case 4:
-        return std::make_shared<TimestampPrecisionFunction<4, javaTruncate>>();
-      case 5:
-        return std::make_shared<TimestampPrecisionFunction<5, javaTruncate>>();
-      case 6:
-        return std::make_shared<TimestampPrecisionFunction<6, javaTruncate>>();
-      case 7:
-        return std::make_shared<TimestampPrecisionFunction<7, javaTruncate>>();
-      case 8:
-        return std::make_shared<TimestampPrecisionFunction<8, javaTruncate>>();
-      case 9:
-        return std::make_shared<TimestampPrecisionFunction<9, javaTruncate>>();
-      default:
-        break;
+    static constexpr auto kFactories =
+        makeTimestampPrecisionFactories<javaTruncate>(
+            std::make_index_sequence<10>{});
+    const auto value = precision->as<SimpleVector<int32_t>>()->valueAt(0);
+    if (value >= 0 && value < static_cast<int32_t>(kFactories.size())) {
+      return kFactories[value]();
     }
   }
   // Defer invalid precision errors to evaluated rows so TRY and nulls work.
