@@ -356,12 +356,26 @@ parameter in the high 6.
 | `kForBitPack` | a base, then `value - base` in 0 to 63 bits |
 | `kPlain` | the values as they are |
 
-The encoder picks the smallest body; ties resolve `kPlain`, `kConstNarrow`,
-`kBitPack`, `kForBitPack` in that order, so the bytes are deterministic. A
-block is at most `kMaxBlockBytes` (73). Boolean, TinyInt, Hugeint, Real and
-Double are raw streams: a full line is copied as it is. String bytes go to
-the data stream, staged through the line; values of 64 bytes or more bypass
-it.
+The encoder chooses from the block's minimum and maximum alone, so the
+bytes are deterministic. Equal values take `kConstNarrow` when that saves
+bytes. A block of values within `kExactPackMaxBits` (16) bits takes the
+smallest body, ties resolving `kPlain`, `kBitPack`, `kForBitPack` in that
+order. A wider block packs at whole bytes, and so do residuals past 16
+bits: a value that recurs in a partition, such as a hash-partitioned key,
+then recurs as the same bytes, which the codec matches as it does in V1's
+raw values, where at an exact width of, say, 50 bits its bytes would differ
+with its position in the block. Such a block takes `kForBitPack` only
+below three quarters of the alternative's size, a tie going to the
+alternative, as a base per block scatters a value's bytes too. The
+alternative is `kBitPack` when smaller than the values and, for 8-byte
+values, narrower than `kBigintPlainMinBits` (48) bits, else `kPlain`: ZSTD
+at level 1 with the input size unknown, as the stream compressor runs it,
+matches 7 bytes or more, so a 6- or 7-byte field matches neither on its own
+nor the same value stored whole in another block, while whole 8-byte values
+match as V1's do. A block is at most `kMaxBlockBytes` (73). Boolean,
+TinyInt, Hugeint, Real and Double are raw streams: a full line is copied as
+it is. String bytes go to the data stream, staged through the line; values
+of 64 bytes or more bypass it.
 
 ### String dictionaries
 

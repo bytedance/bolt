@@ -39,7 +39,7 @@
 /// arrays, maps and structs four levels deep in every input encoding,
 /// struct fields with no column on the wire, partition seals, and the
 /// adapter's binary column. A change to the writer that is meant to leave
-/// the format alone must keep every hash.
+/// its bytes alone must keep every hash.
 ///
 /// Nothing here depends on the machine or the clock: the input comes from
 /// fixed seeds through the standard engines alone, and the writer runs on a
@@ -200,8 +200,8 @@ void expectRecorded(
         golden.bytes,
         golden.hash);
   }
-  // Only for a deliberate format change: the table as the writer now
-  // produces it.
+  // Only for a deliberate change of the writer's bytes: the table as the
+  // writer now produces it.
   EXPECT_TRUE(same) << "now:\n" << table;
 }
 
@@ -778,24 +778,25 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        false,
        false},
   };
-  // Recorded from the writer at f5398ad6.
+  // Recorded since the writer packs wide values at whole bytes
+  // (kExactPackMaxBits, kBigintPlainMinBits).
   static const Golden kGolden[] = {
-      {"p1_none", 2492180, 0xe33662948707f9dfULL},
-      {"p7_lz4", 2224672, 0xc66f85f1f0af1d01ULL},
-      {"p1024_lz4", 3043168, 0x7d456e4c1d9f6f38ULL},
-      {"p7_none_rss", 2509940, 0xf820603beb81fba2ULL},
-      {"p1024_lz4_rss", 3043168, 0x3159607ee4a0f36bULL},
-      {"p7_lz4_partition_seals", 2223619, 0x17e8b08e70e88c73ULL},
-      {"p7_lz4_partition_seals_rss", 2223619, 0x6ce7ecbffd180568ULL},
-      {"p7_none_null_seals", 2517492, 0x1106137322994b0bULL},
-      {"p7_lz4_null_seals_rss", 2195802, 0x96c55930ef2c427cULL},
-      {"p7_lz4_spills", 2225204, 0xc5b10e613bdb4177ULL},
-      {"p1024_none_spills", 8607376, 0x461a472c16799b04ULL},
-      {"p7_lz4_spills_rss", 2205597, 0xd4066274994f0980ULL},
-      {"p1_lz4_seals", 2231503, 0x922c06cea263f3dbULL},
-      {"p7_lz4_every_limit", 2272804, 0x0d17bc0d75507742ULL},
-      {"p7_lz4_no_dictionary", 2247464, 0x6250503b4b2248f5ULL},
-      {"p7_lz4_one_shot", 2204206, 0x0938934d484a8294ULL},
+      {"p1_none", 2517475, 0x43f7afffad8f6688ULL},
+      {"p7_lz4", 2246101, 0x4530bbef09b209e6ULL},
+      {"p1024_lz4", 3064977, 0x20cd39208da207d3ULL},
+      {"p7_none_rss", 2535284, 0x58eb7a981b31244bULL},
+      {"p1024_lz4_rss", 3064977, 0xf652df9796bf540dULL},
+      {"p7_lz4_partition_seals", 2246778, 0xfbdcd816d8c8920cULL},
+      {"p7_lz4_partition_seals_rss", 2246778, 0xeb80ff5ef947c8feULL},
+      {"p7_none_null_seals", 2542676, 0xbba839d809099ae6ULL},
+      {"p7_lz4_null_seals_rss", 2297123, 0xa746b56b725d20adULL},
+      {"p7_lz4_spills", 2251769, 0xeecc1d2e93fd4156ULL},
+      {"p1024_none_spills", 8635904, 0x2714cd1c35846e2aULL},
+      {"p7_lz4_spills_rss", 2255058, 0xc79faec398d8df82ULL},
+      {"p1_lz4_seals", 2254213, 0xa98fc2436554c9cbULL},
+      {"p7_lz4_every_limit", 2285074, 0x1b47d371375a0ca8ULL},
+      {"p7_lz4_no_dictionary", 2268893, 0xbca4ebf73b93e31aULL},
+      {"p7_lz4_one_shot", 2224722, 0x77773523d15b6ad3ULL},
   };
   std::vector<Golden> actual;
   for (const auto& scenario : scenarios) {
@@ -869,12 +870,13 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
        [](CellShuffleOptions& options) { options.nativeNestedTypes = false; },
        false},
   };
-  // Recorded from the writer at ed9584dd.
+  // Recorded since the writer packs wide values at whole bytes
+  // (kExactPackMaxBits, kBigintPlainMinBits).
   static const Golden kGolden[] = {
-      {"deep_rows_p7_lz4", 756669, 0x326dc6286aecb91dULL},
-      {"unknown_fields_p7_none_rss", 273076, 0xc06c021c92f3cfaaULL},
-      {"deep_nested_p7_lz4_partition_seals", 465968, 0x0220d4ea432ab57dULL},
-      {"deep_rows_p7_lz4_adapter", 1340920, 0xb1b5d076c6af9d9fULL},
+      {"deep_rows_p7_lz4", 751799, 0xab09260e8c2915daULL},
+      {"unknown_fields_p7_none_rss", 273202, 0xc77ba98d9695581fULL},
+      {"deep_nested_p7_lz4_partition_seals", 473433, 0x1f560d7c6d0bb239ULL},
+      {"deep_rows_p7_lz4_adapter", 1340921, 0x5fe55cc0018ef204ULL},
   };
   std::vector<Golden> actual;
   for (const auto& scenario : scenarios) {

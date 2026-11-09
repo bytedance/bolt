@@ -63,6 +63,12 @@ inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
   return bytes < maxBytes ? bytes : maxBytes;
 }
 
+/// The width the writer packs fields of `bits` significant bits at: `bits`
+/// up to kExactPackMaxBits, else whole bytes.
+inline uint32_t packWidth(uint32_t bits) {
+  return bits <= kExactPackMaxBits ? bits : (bits + 7) & ~7u;
+}
+
 /// Packs `count` staged values, `bits` wide each (1..63), LSB-first into
 /// out. Packs ceil(count * bits / 8) bytes, trailing bits zero, and returns
 /// their end; the last partial word goes out as one 8-byte store, so up to
@@ -113,6 +119,9 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       "an 8-byte store past a packed body stays within the block");
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
+  // The kBitPack width from which the writer stores kPlain instead.
+  constexpr uint32_t kPlainFromBits =
+      kWidth == 8 ? kBigintPlainMinBits : kMaxPackBits + 1;
   const uint32_t sourceBytes = count * kWidth;
 
   // Two independent reductions vectorize; the equality test folds into
@@ -126,39 +135,39 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   }
   const bool allEqual = minValue == maxValue;
 
-  // Candidate body sizes; a later kind wins only by being strictly smaller,
-  // in kPlain, kConstNarrow, kBitPack, kForBitPack order.
+  // The kinds' parameters and body sizes, from the minimum and maximum
+  // alone. Widths past kExactPackMaxBits are whole bytes (packWidth), and
+  // packSize is kBitPack's, or kPlain's from kPlainFromBits; it is never
+  // above kPlain's.
   const uint32_t constBytes =
       allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
-  const uint32_t packBitsNeeded =
-      signedBitWidth(static_cast<int64_t>(minValue)) >
-          signedBitWidth(static_cast<int64_t>(maxValue))
-      ? signedBitWidth(static_cast<int64_t>(minValue))
-      : signedBitWidth(static_cast<int64_t>(maxValue));
-  const uint32_t bitWidth = packBitsNeeded <= kMaxPackBits ? packBitsNeeded : 0;
-  const uint64_t maxDelta =
-      static_cast<uint64_t>(maxValue) - static_cast<uint64_t>(minValue);
-  const uint32_t deltaBits = unsignedBitWidth(maxDelta);
+  const uint32_t exactWidth = std::max(
+      signedBitWidth(static_cast<int64_t>(minValue)),
+      signedBitWidth(static_cast<int64_t>(maxValue)));
+  const bool wide = exactWidth > kExactPackMaxBits;
+  const uint32_t bitWidth = packWidth(exactWidth);
+  const uint32_t deltaBits = packWidth(unsignedBitWidth(
+      static_cast<uint64_t>(maxValue) - static_cast<uint64_t>(minValue)));
+  const uint32_t packSize =
+      bitWidth < kPlainFromBits ? (count * bitWidth + 7) / 8 : sourceBytes;
+  const uint32_t forSize = kWidth + (count * deltaBits + 7) / 8;
 
-  uint32_t bestSize = sourceBytes;
+  // Equal values take kConstNarrow when it is smaller than they are.
+  // Otherwise kForBitPack takes a block it makes smaller than packSize - a
+  // wide one only below three quarters of it, a tie going to the
+  // alternative, as a base per block scatters a recurring value's bytes
+  // from block to block - and else kBitPack one it makes strictly smaller
+  // than the values.
+  const bool forWins = wide ? 4 * forSize < 3 * packSize : forSize < packSize;
   EncodingKind bestKind = EncodingKind::kPlain;
-  if (constBytes != 0 && constBytes < bestSize) {
-    bestSize = constBytes;
+  if (packSize < sourceBytes) {
+    bestKind = EncodingKind::kBitPack;
+  }
+  if (deltaBits <= 63 && forWins) {
+    bestKind = EncodingKind::kForBitPack;
+  }
+  if (constBytes != 0 && constBytes < sourceBytes) {
     bestKind = EncodingKind::kConstNarrow;
-  }
-  if (bitWidth != 0) {
-    const uint32_t size = (count * bitWidth + 7) / 8;
-    if (size < bestSize) {
-      bestSize = size;
-      bestKind = EncodingKind::kBitPack;
-    }
-  }
-  if (deltaBits <= 63) {
-    const uint32_t size = kWidth + (count * deltaBits + 7) / 8;
-    if (size < bestSize) {
-      bestSize = size;
-      bestKind = EncodingKind::kForBitPack;
-    }
   }
 
   uint8_t* pos = out;
@@ -459,10 +468,17 @@ inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
 } // namespace detail
 
 /// Encodes one Encoding Block of `count` source values (count * sizeof(T)
-/// must be <= 64, a full block or the stream's tail). Chooses the smallest
-/// legal body; ties resolve kPlain, kConstNarrow, kBitPack, kForBitPack in
-/// first-wins order, so the bytes for given values are deterministic.
-/// `out` must hold at least kMaxBlockBytes. Returns bytes written.
+/// must be <= 64, a full block or the stream's tail). Chooses from the
+/// values' minimum and maximum alone, so the bytes for given values are
+/// deterministic. Equal values take kConstNarrow when it is smaller than
+/// they are. Values within kExactPackMaxBits bits take the smallest body,
+/// ties resolving kPlain, kBitPack, kForBitPack in first-wins order. Wider
+/// ones pack at whole bytes, and so do residuals past kExactPackMaxBits.
+/// Their alternative is kBitPack when strictly smaller than the values and,
+/// for 8-byte values, narrower than kBigintPlainMinBits, else kPlain;
+/// kForBitPack takes the block instead below three quarters of the
+/// alternative's size, a tie going to the alternative. `out` must hold at
+/// least kMaxBlockBytes. Returns bytes written.
 ///
 /// T is one of int16_t, int32_t, int64_t: exactly the encoded stream source
 /// types (SmallInt / Integer, Date / Bigint, Timestamp halves, String
