@@ -18,7 +18,6 @@
 
 #include <cstdio>
 #include <span>
-#include <string>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
@@ -28,44 +27,6 @@
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
-
-/// One payload as the writer wrote it into the data file: the file offset
-/// of its kind byte, and its header's row and run counts.
-struct CellPayloadRecord {
-  uint64_t offset;
-  uint32_t rows;
-  uint32_t runCount;
-};
-
-/// What verifyCellDataFile() walked.
-struct CellDataFileSummary {
-  uint64_t partitions{0};
-  uint64_t payloads{0};
-  uint64_t compositeBlocks{0};
-  uint64_t runs{0};
-};
-
-/// Checks the structure of the Cell shuffle data file at `path`, reading
-/// only its block and run headers: partition p is the `partitionLengths[p]`
-/// bytes after partition p - 1, blocks back to back (CellFormat.h) of a
-/// layout of `numWireColumns` wire columns and `numStreams` streams. Every
-/// read must stay within its partition, and the last block end exactly at
-/// its end; every header field must be one the writer writes - rows >= 1,
-/// runCount <= 2^24, a known layout, sizes within the partition, a run
-/// not empty - and the lengths must add up to the file's size. With
-/// `written`, the file's payloads must be those, in order: at the same
-/// offsets, with the same row and run counts. Otherwise fails with "cell
-/// data file verification failed", naming the partition, the block, its
-/// file offset, the field at fault with its expected and actual values,
-/// and the 32 bytes at the field. A diagnostic of the writer's
-/// (CellShuffleOptions::verifyDataFile) for a file just written, still in
-/// the page cache.
-CellDataFileSummary verifyCellDataFile(
-    const std::string& path,
-    std::span<const int64_t> partitionLengths,
-    uint32_t numWireColumns,
-    uint32_t numStreams,
-    const std::vector<CellPayloadRecord>* written = nullptr);
 
 /// What an output backend reads from the splitter when draining or sealing:
 /// the live window state. Borrowed for the duration of a call. A
@@ -151,10 +112,7 @@ class CellOutput {
 /// copied verbatim, and last - for the window still in memory - its
 /// resident cells as one more run. A
 /// task whose data never needed a spill writes payloads straight from the
-/// live cells and touches no temporary file at all. With
-/// CellShuffleOptions::verifyDataFile, finalize() checks the data file
-/// against the payloads the merge wrote (verifyCellDataFile()) once it is
-/// closed.
+/// live cells and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput, public PartialSpiller {
  public:
   /// `composite` holds the task's CompositeRowVector blocks, merged after
@@ -249,25 +207,10 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// The kind byte that opens every block on the wire.
   void appendBlockKind();
 
-  /// Notes, for the verification, a payload whose kind byte the next write
-  /// to `out` starts.
-  void
-  recordPayload(const DataFileWriter& out, uint32_t rows, uint32_t runCount) {
-    if (verifyDataFile_) {
-      writtenPayloads_.push_back({out.position(), rows, runCount});
-    }
-  }
-
-  /// verifyCellDataFile() of the data file the merge closed, logged.
-  void verifyDataFile(const ShuffleWriterMetrics& metrics);
-
   PartialSpiller& composite_;
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
-  const bool verifyDataFile_;
-  /// Every payload the merge wrote, in file order, when verifyDataFile_.
-  std::vector<CellPayloadRecord> writtenPayloads_;
   /// Time metrics align with the V1/V2 partition writers and never
   /// overlap: compress = codec calls only; write = fwrite/fflush moments
   /// on the data file; evict = fwrite/fflush moments on the spill file.

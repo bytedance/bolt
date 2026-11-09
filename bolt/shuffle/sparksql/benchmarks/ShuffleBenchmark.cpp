@@ -141,11 +141,6 @@ DEFINE_int64(
     -1,
     "Cell writers' spillMemoryBytes: the spill data kept in memory until "
     "memory pressure; -1 half the memory limit, 0 none.");
-DEFINE_bool(
-    bolt_benchmark_shuffle_cell_verify_data_file,
-    true,
-    "Cell writers' verifyDataFile: walk the data file's headers once it is "
-    "written.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -1898,8 +1893,6 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
       FLAGS_bolt_benchmark_shuffle_cell_adaptive_compression;
   options.cellOptions.spillMemoryBytes =
       FLAGS_bolt_benchmark_shuffle_cell_spill_memory_bytes;
-  options.cellOptions.verifyDataFile =
-      FLAGS_bolt_benchmark_shuffle_cell_verify_data_file;
   return options;
 }
 
