@@ -198,7 +198,7 @@ struct UnixTimestampFunctionBase {
 
     ::date::local_time<std::chrono::seconds> localTime{
         std::chrono::seconds(timestamp.getSeconds())};
-    const auto info = zone.tz()->get_info(localTime);
+    const auto info = zone.getInfo(localTime);
     if (info.result == ::date::local_info::nonexistent &&
         nullOnNonexistentLocalTime) {
       return false;

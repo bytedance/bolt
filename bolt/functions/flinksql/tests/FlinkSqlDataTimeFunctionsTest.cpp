@@ -17,6 +17,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 #include "bolt/type/HugeInt.h"
+#include "bolt/type/tz/TimeZoneMap.h"
 
 #include <cstdint>
 #include <limits>
@@ -170,6 +171,28 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, fromUnixtimeWithTimezone) {
   EXPECT_EQ(
       "1970-01-01 08:00:00",
       fromUnixtimeOnce(LongMinValue, "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
+}
+
+TEST_F(FlinkSqlDateTimeFunctionsTest, unixTimestampSystemVLargeYears) {
+  if (tz::locateZone("SystemV/EST5EDT")->tz()) {
+    GTEST_SKIP() << "The extended recurring rules use the built-in fallback";
+  }
+  auto input = makeRowVector({makeFlatVector<std::string>(
+      {"6000000-01-01 00:00:00",
+       "6000000-04-30 02:30:00",
+       "6000000-07-01 12:00:00",
+       "6000000-10-29 01:30:00",
+       "292000000-07-01 12:00:00"})});
+  assertEqualVectors(
+      makeFlatVector<int64_t>(
+          {189279544798800LL,
+           189279555175800LL,
+           189279560563200LL,
+           189279570897000LL,
+           9214567832563200LL}),
+      evaluate(
+          "flink_unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss', 'SystemV/EST5EDT')",
+          input));
 }
 
 TEST_F(FlinkSqlDateTimeFunctionsTest, simpleDateFormat) {

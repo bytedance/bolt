@@ -787,11 +787,10 @@ int32_t DateTimeFormatter::format(
             } else {
               const auto& names = tz::getTimeZoneNames().at(
                   !timezone || timezone->id() == 0 ? "UTC" : timezone->name());
-              const bool daylight = timezone && timezone->tz() &&
+              const bool daylight = timezone &&
                   timestamp.getSeconds() >= -2'208'988'800 &&
-                  timezone->tz()
-                          ->get_info(::date::sys_seconds(
-                              std::chrono::seconds(timestamp.getSeconds())))
+                  timezone->getInfo(::date::sys_seconds(std::chrono::seconds(
+                                        timestamp.getSeconds())))
                           .save.count() != 0;
               piece = token.pattern.minRepresentDigits < 4
                   ? (daylight ? names.daylightTimeAbbreviation

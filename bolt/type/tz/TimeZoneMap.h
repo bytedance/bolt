@@ -38,14 +38,21 @@
 
 namespace date {
 class time_zone;
-}
+struct sys_info;
+struct local_info;
+} // namespace date
 
 namespace bytedance::bolt::tz {
+
+namespace detail {
+struct SystemVTimeZone;
+}
 
 /// This library provides time zone management primitives. It maintains an
 /// internal static database which is constructed lazily based on the first
 /// access, based on TimeZoneDatabase.cpp and the local tzdata installed in your
-/// system.
+/// system. Java SystemV zones use system rules when available and built-in
+/// compatibility rules otherwise.
 ///
 /// It provides functions for one to lookup TimeZone pointers based on time zone
 /// name or ID, and to performance timestamp conversion across time zones.
@@ -96,8 +103,8 @@ void validateRange(time_point<std::chrono::seconds> timePoint);
 void validateRange(time_point<std::chrono::milliseconds> timePoint);
 
 /// TimeZone is the proxy object for time zone management. It provides access to
-/// time zone names, their IDs (as defined in TimeZoneDatabase.cpp and
-/// consistent with Presto), and utilities for timestamp conversion across
+/// time zone names, their IDs (Presto IDs from TimeZoneDatabase.cpp plus Bolt
+/// extensions), and utilities for timestamp conversion across
 /// timezones by leveraging the .to_sys() and .to_local() methods as documented
 /// in:
 ///
@@ -127,6 +134,9 @@ class TimeZone {
         offset_(offset),
         timeZoneName_(timeZoneName),
         timeZoneID_(timeZoneID) {}
+
+  // Constructor for Java SystemV zones whose rules are built into Bolt.
+  TimeZone(const detail::SystemVTimeZone& systemV, int16_t timeZoneID);
 
   // Do not copy it.
   TimeZone(const TimeZone&) = delete;
@@ -185,18 +195,25 @@ class TimeZone {
     return timeZoneID_;
   }
 
+  /// Returns the backing system tzdb zone, or nullptr for fixed offsets and
+  /// built-in SystemV zones. Use getInfo() for rule queries on any zone.
   const ::date::time_zone* tz() const {
     return tz_;
   }
 
   /// Returns the fixed offset for offset-based time zones (e.g., "+05:30").
-  /// Returns std::nullopt for time zones with a tzdb::time_zone pointer.
+  /// Returns std::nullopt for named time zones, including SystemV zones.
   std::optional<std::chrono::minutes> offset() const {
-    if (tz_ == nullptr) {
+    if (tz_ == nullptr && !hasSystemVRules()) {
       return offset_;
     }
     return std::nullopt;
   }
+
+  /// Returns the UTC offset and its validity interval, or both neighboring
+  /// intervals for a nonexistent or ambiguous local time.
+  ::date::sys_info getInfo(::date::sys_seconds timestamp) const;
+  ::date::local_info getInfo(::date::local_seconds timestamp) const;
 
   /// Returns the short name (abbreviation) of the time zone for the given
   /// timestamp. Note that the timestamp is needed for time zones that support
@@ -215,7 +232,12 @@ class TimeZone {
       TChoose choose = TChoose::kFail) const;
 
  private:
+  bool hasSystemVRules() const {
+    return offset_ == std::chrono::minutes::min();
+  }
+
   const ::date::time_zone* tz_{nullptr};
+  // Named built-in rules use a sentinel outside the fixed-offset range.
   const std::chrono::minutes offset_{0};
   const std::string timeZoneName_;
   const int16_t timeZoneID_;
