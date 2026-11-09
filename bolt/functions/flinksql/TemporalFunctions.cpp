@@ -20,6 +20,7 @@
 #include <unicode/uchar.h>
 #include <unicode/utf8.h>
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -27,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
@@ -297,7 +299,37 @@ bool parseUnicodeTimestamp(
       normalized, result, defaultTimeZone, defaultRawOffset, false);
 }
 
-template <int32_t Precision>
+FOLLY_ALWAYS_INLINE Timestamp
+truncateTimestamp(const Timestamp& timestamp, int32_t precision) {
+  BOLT_USER_CHECK(
+      precision >= 0 && precision <= 9,
+      "Timestamp precision must be between 0 and 9: {}",
+      precision);
+  static constexpr int64_t kPowersOfTen[]{
+      1,
+      10,
+      100,
+      1000,
+      10000,
+      100000,
+      1000000,
+      10000000,
+      100000000,
+      1000000000};
+  // SqlDateTimeUtils.truncate counts decimal nano digits without leading zeros.
+  if (precision > 0 &&
+      timestamp.getNanos() < static_cast<uint64_t>(kPowersOfTen[precision])) {
+    return timestamp;
+  }
+  if (precision <= 3) {
+    // Java truncates epoch milliseconds toward zero, including before 1970.
+    const int64_t divisor = kPowersOfTen[3 - precision];
+    return Timestamp::fromMillis(timestamp.toMillis() / divisor * divisor);
+  }
+  return timestamp.toPrecision(precision);
+}
+
+template <int32_t Precision, bool javaTruncate>
 class TimestampPrecisionFunction final : public exec::VectorFunction {
  public:
   void apply(
@@ -315,55 +347,62 @@ class TimestampPrecisionFunction final : public exec::VectorFunction {
     auto* output = result->asUnchecked<FlatVector<Timestamp>>();
     exec::LocalDecodedVector timestamps(context, *args[0], rows);
     if constexpr (Precision >= 0) {
-      rows.applyToSelected([&](vector_size_t row) {
+      const auto apply = [&](vector_size_t row) {
+        const auto timestamp = timestamps->valueAt<Timestamp>(row);
         output->set(
-            row, timestamps->valueAt<Timestamp>(row).toPrecision<Precision>());
-      });
+            row,
+            javaTruncate ? truncateTimestamp(timestamp, Precision)
+                         : timestamp.toPrecision<Precision>());
+      };
+      if constexpr (javaTruncate && Precision <= 3) {
+        // Millisecond overflow must only invalidate the affected rows in TRY.
+        context.applyToSelectedNoThrow(rows, apply);
+      } else {
+        rows.applyToSelected(apply);
+      }
     } else {
       exec::LocalDecodedVector precisions(context, *args[1], rows);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
+        const auto timestamp = timestamps->valueAt<Timestamp>(row);
+        const auto precision = precisions->valueAt<int32_t>(row);
         output->set(
             row,
-            timestamps->valueAt<Timestamp>(row).toPrecision(
-                precisions->valueAt<int32_t>(row)));
+            javaTruncate ? truncateTimestamp(timestamp, precision)
+                         : timestamp.toPrecision(precision));
       });
     }
   }
 };
 
+template <bool javaTruncate, size_t... precisions>
+constexpr auto makeTimestampPrecisionFactories(
+    std::index_sequence<precisions...>) {
+  using Factory = std::shared_ptr<exec::VectorFunction> (*)();
+  return std::array<Factory, sizeof...(precisions)>{
+      []() -> std::shared_ptr<exec::VectorFunction> {
+        return std::make_shared<TimestampPrecisionFunction<
+            static_cast<int32_t>(precisions),
+            javaTruncate>>();
+      }...};
+}
+
+template <bool javaTruncate>
 std::shared_ptr<exec::VectorFunction> makeTimestampPrecision(
     const std::string&,
     const std::vector<exec::VectorFunctionArg>& args,
     const core::QueryConfig&) {
   const auto& precision = args[1].constantValue;
   if (precision != nullptr && !precision->isNullAt(0)) {
-    switch (precision->as<SimpleVector<int32_t>>()->valueAt(0)) {
-      case 0:
-        return std::make_shared<TimestampPrecisionFunction<0>>();
-      case 1:
-        return std::make_shared<TimestampPrecisionFunction<1>>();
-      case 2:
-        return std::make_shared<TimestampPrecisionFunction<2>>();
-      case 3:
-        return std::make_shared<TimestampPrecisionFunction<3>>();
-      case 4:
-        return std::make_shared<TimestampPrecisionFunction<4>>();
-      case 5:
-        return std::make_shared<TimestampPrecisionFunction<5>>();
-      case 6:
-        return std::make_shared<TimestampPrecisionFunction<6>>();
-      case 7:
-        return std::make_shared<TimestampPrecisionFunction<7>>();
-      case 8:
-        return std::make_shared<TimestampPrecisionFunction<8>>();
-      case 9:
-        return std::make_shared<TimestampPrecisionFunction<9>>();
-      default:
-        break;
+    static constexpr auto kFactories =
+        makeTimestampPrecisionFactories<javaTruncate>(
+            std::make_index_sequence<10>{});
+    const auto value = precision->as<SimpleVector<int32_t>>()->valueAt(0);
+    if (value >= 0 && value < static_cast<int32_t>(kFactories.size())) {
+      return kFactories[value]();
     }
   }
   // Defer invalid precision errors to evaluated rows so TRY and nulls work.
-  return std::make_shared<TimestampPrecisionFunction<-1>>();
+  return std::make_shared<TimestampPrecisionFunction<-1, javaTruncate>>();
 }
 
 int32_t parseOffset(std::string_view name, bool legacy) {
@@ -1124,7 +1163,15 @@ void registerTemporalFunctions(const std::string& prefix) {
            .argumentType("timestamp")
            .argumentType("integer")
            .build()},
-      makeTimestampPrecision);
+      makeTimestampPrecision<false>);
+  exec::registerStatefulVectorFunction(
+      prefix + "flink_timestamp_truncate",
+      {exec::FunctionSignatureBuilder()
+           .returnType("timestamp")
+           .argumentType("timestamp")
+           .argumentType("integer")
+           .build()},
+      makeTimestampPrecision<true>);
   registerFunction<TimestampToUtcFunction, Timestamp, Timestamp, Varchar>(
       {prefix + "flink_timestamp_to_utc"});
   registerFunction<
