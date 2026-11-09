@@ -854,8 +854,8 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
     try {
       splitter_->finish(metrics_);
     } catch (...) {
-      // A failed merge or data file verification needs the pressure line
-      // most: what memory pressure made the writer do.
+      // A failed merge needs the pressure line most: what memory pressure
+      // made the writer do.
       logPressure();
       throw;
     }

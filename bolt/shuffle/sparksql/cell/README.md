@@ -69,7 +69,6 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | `streamCompression` | `true` | Compress runs through the codec's stream form, from the cells through fixed buffers. Off, each frame is gathered into a spill-pool workspace and compressed at once. Codecs without a stream form are always one-shot. |
 | `adaptiveCompression` | `true` | After a frame that did not shrink, store the next frames of its kind without a codec call and retry one in ten. |
 | `nativeNestedTypes` | `true` | Shred ARRAY, MAP and ROW columns into a nested layout. Off, the type adapter packs them into one binary column. |
-| `verifyDataFile` | `true` | Local only, a diagnostic: once the data file is closed, walk its block and run headers and fail the task on a mismatch (see [Limits and failure modes](#7-limits-and-failure-modes)). |
 
 The codec, level and backend come from `PartitionWriterOptions`
 (`compressionType`, `compressionLevel`, `codecBackend`), as for the other
@@ -496,19 +495,6 @@ Writer and reader decide alike from the same logical type, which is why
   index and offset in it, the stream's previous payload (its offsets and
   header fields), the block's header bytes read and up to 32 bytes after
   them, in hex.
-- **Data file verification** (`verifyDataFile`, local only): after the
-  merge closes the data file - its deferred run-header patches applied -
-  `verifyCellDataFile()` walks every partition's blocks with `pread`,
-  reading only the payload, run and CompositeRows headers. Every read must
-  stay in its partition and the last block end at its end, the header
-  fields must be ones the writer writes, the partition lengths must add up
-  to the file's size, and each payload must lie where the merge wrote it,
-  with the row and run counts it wrote. A mismatch fails the task at write
-  time with `cell data file verification failed`, the partition, the block,
-  the field with its expected and actual values and 32 bytes at it; Spark
-  then retries the map. Each verification logs `data file verified: N
-  partitions, M payloads, K runs in X ms`. Celeborn needs none: every push
-  is a whole payload.
 
 ## 8. Performance notes
 
@@ -546,9 +532,8 @@ LD_LIBRARY_PATH=<build dir> taskset -c 3 ./bolt_shuffle_benchmark \
 - Other flags, all prefixed `--bolt_benchmark_shuffle_`: `writers` (default
   `Cell,V1,V2`; with Cell, the `CellNoDict`, `CellUnsealedNulls` and
   `CellAdapter` variants join the cases they apply to), `input_mb`,
-  `verify`, `list`, `dir`, `cell_stream_compression`,
-  `cell_adaptive_compression` and `cell_verify_data_file`. See
-  `--helpfull`.
+  `verify`, `list`, `dir`, `cell_stream_compression` and
+  `cell_adaptive_compression`. See `--helpfull`.
 - Each benchmark reports ns per row, plus user counters (split, shred,
   seal and spill, compress, write and evict times, bytes written and raw,
   pool peak, and so on) in the `--bm_json_verbose` output. `seal_spill_ns`
