@@ -17,7 +17,8 @@
 /// Shared wire format and stream layout of the Cell shuffle writer and reader.
 /// This header is the format's definition: the wire constants and enums
 /// below are the format, and changing one changes it for both sides.
-/// kDictSegmentContinueFactor and kMaxPayloadRows are writer policy.
+/// kDictSegmentContinueFactor, kExactPackMaxBits, kBigintPlainMinBits and
+/// kMaxPayloadRows are writer policy.
 ///
 /// A partition's shuffle bytes are blocks back to back, each opening with a
 /// CellBlockKind byte. A ColumnarPayload holds some rows of one partition:
@@ -174,6 +175,30 @@ enum class EncodingKind : uint8_t {
   kForBitPack = 2,
   kPlain = 3,
 };
+
+/// The widest kBitPack value or kForBitPack residual the writer packs at
+/// its exact bit width; wider ones it packs at whole bytes. A value then
+/// starts on a byte boundary and recurs as the same bytes, which a codec
+/// matches, where an exact width of, say, 50 bits gives it other bytes at
+/// each position in a block. Narrower values gain the most from exact
+/// widths, and at two bytes or fewer one value is too short for a codec's
+/// match anyway. A block of wider values takes kForBitPack only below three
+/// quarters of the alternative's size, a tie going to the alternative: a
+/// base per block scatters a recurring value's bytes from block to block.
+inline constexpr uint32_t kExactPackMaxBits = 16;
+
+/// The whole-byte width from which the writer stores 8-byte values (Bigint
+/// streams, Timestamp halves, string lengths) kPlain instead of kBitPack,
+/// unless kForBitPack takes the block. ZSTD at level 1 with the input size
+/// unknown, as the stream compressor runs it, matches 7 bytes or more, so a
+/// 6- or 7-byte field matches neither on its own nor the same value stored
+/// whole in another block. Measured on user-id-like keys of up to 52 bits,
+/// with 6-byte fields allowed the output stayed up to 13 points further
+/// above V1's than with those blocks kPlain (Zipf-distributed ids: 15%
+/// above instead of 1.7%); from 48 bits it is within 1.3 points of all
+/// kPlain. The cost is random 41- to 47-bit values that never recur: 8
+/// bytes each instead of 6, as many as V1's.
+inline constexpr uint32_t kBigintPlainMinBits = 48;
 
 /// A null record: its bytes, the rows of its bitmap, the flag marking its
 /// run null and the rows a run holds at most.

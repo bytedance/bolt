@@ -741,6 +741,61 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   }
 }
 
+TEST_F(CellWriterTest, repeatedWideKeysCompress) {
+  // A table keyed by user and version, shuffled by user: 512 user ids, each
+  // going to one partition and recurring there among the others, beside a
+  // short version string. ZSTD must find the recurring ids, as it does in
+  // V1's raw 8-byte values; the output is then over 4 times smaller than
+  // the raw bytes. Ids of 40 to 52 bits packed at their exact width, 50-odd
+  // bits, take other bytes at each position in a block, and the output was
+  // only 2.2 times smaller. Ids clustered between 1.1e12 and 1.9e12 fit
+  // 5-byte offsets from a base per block, a quarter smaller than the
+  // values, which take other bytes in each block: 2.2 times as well.
+  constexpr int32_t kPartitions = 8;
+  constexpr vector_size_t kRows = 4096;
+  for (const bool clustered : {false, true}) {
+    SCOPED_TRACE(clustered ? "clustered ids" : "ids of 40 to 52 bits");
+    std::mt19937_64 rng(59);
+    std::vector<int64_t> users(512);
+    for (auto& user : users) {
+      if (clustered) {
+        user = 1'100'000'000'000LL +
+            static_cast<int64_t>(rng() % 800'000'000'000ULL);
+      } else {
+        const uint64_t top = uint64_t{1} << (39 + rng() % 13);
+        user = static_cast<int64_t>(top | (rng() & (top - 1)));
+      }
+    }
+    ShuffleInput input;
+    int64_t rawBytes = 0;
+    for (int batch = 0; batch < 8; ++batch) {
+      std::vector<int64_t> userIds(kRows);
+      std::vector<std::string> versions(kRows);
+      auto& pids = input.pids.emplace_back(kRows);
+      for (vector_size_t row = 0; row < kRows; ++row) {
+        userIds[row] = users[rng() % users.size()];
+        versions[row] = fmt::format("v{:06}", rng() % 200);
+        pids[row] = static_cast<int32_t>(userIds[row] % kPartitions);
+        rawBytes += sizeof(int64_t) + versions[row].size();
+      }
+      input.data.push_back(makeRowVector(
+          {"user_id", "version_id"},
+          {makeFlatVector<int64_t>(
+               kRows, [&](auto row) { return userIds[row]; }),
+           makeFlatVector<std::string>(
+               kRows, [&](auto row) { return versions[row]; })}));
+    }
+    const auto written = test::writeShuffle(
+        writerOptions(kPartitions, false, arrow::Compression::ZSTD),
+        input,
+        pool());
+    test::expectReadsBack(input, written, arrow::Compression::ZSTD, pool());
+    EXPECT_LT(written.metrics.totalBytesWritten * 3, rawBytes)
+        << written.metrics.totalBytesWritten << " bytes written of "
+        << rawBytes;
+  }
+}
+
 TEST_F(CellWriterTest, spillsCompressInSealedAndResidualWindows) {
   // ~4MB per batch: with an 8MB chunk cap every window sees several
   // pressure spills. The last partition takes one short row per batch, so
