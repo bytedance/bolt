@@ -19,11 +19,12 @@ in [CONTRIBUTING.md](../../../CONTRIBUTING.md).
 | --- | --- |
 | `PYTHON_EXECUTABLE` | Python interpreter whose ABI the wheel targets; must have pip. |
 | `BUILD_TYPE` | Bolt build type; default `Release`. |
-| `PROFILE` | Conan host profile; default `default`. |
+| `HOST_PROFILE` | Conan host profile; defaults to `host-profile` if present, otherwise `default`. |
+| `BUILD_PROFILE` | Conan build profile; defaults to `build-profile` if present, otherwise `default`. |
 | `DEPENDENCY_BUILD_TYPE` | Dependency build type; default `Release`. |
 | `NUM_THREADS` / `NUM_LINK_JOB` | Compile/link concurrency; defaults follow Make. |
 
-For direct pip/uv builds, use `-Ccmake.build-type=Debug`, `BOLT_CONAN_PROFILE`,
+For direct pip/uv builds, use `-Ccmake.build-type=Debug`, `BOLT_CONAN_PROFILE`, `BOLT_CONAN_BUILD_PROFILE`,
 and `BOLT_DEPENDENCY_BUILD_TYPE` for the corresponding settings. Parallelism
 uses the same defaults; `CMAKE_BUILD_PARALLEL_LEVEL` overrides `NUM_THREADS`.
 Lower concurrency on memory-limited hosts.
