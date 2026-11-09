@@ -888,6 +888,49 @@ TEST_F(TemporalFunctionsTest, defaultJvmTimeZone) {
           "1970-01-01"));
 }
 
+TEST_F(TemporalFunctionsTest, defaultJvmSystemVTimeZone) {
+  struct TestCase {
+    const char* input;
+    const char* expected;
+  };
+  // Timestamp.valueOf(...).toLocalDateTime() normalizes gaps in Java 8's
+  // default JVM time zone while preserving ordinary local timestamps.
+  const TestCase cases[] = {
+      {"2024-01-15 12:00:00", "2024-01-15 12:00:00"},
+      {"2024-07-15 12:00:00", "2024-07-15 12:00:00"},
+      {"2024-03-31 02:30:00", "2024-03-31 02:30:00"},
+      {"2024-04-28 02:30:00.123456789", "2024-04-28 03:30:00.123456789"},
+      {"2024-10-27 01:30:00", "2024-10-27 01:30:00"},
+      {"1974-01-06 02:30:00", "1974-01-06 03:30:00"},
+      {"1975-02-23 02:30:00", "1975-02-23 03:30:00"}};
+  for (
+      const auto* expression :
+      {"flink_string_to_timestamp(c0, true, 'SystemV/EST5EDT', cast(-18000 as integer))",
+       "to_timestamp(c0, 'yyyy/MM/dd', 'SystemV/EST5EDT', cast(-18000 as integer))"}) {
+    SCOPED_TRACE(expression);
+    for (const auto& test : cases) {
+      SCOPED_TRACE(test.input);
+      EXPECT_EQ(
+          timestamp(test.expected),
+          parseString(expression, " " + std::string(test.input) + " "));
+    }
+    EXPECT_EQ(std::nullopt, parseString(expression, std::nullopt));
+  }
+  EXPECT_EQ(
+      timestamp("2024-04-28 02:30:00.123456789"),
+      parseString(
+          "flink_string_to_timestamp(c0, true, 'SystemV/EST5EDT', cast(-18000 as integer))",
+          "2024-04-28 02:30:00.123456789"));
+  for (
+      const auto* expression :
+      {"flink_string_to_timestamp(c0, true, 'SystemV/EST5', cast(-18000 as integer))",
+       "to_timestamp(c0, 'yyyy/MM/dd', 'SystemV/EST5', cast(-18000 as integer))"}) {
+    EXPECT_EQ(
+        timestamp("2024-04-28 02:30:00.123456789"),
+        parseString(expression, " 2024-04-28 02:30:00.123456789 "));
+  }
+}
+
 TEST_F(TemporalFunctionsTest, legacyTimeZoneBoundary) {
   EXPECT_EQ(
       timestamp("1900-01-01 08:05:43"),
@@ -1100,6 +1143,39 @@ TEST_F(TemporalFunctionsTest, timestampToLongZones) {
         evaluateOnce<int64_t>(
             "try(timestamp_to_long(c0, 'America/New_York'))",
             std::optional<Timestamp>(timestamp(text))));
+  }
+}
+
+TEST_F(TemporalFunctionsTest, timestampToLongSystemVTimeZone) {
+  auto values = makeRowVector({makeNullableFlatVector<Timestamp>(
+      {timestamp("2024-01-15 12:00:00.123"),
+       timestamp("2024-07-15 12:00:00.123"),
+       timestamp("2024-03-31 12:00:00.123"),
+       std::nullopt})});
+  for (const auto* zone : {"SystemV/EST5EDT", "SystemV/EST5"}) {
+    SCOPED_TRACE(zone);
+    const auto summerUtc = std::string_view(zone) == "SystemV/EST5EDT"
+        ? "2024-07-15 16:00:00.123"
+        : "2024-07-15 17:00:00.123";
+    auto expected = makeNullableFlatVector<int64_t>(
+        {timestamp("2024-01-15 17:00:00.123").toMillis(),
+         timestamp(summerUtc).toMillis(),
+         timestamp("2024-03-31 17:00:00.123").toMillis(),
+         std::nullopt});
+    assertEqualVectors(
+        expected,
+        evaluate("timestamp_to_long(c0, '" + std::string(zone) + "')", values));
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kSessionTimezone, zone},
+         {core::QueryConfig::kAdjustTimestampToTimezone, "true"}});
+    assertEqualVectors(expected, evaluate("timestamp_to_long(c0)", values));
+  }
+  for (const auto* local : {"2024-04-28 02:30:00", "2024-10-27 01:30:00"}) {
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateOnce<int64_t>(
+            "try(timestamp_to_long(c0, 'SystemV/EST5EDT'))",
+            std::optional<Timestamp>(timestamp(local))));
   }
 }
 

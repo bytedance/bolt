@@ -36,17 +36,146 @@
 #include <fmt/core.h>
 #include <folly/container/F14Map.h>
 #include <folly/container/F14Set.h>
+#include <algorithm>
+#include <array>
 #include <exception>
+#include <iterator>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/type/tz/SystemVTimeZone.h"
 #include "bolt/type/tz/TimeZoneNames.h"
 
 using bytedance::bolt::common::testutil::TestValue;
 
 namespace bytedance::bolt::tz {
+
+namespace detail {
+
+// Java retains the obsolete tzdb SystemV zones even on systems whose zoneinfo
+// no longer ships them. These rules are independent of modern America/* zones.
+struct SystemVTimeZone {
+  const char* name;
+  int32_t offsetHours;
+  bool hasDaylightSaving;
+
+  ::date::sys_seconds transition(int year, bool daylight) const {
+    using namespace ::date;
+    sys_days day;
+    if (daylight && year == 1974) {
+      day = sys_days{::date::year{year} / January / 6};
+    } else if (daylight && year == 1975) {
+      day = sys_days{::date::year{year} / February / 23};
+    } else if (!daylight && year == 1974) {
+      day = sys_days{::date::year{year} / November / 24};
+    } else {
+      day = sys_days{
+          ::date::year{year} / (daylight ? April : October) / Sunday[last]};
+    }
+    // Both transitions occur at 02:00 wall time, using the preceding offset.
+    return day + std::chrono::hours{2 - offsetHours - (daylight ? 0 : 1)};
+  }
+
+  ::date::sys_info getInfo(::date::sys_seconds timestamp) const {
+    using namespace ::date;
+    const auto standardOffset = std::chrono::hours{offsetHours};
+    // Offset arithmetic on these endpoints stays inside int64 seconds while
+    // covering the signed millisecond range accepted by TimeZone.
+    sys_seconds begin{std::chrono::seconds{
+        std::numeric_limits<int64_t>::min() / 1000 - 86400}};
+    sys_seconds end{std::chrono::seconds{
+        std::numeric_limits<int64_t>::max() / 1000 + 86400}};
+    bool daylight = false;
+    if (hasDaylightSaving) {
+      const auto firstTransition = transition(1900, true);
+      if (timestamp < firstTransition) {
+        end = firstTransition;
+      } else {
+        // date::days uses a 32-bit count. Gregorian calendars and these DST
+        // rules repeat every 400 years after the historical exceptions.
+        static constexpr sys_seconds kCycleStart{
+            sys_days{::date::year{2000} / January / 1}};
+        static constexpr std::chrono::seconds kCycle{146097LL * 86400};
+        const auto elapsed = timestamp + standardOffset - kCycleStart;
+        if (elapsed >= kCycle) {
+          const auto shift = kCycle * (elapsed / kCycle);
+          auto info = getInfo(timestamp - shift);
+          auto shiftBoundary = [shift](sys_seconds boundary) {
+            int64_t result;
+            BOLT_USER_CHECK(
+                !__builtin_add_overflow(
+                    boundary.time_since_epoch().count(),
+                    shift.count(),
+                    &result),
+                "SystemV time zone interval is outside the supported seconds range");
+            return sys_seconds{std::chrono::seconds{result}};
+          };
+          info.begin = shiftBoundary(info.begin);
+          info.end = shiftBoundary(info.end);
+          return info;
+        }
+        const int year =
+            int(year_month_day{floor<days>(timestamp + standardOffset)}.year());
+        const auto start = transition(year, true);
+        const auto stop = transition(year, false);
+        if (timestamp < start) {
+          if (year > 1900) {
+            begin = transition(year - 1, false);
+          }
+          end = start;
+        } else if (timestamp < stop) {
+          begin = start;
+          end = stop;
+          daylight = true;
+        } else {
+          begin = stop;
+          end = transition(year + 1, true);
+        }
+      }
+    }
+    const auto& names = getTimeZoneNames().at(name);
+    return {
+        begin,
+        end,
+        standardOffset + std::chrono::hours{daylight ? 1 : 0},
+        std::chrono::minutes{daylight ? 60 : 0},
+        daylight ? names.daylightTimeAbbreviation
+                 : names.standardTimeAbbreviation};
+  }
+
+  ::date::local_info getInfo(::date::local_seconds timestamp) const {
+    using namespace ::date;
+    const auto standardOffset = std::chrono::hours{offsetHours};
+    auto candidate = [timestamp](std::chrono::seconds offset) {
+      int64_t result;
+      BOLT_USER_CHECK(
+          !__builtin_sub_overflow(
+              timestamp.time_since_epoch().count(), offset.count(), &result),
+          "SystemV local time is outside the supported seconds range");
+      return sys_seconds{std::chrono::seconds{result}};
+    };
+    const auto standard = getInfo(candidate(standardOffset));
+    if (!hasDaylightSaving) {
+      return {local_info::unique, standard, {}};
+    }
+    const auto daylight =
+        getInfo(candidate(standardOffset + std::chrono::hours{1}));
+    const bool validStandard = standard.offset == standardOffset;
+    const bool validDaylight = daylight.offset != standardOffset;
+    if (validStandard && validDaylight) {
+      return {local_info::ambiguous, daylight, standard};
+    }
+    if (!validStandard && !validDaylight) {
+      return {local_info::nonexistent, daylight, standard};
+    }
+    return {local_info::unique, validStandard ? standard : daylight, {}};
+  }
+};
+
+} // namespace detail
 
 using TTimeZoneDatabase = std::vector<std::unique_ptr<TimeZone>>;
 using TTimeZoneIndex = folly::F14FastMap<std::string, const TimeZone*>;
@@ -58,14 +187,49 @@ extern const std::vector<std::pair<int16_t, std::string>>& getTimeZoneEntries();
 extern const std::unordered_map<std::string, std::string>& getTimeZoneLinks();
 
 namespace {
+// Keep Bolt's additional names separate from the generated Presto IDs. These
+// stable IDs also fit the 12-bit time zone field in packed timestamps.
+constexpr int16_t kSystemVTimeZoneIdStart = 4000;
+constexpr detail::SystemVTimeZone kSystemVTimeZones[] = {
+    {"SystemV/AST4", -4, false},
+    {"SystemV/AST4ADT", -4, true},
+    {"SystemV/CST6", -6, false},
+    {"SystemV/CST6CDT", -6, true},
+    {"SystemV/EST5", -5, false},
+    {"SystemV/EST5EDT", -5, true},
+    {"SystemV/HST10", -10, false},
+    {"SystemV/MST7", -7, false},
+    {"SystemV/MST7MDT", -7, true},
+    {"SystemV/PST8", -8, false},
+    {"SystemV/PST8PDT", -8, true},
+    {"SystemV/YST9", -9, false},
+    {"SystemV/YST9YDT", -9, true},
+};
+static_assert(kSystemVTimeZoneIdStart + std::size(kSystemVTimeZones) <= 4096);
+
 // Returns the offset in minutes for a specific time zone offset in the
 // database. Do not call for tzID 0 (UTC / "+00:00").
 inline std::chrono::minutes getTimeZoneOffset(int16_t tzID) {
   return std::chrono::minutes{(tzID <= 840) ? (tzID - 841) : (tzID - 840)};
 }
 
-const ::date::time_zone* locateZoneImpl(std::string_view tz_name) {
+const ::date::time_zone* locateZoneImpl(
+    std::string_view tz_name,
+    bool failOnMissing = true) {
   BOLT_TEST_ADJUST("bytedance::bolt::tz::locateZoneImpl", &tz_name);
+  if (!failOnMissing) {
+    const auto& zones = ::date::get_tzdb().zones;
+    const auto zone = std::lower_bound(
+        zones.begin(),
+        zones.end(),
+        tz_name,
+        [](const ::date::time_zone& candidate, std::string_view name) {
+          return candidate.name() < name;
+        });
+    if (zone == zones.end() || zone->name() != tz_name) {
+      return nullptr;
+    }
+  }
   const ::date::time_zone* zone = ::date::locate_zone(tz_name);
   return zone;
 }
@@ -122,6 +286,20 @@ TTimeZoneDatabase buildTimeZoneDatabase(
     }
     tzDatabase[entry.first] = std::move(timeZonePtr);
   }
+  BOLT_CHECK_LT(
+      dbInput.back().first,
+      kSystemVTimeZoneIdStart,
+      "Presto time zone IDs overlap Bolt's SystemV IDs");
+  tzDatabase.resize(kSystemVTimeZoneIdStart + std::size(kSystemVTimeZones));
+  for (size_t i = 0; i < std::size(kSystemVTimeZones); ++i) {
+    const auto id = kSystemVTimeZoneIdStart + i;
+    const auto& rules = kSystemVTimeZones[i];
+    if (const auto* zone = locateZoneImpl(rules.name, false)) {
+      tzDatabase[id] = std::make_unique<TimeZone>(rules.name, id, zone);
+    } else {
+      tzDatabase[id] = std::make_unique<TimeZone>(rules, id);
+    }
+  }
   return tzDatabase;
 }
 
@@ -135,7 +313,11 @@ const TTimeZoneDatabase& getTimeZoneDatabase() {
 // reverse look ups.
 TTimeZoneIndex buildTimeZoneIndex(const TTimeZoneDatabase& tzDatabase) {
   TTimeZoneIndex reversed;
-  reversed.reserve(tzDatabase.size() + 2);
+  const auto zoneCount =
+      std::count_if(tzDatabase.begin(), tzDatabase.end(), [](const auto& zone) {
+        return zone != nullptr;
+      });
+  reversed.reserve(zoneCount + 2);
 
   for (int16_t i = 0; i < tzDatabase.size(); ++i) {
     if (tzDatabase[i] != nullptr) {
@@ -363,34 +545,61 @@ TDuration toLocalImpl(
   return ::date::zoned_time{tz, timePoint}.get_local_time().time_since_epoch();
 }
 
+template <typename TDuration>
+TDuration systemVToSys(
+    TDuration timestamp,
+    TimeZone::TChoose choose,
+    const TimeZone& zone) {
+  using namespace ::date;
+  const local_time<TDuration> local{timestamp};
+  validateRange(sys_time<TDuration>{timestamp});
+  const auto info = zone.getInfo(floor<std::chrono::seconds>(local));
+  if (info.result == local_info::nonexistent) {
+    if (choose == TimeZone::TChoose::kFail) {
+      throw nonexistent_local_time(local, info);
+    }
+    if (choose != TimeZone::TChoose::kEarliestOrShiftForward) {
+      return std::chrono::duration_cast<TDuration>(
+          info.first.end.time_since_epoch());
+    }
+  } else if (info.result == local_info::ambiguous) {
+    if (choose == TimeZone::TChoose::kFail) {
+      throw ambiguous_local_time(local, info);
+    }
+    if (choose == TimeZone::TChoose::kLatest) {
+      return timestamp - info.second.offset;
+    }
+  }
+  return timestamp - info.first.offset;
+}
+
 template <bool isLongName>
 std::string getName(
     TimeZone::milliseconds timestamp,
     TimeZone::TChoose choose,
-    const ::date::time_zone* tz,
-    const std::string& timeZoneName) {
-  validateRange(::date::sys_time<TimeZone::milliseconds>(timestamp));
-
-  // Time zone offsets only have one name.
-  if (tz == nullptr) {
-    return timeZoneName;
+    const TimeZone& zone) {
+  validateRange(::date::sys_time<TimeZone::milliseconds>{timestamp});
+  if (zone.offset()) {
+    return zone.name();
   }
 
   static const auto& timeZoneNames = getTimeZoneNames();
-  auto it = timeZoneNames.find(timeZoneName);
-
+  auto it = timeZoneNames.find(zone.name());
   BOLT_CHECK(
       it != timeZoneNames.end(),
       "Unable to find short name for time zone: {}",
-      timeZoneName);
+      zone.name());
 
-  // According to the documentation this is how to determine if DST applies to
-  // a given timestamp in a given time zone.
-  // https://howardhinnant.github.io/date/tz.html#sys_info
-  ::date::local_time<TimeZone::milliseconds> timePoint{timestamp};
-  bool isDst = getZonedTime(tz, timePoint, choose).get_info().save !=
-      std::chrono::minutes(0);
-
+  const auto info = zone.tz()
+      ? getZonedTime(
+            zone.tz(),
+            ::date::local_time<TimeZone::milliseconds>{timestamp},
+            choose)
+            .get_info()
+      : zone.getInfo(::date::floor<std::chrono::seconds>(
+            ::date::sys_time<TimeZone::milliseconds>{
+                zone.to_sys(timestamp, choose)}));
+  const bool isDst = info.save != std::chrono::minutes{0};
   if constexpr (isLongName) {
     return isDst ? it->second.daylightTimeLongName
                  : it->second.standardTimeLongName;
@@ -418,7 +627,8 @@ const TimeZone* locateZone(int16_t timeZoneID, bool failOnError) {
 
   // Check if timeZoneID does not exceed the vector size or is one of the
   // "holes".
-  if (timeZoneID > timeZoneDatabase.size() ||
+  if (timeZoneID < 0 ||
+      static_cast<size_t>(timeZoneID) >= timeZoneDatabase.size() ||
       timeZoneDatabase[timeZoneID] == nullptr) {
     if (failOnError) {
       BOLT_FAIL("Unable to resolve timeZoneID '{}'", timeZoneID);
@@ -499,35 +709,89 @@ std::vector<int16_t> getTimeZoneIDs() {
   return ids;
 }
 
+std::optional<std::pair<int32_t, int32_t>> detail::getSystemVTimeZoneOffsets(
+    std::string_view name) {
+  for (const auto& rules : kSystemVTimeZones) {
+    if (name == rules.name) {
+      return std::pair{
+          rules.offsetHours * 3600, rules.hasDaylightSaving ? 3600 : 0};
+    }
+  }
+  return std::nullopt;
+}
+
+const TimeZone* detail::locateBuiltinSystemVZone(std::string_view name) {
+  static const auto zones = [] {
+    std::array<std::unique_ptr<TimeZone>, std::size(kSystemVTimeZones)> result;
+    for (size_t i = 0; i < result.size(); ++i) {
+      result[i] = std::make_unique<TimeZone>(
+          kSystemVTimeZones[i], kSystemVTimeZoneIdStart + i);
+    }
+    return result;
+  }();
+  for (const auto& zone : zones) {
+    if (zone->name() == name) {
+      return zone.get();
+    }
+  }
+  return nullptr;
+}
+
+TimeZone::TimeZone(const detail::SystemVTimeZone& systemV, int16_t timeZoneID)
+    : offset_(std::chrono::minutes::min()),
+      timeZoneName_(systemV.name),
+      timeZoneID_(timeZoneID) {
+  BOLT_CHECK_GE(timeZoneID, kSystemVTimeZoneIdStart);
+  const auto index = timeZoneID - kSystemVTimeZoneIdStart;
+  BOLT_CHECK_LT(index, std::size(kSystemVTimeZones));
+  BOLT_CHECK(&systemV == &kSystemVTimeZones[index]);
+}
+
 TimeZone::seconds TimeZone::to_sys(
     TimeZone::seconds timestamp,
     TimeZone::TChoose choose) const {
+  if (hasSystemVRules()) {
+    return systemVToSys(timestamp, choose, *this);
+  }
   return toSysImpl(timestamp, choose, tz_, offset_);
 }
 
 TimeZone::milliseconds TimeZone::to_sys(
     TimeZone::milliseconds timestamp,
     TimeZone::TChoose choose) const {
+  if (hasSystemVRules()) {
+    return systemVToSys(timestamp, choose, *this);
+  }
   return toSysImpl(timestamp, choose, tz_, offset_);
 }
 
 TimeZone::seconds TimeZone::to_local(TimeZone::seconds timestamp) const {
+  if (hasSystemVRules()) {
+    const ::date::sys_time<decltype(timestamp)> utc{timestamp};
+    validateRange(utc);
+    return timestamp + getInfo(::date::floor<seconds>(utc)).offset;
+  }
   return toLocalImpl(timestamp, tz_, offset_);
 }
 
 TimeZone::milliseconds TimeZone::to_local(
     TimeZone::milliseconds timestamp) const {
+  if (hasSystemVRules()) {
+    const ::date::sys_time<decltype(timestamp)> utc{timestamp};
+    validateRange(utc);
+    return timestamp + getInfo(::date::floor<seconds>(utc)).offset;
+  }
   return toLocalImpl(timestamp, tz_, offset_);
 }
 
 TimeZone::seconds TimeZone::correct_nonexistent_time(
     TimeZone::seconds timestamp) const {
   // If this is an offset time zone.
-  if (tz_ == nullptr) {
+  if (offset()) {
     return timestamp;
   }
 
-  const auto localInfo = tz_->get_info(::date::local_time<seconds>{timestamp});
+  const auto localInfo = getInfo(::date::local_time<seconds>{timestamp});
 
   if (localInfo.result != ::date::local_info::nonexistent) {
     return timestamp;
@@ -538,16 +802,43 @@ TimeZone::seconds TimeZone::correct_nonexistent_time(
   return timestamp + adjustment;
 }
 
+::date::sys_info TimeZone::getInfo(::date::sys_seconds timestamp) const {
+  if (hasSystemVRules()) {
+    return kSystemVTimeZones[timeZoneID_ - kSystemVTimeZoneIdStart].getInfo(
+        timestamp);
+  }
+  if (tz_) {
+    return tz_->get_info(timestamp);
+  }
+  return {
+      ::date::sys_seconds::min(),
+      ::date::sys_seconds::max(),
+      offset_,
+      std::chrono::minutes{0},
+      timeZoneName_};
+}
+
+::date::local_info TimeZone::getInfo(::date::local_seconds timestamp) const {
+  if (hasSystemVRules()) {
+    return kSystemVTimeZones[timeZoneID_ - kSystemVTimeZoneIdStart].getInfo(
+        timestamp);
+  }
+  if (tz_) {
+    return tz_->get_info(timestamp);
+  }
+  return {::date::local_info::unique, getInfo(::date::sys_seconds{}), {}};
+}
+
 std::string TimeZone::getShortName(
     TimeZone::milliseconds timestamp,
     TimeZone::TChoose choose) const {
-  return getName<false>(timestamp, choose, tz_, timeZoneName_);
+  return getName<false>(timestamp, choose, *this);
 }
 
 std::string TimeZone::getLongName(
     TimeZone::milliseconds timestamp,
     TimeZone::TChoose choose) const {
-  return getName<true>(timestamp, choose, tz_, timeZoneName_);
+  return getName<true>(timestamp, choose, *this);
 }
 
 bool isDstTimezone(int16_t tzID) {

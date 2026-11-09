@@ -26,6 +26,7 @@
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
+#include "bolt/type/tz/SystemVTimeZone.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::functions::sparksql::test {
 namespace {
@@ -602,6 +603,42 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDate) {
 
   // Empty input returns null.
   EXPECT_EQ(std::nullopt, unixTimestamp(std::nullopt));
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, systemVUnixTimestampDate) {
+  struct BuiltinDateFunction : UnixTimestampParseFunction<exec::VectorExec> {
+    using UnixTimestampFunctionBase<exec::VectorExec>::setSpecTimezone;
+  };
+  struct TestCase {
+    const char* zone;
+    const char* date;
+    int64_t expected;
+  };
+  const TestCase cases[] = {
+      {"SystemV/EST5EDT", "2024-01-15", 1'705'294'800},
+      {"SystemV/EST5EDT", "2024-07-15", 1'721'016'000},
+      {"SystemV/EST5", "2024-01-15", 1'705'294'800},
+      {"SystemV/EST5", "2024-07-15", 1'721'019'600}};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(fmt::format("{} @ {}", test.date, test.zone));
+    const auto date = DATE()->toDays(test.date);
+    setQueryTimeZone(test.zone);
+    EXPECT_EQ(
+        test.expected,
+        (evaluateOnce<int64_t, int32_t>(
+            "unix_timestamp(c0)", {date}, {DATE()})));
+
+    // Exercise the DATE overload with built-in rules even when the host has
+    // SystemV tzdata. String parsing uses a separate conversion path.
+    const auto* zone = tz::detail::locateBuiltinSystemVZone(test.zone);
+    ASSERT_NE(nullptr, zone);
+    ASSERT_EQ(nullptr, zone->tz());
+    BuiltinDateFunction function;
+    ASSERT_TRUE(function.setSpecTimezone(zone->id(), zone));
+    int64_t result;
+    function.call(result, date);
+    EXPECT_EQ(test.expected, result);
+  }
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDateWithFormat) {
@@ -3482,6 +3519,67 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUtcTimestamp) {
   BOLT_ASSERT_THROW(
       fromUtcTimestamp("2015-01-24 00:00:00", "Asia/Ooty"),
       "Unknown time zone: 'Asia/Ooty");
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, systemVTimeZones) {
+  const auto timestamp = [](const std::string& text) {
+    return util::fromTimestampString(text.data(), text.size(), nullptr);
+  };
+  struct TestCase {
+    const char* zone;
+    const char* local;
+    const char* utc;
+  };
+  // Expected instants match java.time.LocalDateTime.atZone on Java 8.
+  const TestCase cases[] = {
+      {"SystemV/EST5EDT", "2024-01-15 12:00:00", "2024-01-15 17:00:00"},
+      {"SystemV/EST5EDT", "2024-07-15 12:00:00", "2024-07-15 16:00:00"},
+      {"SystemV/EST5EDT", "2024-03-31 12:00:00", "2024-03-31 17:00:00"},
+      {"SystemV/EST5EDT", "2024-10-27 01:30:00", "2024-10-27 05:30:00"},
+      {"SystemV/EST5", "2024-01-15 12:00:00", "2024-01-15 17:00:00"},
+      {"SystemV/EST5", "2024-07-15 12:00:00", "2024-07-15 17:00:00"}};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(fmt::format("{} @ {}", test.local, test.zone));
+    EXPECT_EQ(
+        timestamp(test.utc),
+        evaluateOnce<Timestamp>(
+            fmt::format("to_utc_timestamp(c0, '{}')", test.zone),
+            std::optional<Timestamp>(timestamp(test.local))));
+    EXPECT_EQ(
+        timestamp(test.local),
+        evaluateOnce<Timestamp>(
+            "from_utc_timestamp(c0, c1)",
+            std::optional<Timestamp>(timestamp(test.utc)),
+            std::optional<std::string>(test.zone)));
+  }
+  EXPECT_EQ(
+      timestamp("2024-04-28 07:30:00.123456"),
+      evaluateOnce<Timestamp>(
+          "to_utc_timestamp(c0, 'SystemV/EST5EDT')",
+          std::optional<Timestamp>(timestamp("2024-04-28 02:30:00.123456"))));
+  EXPECT_EQ(
+      timestamp("2024-04-28 03:30:00.123456"),
+      evaluateOnce<Timestamp>(
+          "from_utc_timestamp(c0, 'SystemV/EST5EDT')",
+          std::optional<Timestamp>(timestamp("2024-04-28 07:30:00.123456"))));
+
+  for (const auto* zone : {"SystemV/EST5EDT", "SystemV/EST5"}) {
+    SCOPED_TRACE(zone);
+    setPolicyAndTimeZone("corrected", zone);
+    EXPECT_EQ(
+        timestamp("2024-01-15 17:00:00"),
+        evaluateOnce<Timestamp>(
+            "get_timestamp(c0, 'yyyy-MM-dd HH:mm:ss')",
+            std::optional<std::string>("2024-01-15 12:00:00")));
+    const auto summerUtc = std::string_view(zone) == "SystemV/EST5EDT"
+        ? "2024-07-15 16:00:00"
+        : "2024-07-15 17:00:00";
+    EXPECT_EQ(
+        timestamp(summerUtc),
+        evaluateOnce<Timestamp>(
+            "get_timestamp(c0, 'yyyy-MM-dd HH:mm:ss')",
+            std::optional<std::string>("2024-07-15 12:00:00")));
+  }
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, toFromUtcTimestamp) {

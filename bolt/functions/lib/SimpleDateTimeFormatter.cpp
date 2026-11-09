@@ -30,6 +30,7 @@
 #include <stdexcept>
 
 #include "bolt/type/TimestampConversion.h"
+#include "bolt/type/tz/SystemVTimeZone.h"
 #include "bolt/type/tz/TimeZoneNames.h"
 
 namespace bytedance::bolt::functions {
@@ -48,6 +49,17 @@ icu::GregorianCalendar& simpleDateCalendar() {
     return result;
   }();
   return *calendar;
+}
+
+std::pair<int32_t, int32_t> simpleTimeZoneOffsetsFromIcu(
+    std::string_view name,
+    const icu::TimeZone& javaZone) {
+  if (javaZone == icu::TimeZone::getUnknown()) {
+    if (const auto offsets = tz::detail::getSystemVTimeZoneOffsets(name)) {
+      return *offsets;
+    }
+  }
+  return {javaZone.getRawOffset() / 1000, javaZone.getDSTSavings() / 1000};
 }
 
 std::pair<int32_t, int32_t> simpleTimeZoneOffsets(
@@ -74,8 +86,7 @@ std::pair<int32_t, int32_t> simpleTimeZoneOffsets(
     std::unique_ptr<icu::TimeZone> javaZone(icu::TimeZone::createTimeZone(
         icu::UnicodeString::fromUTF8(zone->name())));
     cached = cache.begin() + next;
-    cached->offsets = {
-        javaZone->getRawOffset() / 1000, javaZone->getDSTSavings() / 1000};
+    cached->offsets = simpleTimeZoneOffsetsFromIcu(zone->name(), *javaZone);
     cached->zone = zone;
     next = (next + 1) % cache.size();
   }
@@ -110,8 +121,8 @@ resolveLocalTime(int64_t seconds, const tz::TimeZone* zone, bool latest) {
       seconds < interval.end) {
     return {seconds - interval.offset, false};
   }
-  const auto info = zone->tz()->get_info(
-      ::date::local_seconds{std::chrono::seconds(seconds)});
+  const auto info =
+      zone->getInfo(::date::local_seconds{std::chrono::seconds(seconds)});
   if (info.result == ::date::local_info::unique) {
     const auto& period = info.first;
     auto begin =
@@ -119,18 +130,19 @@ resolveLocalTime(int64_t seconds, const tz::TimeZone* zone, bool latest) {
     auto end = period.end.time_since_epoch().count() + period.offset.count();
     const ::date::sys_seconds min{
         ::date::sys_days{::date::year::min() / 1 / 1}};
-    const ::date::sys_seconds max =
-        ::date::sys_days{::date::year::max() / 12 / 31} + ::date::days{1};
+    const ::date::sys_seconds tzdbEnd{
+        ::date::sys_days{::date::year::max() / 12 / 31}};
     // Exclude overlaps at both boundaries; only unique local times are cached.
     if (period.begin > min) {
       const auto previous =
-          zone->tz()->get_info(period.begin - std::chrono::seconds{1});
+          zone->getInfo(period.begin - std::chrono::seconds{1});
       begin = std::max(
           begin,
           period.begin.time_since_epoch().count() + previous.offset.count());
     }
-    if (period.end < max) {
-      const auto next = zone->tz()->get_info(period.end);
+    // Built-in rule intervals can extend beyond the system tzdb sentinel.
+    if (period.end != tzdbEnd) {
+      const auto next = zone->getInfo(period.end);
       end = std::min(
           end, period.end.time_since_epoch().count() + next.offset.count());
     }
