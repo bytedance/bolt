@@ -29,14 +29,13 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
-/// Input fed to the stream compressor at a time - its independent block
-/// size: small pieces are staged up to it, so every call carries a full
-/// block, compressed straight from the stage.
+/// The most input fed to the stream compressor in one call: a larger piece
+/// is fed in parts of this size.
 constexpr int64_t kStreamPieceBytes = 256 << 10;
 /// The output buffer gathers a frame into sink writes of about this size,
-/// with room past it for the codec's bound on one piece of fresh input and
-/// the trailer. A call may still emit more - deflate also flushes a block
-/// carried over from earlier calls - which compressStaged copes with.
+/// with room past it for the codec's bound on one call's input and the
+/// trailer. A call may still emit more - deflate also flushes a block
+/// carried over from earlier calls - which streamFrame copes with.
 constexpr int64_t kStreamOutBytes = 512 << 10;
 constexpr int64_t kStreamOutSlackBytes = 64;
 /// Input after which a frame that has not shrunk the data is stored
@@ -87,8 +86,9 @@ RunCompressor::RunCompressor(
   }
   std::unique_ptr<StreamCompressor> streamCompressor;
   try {
-    // Independent blocks: the stage is reused for every block, so a linked
-    // block would compress against a copied-aside dictionary.
+    // Independent blocks for LZ4: linked ones would have it keep a copy of
+    // the last 64 KiB of input, as it cannot count on the input staying in
+    // place.
     auto streamOptions = codecOptions;
     streamOptions.independentBlocks = true;
     streamCompressor = StreamCompressor::create(
@@ -103,7 +103,6 @@ RunCompressor::RunCompressor(
 void RunCompressor::useStreamCompressor(
     std::unique_ptr<StreamCompressor> compressor) {
   streamCompressor_ = std::move(compressor);
-  stage_.resize(kStreamPieceBytes);
   out_.resize(
       kStreamOutBytes +
       streamCompressor_->recommendedOutputSize(kStreamPieceBytes) +
@@ -361,14 +360,13 @@ uint64_t RunCompressor::streamFrame(
   auto& compressor = *streamCompressor_;
   compressor.reset();
   const int64_t outCapacity = static_cast<int64_t>(out_.size());
-  // Room left before each call: the codec's bound on one piece of fresh
-  // input, plus slack.
+  // Room left before each call: the codec's bound on one call's input, plus
+  // slack.
   const int64_t pieceBound = outCapacity - kStreamOutBytes;
   int64_t held = 0; // frame bytes in out_, not yet in the sink
   bool reachedSink = false; // whether some of the frame is in the sink
   uint64_t fed = 0;
   uint64_t emitted = 0;
-  size_t staged = 0;
   bool storedInstead = false;
   const auto drain = [&]() {
     sink.write(out_.data(), static_cast<size_t>(held));
@@ -380,23 +378,32 @@ uint64_t RunCompressor::streamFrame(
       drain();
     }
   };
-  const auto compressStaged = [&]() {
-    if (staged == 0) {
-      return;
+  constexpr auto kPieceBytes = static_cast<uint64_t>(kStreamPieceBytes);
+  // Whether the frame so far shows it does not shrink: judged before any of
+  // it reaches the sink, after every kStreamPieceBytes of input and at its
+  // end.
+  const auto probe = [&]() {
+    if (judgeEarly && !reachedSink && fed >= kStreamProbeBytes &&
+        doesNotShrink(emitted, fed)) {
+      storedInstead = true;
     }
+  };
+  // Feeds `pieceBytes`, at most kStreamPieceBytes, straight from the
+  // visitor: the codec copies them into its own window, if at all, so they
+  // are copied once at most. One call normally takes them all, as
+  // pieceBound is the codec's bound for them. A codec may still stop short -
+  // deflate also flushes the block it carried over from earlier calls - so
+  // the output goes to the sink and the rest is fed again.
+  const auto feed = [&](const uint8_t* data, int64_t pieceBytes) {
     makeRoom();
-    // One call normally takes the whole stage: pieceBound is the codec's
-    // bound for one piece. A codec may still stop short - deflate also
-    // flushes the block it carried over from earlier calls - so the output
-    // goes to the sink and the rest of the stage is fed again.
-    size_t consumed = 0;
-    while (consumed < staged) {
+    int64_t consumed = 0;
+    while (consumed < pieceBytes) {
       StreamCompressResult result;
       {
         NanosecondTimer timer(compressTimeNs_);
         result = compressor.compress(
-            stage_.data() + consumed,
-            static_cast<int64_t>(staged - consumed),
+            data + consumed,
+            pieceBytes - consumed,
             out_.data() + held,
             outCapacity - held);
       }
@@ -405,32 +412,29 @@ uint64_t RunCompressor::streamFrame(
           "stream compressor made no progress");
       held += result.bytesWritten;
       emitted += static_cast<uint64_t>(result.bytesWritten);
-      consumed += static_cast<size_t>(result.bytesRead);
-      if (consumed < staged && held > 0) {
+      consumed += result.bytesRead;
+      if (consumed < pieceBytes && held > 0) {
         drain();
       }
     }
-    fed += staged;
-    staged = 0;
-    if (judgeEarly && !reachedSink && fed >= kStreamProbeBytes &&
-        doesNotShrink(emitted, fed)) {
-      storedInstead = true;
+    fed += static_cast<uint64_t>(pieceBytes);
+    if (fed % kPieceBytes == 0) {
+      probe();
     }
   };
   visit([&](const char* data, uint32_t bytes) {
+    const auto* piece = reinterpret_cast<const uint8_t*>(data);
     while (bytes > 0 && !storedInstead) {
-      const size_t take = std::min<size_t>(bytes, stage_.size() - staged);
-      ::memcpy(stage_.data() + staged, data, take);
-      staged += take;
-      data += take;
-      bytes -= static_cast<uint32_t>(take);
-      if (staged == stage_.size()) {
-        compressStaged();
-      }
+      // Up to the next multiple of kStreamPieceBytes, where the probe looks.
+      const auto take = static_cast<uint32_t>(
+          std::min<uint64_t>(bytes, kPieceBytes - fed % kPieceBytes));
+      feed(piece, take);
+      piece += take;
+      bytes -= take;
     }
   });
   if (!storedInstead) {
-    compressStaged();
+    probe();
   }
   if (storedInstead) {
     ++stats_.earlyStoredFrames;

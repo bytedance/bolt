@@ -119,19 +119,19 @@ decodeRun(const std::string& run, uint32_t numStreams, Codec* codec) {
   return decoded;
 }
 
-/// Writes `streams` as one run, each handed over in pieces of 1000 bytes.
+/// Writes `streams` as one run, each handed over in pieces of `pieceBytes`.
 std::string compressRun(
     RunCompressor& compressor,
-    const std::vector<std::string>& streams) {
-  constexpr size_t kPiece = 1000;
+    const std::vector<std::string>& streams,
+    size_t pieceBytes = 1000) {
   StringSink sink;
   compressor.write(
       sink,
       static_cast<uint32_t>(streams.size()),
       [&](uint32_t s) { return streams[s].size(); },
       [&](uint32_t s, RunPieceFn fn) {
-        for (size_t at = 0; at < streams[s].size(); at += kPiece) {
-          const size_t bytes = std::min(kPiece, streams[s].size() - at);
+        for (size_t at = 0; at < streams[s].size(); at += pieceBytes) {
+          const size_t bytes = std::min(pieceBytes, streams[s].size() - at);
           fn(streams[s].data() + at, static_cast<uint32_t>(bytes));
         }
       });
@@ -232,9 +232,9 @@ class ShortReadCompressor final : public StreamCompressor {
 };
 
 TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
-  // A stream form may take less than a whole staging piece per call: the
-  // compressor writes out what it holds and feeds it the rest. One that
-  // takes nothing and writes nothing fails the frame rather than spinning.
+  // A stream form may take less than a call offers it: the compressor
+  // writes out what it holds and feeds it the rest. One that takes nothing
+  // and writes nothing fails the frame rather than spinning.
   const auto type = fromArrowCodecType(partitionOptions_.compressionType);
   const auto realStreamForm = [&] {
     CodecOptions codecOptions{
@@ -251,6 +251,8 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
     mixed += randomBytes(12 << 10, rng);
   }
   const std::vector<std::string> streams = {mixed, repetitive(100 << 10)};
+  // Pieces of 300 KiB, so that a call offers more than either read takes.
+  constexpr size_t kPieceBytes = 300 << 10;
   for (const int64_t maxRead : {int64_t{1000}, int64_t{100} << 10}) {
     SCOPED_TRACE(maxRead);
     RunCompressor compressor(
@@ -259,8 +261,8 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
         std::make_unique<ShortReadCompressor>(type, realStreamForm(), maxRead);
     auto* probe = shortReads.get();
     compressor.testingSetStreamCompressor(std::move(shortReads));
-    const auto decoded =
-        decodeRun(compressRun(compressor, streams), 2, compressor.codec());
+    const auto decoded = decodeRun(
+        compressRun(compressor, streams, kPieceBytes), 2, compressor.codec());
     EXPECT_EQ(decoded.streams, streams);
     EXPECT_TRUE(decoded.compressed[0]);
     EXPECT_GT(probe->shortReads, 0);
@@ -269,7 +271,8 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   RunCompressor stalled(partitionOptions_, cellOptions(), &compressTimeNs_);
   stalled.testingSetStreamCompressor(
       std::make_unique<ShortReadCompressor>(type, realStreamForm(), 0));
-  BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
+  BOLT_ASSERT_THROW(
+      compressRun(stalled, streams, kPieceBytes), "made no progress");
 }
 
 INSTANTIATE_TEST_SUITE_P(
