@@ -147,6 +147,11 @@ DEFINE_int64(
     -1,
     "Cell writers' spillMemoryBytes: the newest spill data kept in memory, "
     "at most this many bytes; -1 no cap, 0 none.");
+DEFINE_int64(
+    bolt_benchmark_shuffle_cell_spill_bytes_per_stream,
+    512 << 10,
+    "Cell writers' cellSpillBytesPerStream: past this much cell data for "
+    "every stream of every partition, they spill without memory pressure.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -2188,6 +2193,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
       FLAGS_bolt_benchmark_shuffle_cell_adaptive_compression;
   options.cellOptions.spillMemoryBytes =
       FLAGS_bolt_benchmark_shuffle_cell_spill_memory_bytes;
+  options.cellOptions.cellSpillBytesPerStream =
+      FLAGS_bolt_benchmark_shuffle_cell_spill_bytes_per_stream;
   return options;
 }
 

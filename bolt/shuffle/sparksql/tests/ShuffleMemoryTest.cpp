@@ -646,6 +646,10 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
   writerOptions.partitionWriterOptions.numSubDirs = 1;
   writerOptions.partitionWriterOptions.compressionThreshold =
       compressionThreshold;
+  // No Cell threshold: the writer spills only under memory pressure, the
+  // subject here.
+  writerOptions.cellOptions.cellSpillBytesPerStream =
+      std::numeric_limits<int64_t>::max();
   writerOptions.shuffleBatchSize = 128 * 1024 * 1024;
   writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
 
@@ -767,6 +771,10 @@ ShuffleWriterMetrics ShuffleMemoryTest::runCellUnderPressure(
       tempDir->path + "/shuffle_data.bin";
   writerOptions.partitionWriterOptions.configuredDirs = {localDir};
   writerOptions.partitionWriterOptions.numSubDirs = 1;
+  // No Cell threshold: the writer spills only under memory pressure, the
+  // subject here.
+  writerOptions.cellOptions.cellSpillBytesPerStream =
+      std::numeric_limits<int64_t>::max();
   writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
 
   auto sourceNode = std::make_shared<MemoryHogNode>(

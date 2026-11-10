@@ -41,24 +41,27 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// handled entirely by the CompositeShuffleWriter base.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
-/// ignored by design): the only choke point is reserveChunk() at chunk growth,
-/// where a failed maybeReserve - or the optional spill threshold - spills
-/// the largest partitions until half the cell data is covered. A reclaim
-/// frees idle chunks first, then runs partial spills and compaction, and
-/// spills everything only when those fall short; one of a given size writes
-/// no run while the cells hold less data than the run floor
-/// (CellShuffleOptions::reclaimRunFloorBytes). Accounting is the
-/// allocator's exact chunk/cell counters.
+/// ignored by design). Locally, at a batch boundary, cell data past the
+/// cell threshold - CellShuffleOptions::cellSpillBytesPerStream for every
+/// stream of every partition - spills the largest partitions down to half
+/// of it, without memory pressure. Under pressure, the choke point is
+/// reserveChunk() at chunk growth, where a failed maybeReserve - or
+/// cellMemorySpillBytes passed - spills the largest partitions until half
+/// the cell data is covered. A reclaim frees idle chunks first, then runs
+/// partial spills and compaction, and spills everything only when those
+/// fall short; one of a given size writes no run while the cells hold less
+/// data than the run floor (CellShuffleOptions::reclaimRunFloorBytes).
+/// Accounting is the allocator's exact chunk/cell counters.
 ///
 /// Locally, the newest of what spills - runs and sealed payloads, the
 /// composite blocks too - stays in a SpillMemory of the writer's pool, and
 /// the merge copies it from there. It grows until the first memory pressure
 /// and from then on reuses its blocks, writing the oldest out. Every
-/// pressure event - a reclaim, a chunk reservation that fails or passes the
-/// threshold, composite rows short of room - writes its oldest blocks out
-/// first, as much as the event needs, then does what it did before. A
-/// reclaim writes them out even while the output writes: a block's
-/// reservation, which may reclaim the writer, is taken only between
+/// pressure event - a reclaim, a chunk reservation that fails or passes
+/// cellMemorySpillBytes, composite rows short of room - writes its oldest
+/// blocks out first, as much as the event needs, then does what it did
+/// before. A reclaim writes them out even while the output writes: a
+/// block's reservation, which may reclaim the writer, is taken only between
 /// blocks.
 ///
 /// On Celeborn a window can only be pushed whole, so every one of those
@@ -137,6 +140,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     uint64_t compactedBytes{0};
     /// Whole-window runs a reclaim fell back to.
     uint64_t fullRuns{0};
+    /// Partial runs the cell threshold asked for at a batch boundary,
+    /// without memory pressure; with cell bytes.
+    uint64_t thresholdRuns{0};
+    uint64_t thresholdRunBytes{0};
     std::array<uint64_t, static_cast<size_t>(SealReason::kCount)> seals{};
     /// Seals of oversized partitions alone, and the partitions they closed.
     uint64_t partitionSeals{0};
@@ -212,6 +219,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// hold less data than this. CellShuffleOptions::reclaimRunFloorBytes, at
   /// most an eighth of the memory limit, set at the first batch; 0 is off.
   int64_t reclaimRunFloorBytes_{0};
+  /// The cell threshold: cell data past it spills at the next batch
+  /// boundary, down to half. CellShuffleOptions::cellSpillBytesPerStream
+  /// times the partitions and streams, saturating; set at the first batch.
+  uint64_t cellSpillThresholdBytes_{0};
   PressureStats pressure_;
   /// Time the flat path spends decoding the columns of its batches and
   /// classifying their nulls, logged at stop. The nested path's is part of
