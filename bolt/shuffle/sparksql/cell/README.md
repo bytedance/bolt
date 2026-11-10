@@ -385,8 +385,12 @@ at the rows' positions are probed. A column qualifies when every distinct
 value is at most 63 bytes, they serialize into at most 63 bytes together,
 and the non-null rows are at least four times the distinct values. The
 decision is final because cell bytes are already in wire form. With
-`enableStringDictionary` off, or a first batch below 1024 rows, no column
-uses it.
+`enableStringDictionary` off, or a first batch below 64 rows - a segment's
+sixteen entries four times each - no column uses it. A table scan sizes its
+batches by the estimated bytes of the rows it reads, so a scan of a wide
+table can feed a narrow shuffle batches of a few hundred rows. The probe
+logs one line per writer, `CellShuffleWriter dictionary probe`: the columns
+it turned on and off, or, `skipped`, why it decided none.
 
 In dictionary form each partition keeps an open segment of up to 16 entries
 staged in its data-stream line. Matched rows write one index byte. When a
