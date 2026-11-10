@@ -57,6 +57,19 @@ using namespace std::string_literals;
 #define EXPECT_SCALAR_VALUE_NULL(json, path) \
   EXPECT_FALSE(jsonExtractScalar(json, path).hasValue())
 
+folly::Optional<std::string_view> extractTopLevelField(
+    const std::string& json,
+    const std::string& field) {
+  return jsonExtractScalar(
+      json,
+      field,
+      false,
+      false,
+      true,
+      false, // parsePath
+      false); // useSonicJson
+}
+
 // Test compatibility with Presto
 // Reference: from https://github.com/prestodb/presto
 // presto-main/src/test/java/com/facebook/presto/operator/scalar/TestJsonExtract.java
@@ -74,10 +87,11 @@ TEST(JsonExtractorTest, scalarValueTest) {
 
 TEST(JsonExtractorTest, fullScalarTest) {
   EXPECT_SCALAR_VALUE_EQ("{\"fuu\": 1}"s, "$.fuu"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ("{\"fuu\": 1}"s, "$[fuu]"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ("{\"fuu\": 1}"s, "$[\"fuu\"]"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ(
-      "{\"ab\\\"cd\\\"ef\": 2}"s, "$[\"ab\\\"cd\\\"ef\"]"s, "2"s);
+  EXPECT_SCALAR_VALUE_NULL("{\"fuu\": 1}"s, "$[fuu]"s);
+  EXPECT_SCALAR_VALUE_EQ("{\"fuu\": 1}"s, "$['fuu']"s, "1"s);
+  EXPECT_SCALAR_VALUE_NULL("{\"fuu\": 1}"s, "$[\"fuu\"]"s);
+  EXPECT_SCALAR_VALUE_NULL(
+      "{\"ab\\\"cd\\\"ef\": 2}"s, "$[\"ab\\\"cd\\\"ef\"]"s);
   EXPECT_SCALAR_VALUE_NULL("{\"fuu\": null}"s, "$.fuu"s);
   EXPECT_SCALAR_VALUE_NULL("{\"fuu\": 1}"s, "$.bar"s);
   EXPECT_SCALAR_VALUE_EQ(
@@ -102,19 +116,20 @@ TEST(JsonExtractorTest, fullScalarTest) {
   // Test numeric path expression matches arrays and objects
   EXPECT_SCALAR_VALUE_EQ("[0, 1, 2]"s, "$.1"s, "1"s);
   EXPECT_SCALAR_VALUE_EQ("[0, 1, 2]"s, "$[1]"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ("[0, 1, 2]"s, "$[\"1\"]"s, "1"s);
+  EXPECT_SCALAR_VALUE_NULL("[0, 1, 2]"s, "$[\"1\"]"s);
   EXPECT_SCALAR_VALUE_EQ("{\"0\" : 0, \"1\" : 1, \"2\" : 2 }"s, "$.1"s, "1"s);
   EXPECT_SCALAR_VALUE_EQ("{\"0\" : 0, \"1\" : 1, \"2\" : 2 }"s, "$[1]"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ(
-      "{\"0\" : 0, \"1\" : 1, \"2\" : 2 }"s, "$[\"1\"]"s, "1"s);
+  EXPECT_SCALAR_VALUE_NULL("{\"0\" : 0, \"1\" : 1, \"2\" : 2 }"s, "$[\"1\"]"s);
 
   // Test fields starting with a digit
   EXPECT_SCALAR_VALUE_EQ(
       "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$.30day"s, "1"s);
+  EXPECT_SCALAR_VALUE_NULL(
+      "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$[30day]"s);
   EXPECT_SCALAR_VALUE_EQ(
-      "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$[30day]"s, "1"s);
-  EXPECT_SCALAR_VALUE_EQ(
-      "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$[\"30day\"]"s, "1"s);
+      "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$['30day']"s, "1"s);
+  EXPECT_SCALAR_VALUE_NULL(
+      "{\"15day\" : 0, \"30day\" : 1, \"90day\" : 2 }"s, "$[\"30day\"]"s);
 }
 
 TEST(JsonExtractorTest, invalidJsonPathTest) {
@@ -306,37 +321,37 @@ TEST(JsonExtractorTest, JsonTupleExtractScalar) {
   }
   )json";
   {
-    auto val = jsonExtractScalar(json, "$.a.b.c", false, false, true, false);
+    auto val = extractTopLevelField(json, "$.a.b.c");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "a.b.c", false, false, true, false);
+    auto val = extractTopLevelField(json, "a.b.c");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "$.a.b.d", false, false, true, false);
+    auto val = extractTopLevelField(json, "$.a.b.d");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "a.b.d", false, false, true, false);
+    auto val = extractTopLevelField(json, "a.b.d");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "$.e.f", false, false, true, false);
+    auto val = extractTopLevelField(json, "$.e.f");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "e.f", false, false, true, false);
-    EXPECT_TRUE(val.hasValue());
+    auto val = extractTopLevelField(json, "e.f");
+    ASSERT_TRUE(val.hasValue());
     EXPECT_EQ(val.value(), "value3");
   }
   {
-    auto val = jsonExtractScalar(json, "$.g.h.i", false, false, true, false);
+    auto val = extractTopLevelField(json, "$.g.h.i");
     EXPECT_FALSE(val.hasValue());
   }
   {
-    auto val = jsonExtractScalar(json, "g.h.i", false, false, true, false);
-    EXPECT_TRUE(val.hasValue());
+    auto val = extractTopLevelField(json, "g.h.i");
+    ASSERT_TRUE(val.hasValue());
     EXPECT_EQ(val.value(), "value4");
   }
 }
@@ -452,8 +467,8 @@ TEST(JsonExtractTupleTest, normal) {
       "{\"url\":{\"urls\":[{\"url\":\"http://t.co/Yg9e1Fl8wd\",\"expanded_url\":\"http://twpf.jp/yuttari1998\",\"display_url\":\"twpf.jp/yuttari1998\",\"indices\":[0,22]}]},\"description\":{\"urls\":[]}}");
 
   for (size_t i = 0; i < paths.size(); i++) {
-    auto tmp = jsonExtractScalar(json, paths[i], false, false, true, false);
-    EXPECT_EQ(val[i].has_value(), tmp.has_value());
+    auto tmp = extractTopLevelField(json, paths[i]);
+    ASSERT_EQ(val[i].has_value(), tmp.has_value()) << "path: " << paths[i];
     if (val[i].has_value()) {
       EXPECT_EQ(std::string(val[i].value()), std::string(tmp.value()));
     }
@@ -469,8 +484,8 @@ TEST(JsonExtractTupleTest, malformed) {
   }
   auto val = jsonExtractTuple(json, stringPieces);
   for (size_t i = 0; i < paths.size(); i++) {
-    auto tmp = jsonExtractScalar(json, paths[i], false, false, true, false);
-    EXPECT_EQ(val[i].has_value(), tmp.has_value());
+    auto tmp = extractTopLevelField(json, paths[i]);
+    ASSERT_EQ(val[i].has_value(), tmp.has_value()) << "path: " << paths[i];
     if (val[i].has_value()) {
       EXPECT_EQ(std::string(val[i].value()), std::string(tmp.value()));
     }
@@ -598,7 +613,7 @@ BENCHMARK(extractTupleScala) {
       "notifications"};
 
   for (const auto& path : paths) {
-    auto tmp = jsonExtractScalar(json, path, false, false, true, false);
+    auto tmp = extractTopLevelField(json, path);
     doNotOptimizeAway(tmp);
   }
 }

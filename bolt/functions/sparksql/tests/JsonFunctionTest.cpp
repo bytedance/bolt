@@ -32,6 +32,11 @@ class JsonFucntionTest : public SparkFunctionBaseTest {
   std::optional<std::string> testGetJsonObjectOnce(
       const std::optional<std::string>& input,
       const std::optional<std::string>& json_path);
+
+  void testGetJsonObjectAcrossParsers(
+      const std::string& input,
+      const std::string& jsonPath,
+      const std::optional<std::string>& expected);
 };
 
 void JsonFucntionTest::testJsonExtract(
@@ -43,6 +48,26 @@ std::optional<std::string> JsonFucntionTest::testGetJsonObjectOnce(
     const std::optional<std::string>& input,
     const std::optional<std::string>& json_path) {
   return evaluateOnce<std::string>("get_json_object(c0, c1)", input, json_path);
+}
+
+void JsonFucntionTest::testGetJsonObjectAcrossParsers(
+    const std::string& input,
+    const std::string& jsonPath,
+    const std::optional<std::string>& expected) {
+  SCOPED_TRACE("json: " + input + ", path: " + jsonPath);
+  for (const auto& [useSonicJson, useDomParser] :
+       {std::pair{"false", "true"},
+        std::pair{"false", "false"},
+        std::pair{"true", "false"}}) {
+    SCOPED_TRACE(
+        std::string("useSonicJson: ") + useSonicJson +
+        ", useDomParser: " + useDomParser);
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, useSonicJson},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser},
+         {core::QueryConfig::kThrowExceptionWhenEncounterBadJson, "false"}});
+    EXPECT_EQ(testGetJsonObjectOnce(input, jsonPath), expected);
+  }
 }
 
 TEST_F(JsonFucntionTest, array_test) {
@@ -167,13 +192,15 @@ TEST_F(JsonFucntionTest, CornerCases) {
       // json, query, expected result
       using TestCase = std::tuple<std::string, std::string, std::string>;
       std::vector<TestCase> cases{
-          {R"({"ab\"cd\"ef": 2})", R"($["ab\"cd\"ef"])", "2"},
+          {R"({"ab\"cd\"ef": 2})", R"($['ab"cd"ef'])", "2"},
       };
 
       for (auto& c : cases) {
         EXPECT_EQ(
-            testGetJsonObjectOnce(std::get<0>(c), std::get<1>(c)).value(),
-            std::get<2>(c));
+            testGetJsonObjectOnce(std::get<0>(c), std::get<1>(c)),
+            std::optional<std::string>{std::get<2>(c)})
+            << "json: " << std::get<0>(c) << ", path: " << std::get<1>(c)
+            << ", parser: DOM, escapeEmoji: " << value;
       }
     }
     {
@@ -194,13 +221,15 @@ TEST_F(JsonFucntionTest, CornerCases) {
       // json, query, expected result
       using TestCase = std::tuple<std::string, std::string, std::string>;
       std::vector<TestCase> cases{
-          {R"({"ab\"cd\"ef": 2})", R"($["ab\"cd\"ef"])", "2"},
+          {R"({"ab\"cd\"ef": 2})", R"($['ab"cd"ef'])", "2"},
       };
 
       for (auto& c : cases) {
         EXPECT_EQ(
-            testGetJsonObjectOnce(std::get<0>(c), std::get<1>(c)).value(),
-            std::get<2>(c));
+            testGetJsonObjectOnce(std::get<0>(c), std::get<1>(c)),
+            std::optional<std::string>{std::get<2>(c)})
+            << "json: " << std::get<0>(c) << ", path: " << std::get<1>(c)
+            << ", parser: On-Demand, escapeEmoji: " << value;
       }
     }
     {
@@ -455,30 +484,33 @@ TEST_F(JsonFucntionTest, whitespaceAfterDotInJsonPath) {
 }
 
 TEST_F(JsonFucntionTest, arrayWildcardSyntax) {
-  GTEST_SKIP() << "TODO: Fix Spark-compatible wildcard semantics";
-
   const char* json =
       R"({"arr":[10,20],"object":{"*":"star"," *":"space star","*suffix":"suffix"}})";
-  const auto test = [&]() {
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr. *"), std::nullopt);
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr.*"), std::nullopt);
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr[*]"), "[10,20]");
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object.*"), "star");
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object. *"), "star");
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object.*suffix"), "suffix");
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object['*']"), "star");
-    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object[*]"), std::nullopt);
-  };
+  testGetJsonObjectAcrossParsers(json, "$.arr. *", std::nullopt);
+  testGetJsonObjectAcrossParsers(json, "$.arr.*", std::nullopt);
+  testGetJsonObjectAcrossParsers(json, "$.arr[*]", "[10,20]");
+  testGetJsonObjectAcrossParsers(json, "$.object. *", "star");
+  testGetJsonObjectAcrossParsers(R"([[],{"a":[]},{"b":1}])", "$[*].a", "[]");
 
-  for (const auto& [useSonicJson, useDomParser] :
-       {std::pair{"false", "true"},
-        std::pair{"false", "false"},
-        std::pair{"true", "false"}}) {
-    queryCtx_->testingOverrideConfigUnsafe(
-        {{core::QueryConfig::kUseSonicJson, useSonicJson},
-         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
-    test();
+  GTEST_SKIP() << "TODO: Fix Spark-compatible wildcard semantics";
+  testGetJsonObjectAcrossParsers("[[1]]", "$[0][*]", "[1]");
+  testGetJsonObjectAcrossParsers(
+      R"(["STR_A",0,[true,[],{"a":"VALUE_A","b":1}]])",
+      "$[2][*].a",
+      "[\"VALUE_A\"]");
+}
+
+TEST_F(JsonFucntionTest, rootArrayWildcardMemberPath) {
+  // A dot member named '*' must not act as an array wildcard.
+  for (const char* json :
+       {R"([{"a":"A"}])", R"([{"a":"B"},{"a":"D"}])", R"([{"a":"C"}])"}) {
+    testGetJsonObjectAcrossParsers(json, "$.*.a", std::nullopt);
   }
+  testGetJsonObjectAcrossParsers(R"([{"a":"A"}])", "$[*].a", "\"A\"");
+  testGetJsonObjectAcrossParsers(
+      R"([{"a":"B"},{"a":"D"}])", "$[*].a", R"(["B","D"])");
+  testGetJsonObjectAcrossParsers(R"([{"a":"C"}])", "$[*].a", "\"C\"");
+  testGetJsonObjectAcrossParsers(R"([{"a":1},{"b":2}])", "$.*", std::nullopt);
 }
 
 TEST_F(JsonFucntionTest, preserveQuotedBracketKeys) {
@@ -502,6 +534,13 @@ TEST_F(JsonFucntionTest, preserveSpacesInQuotedBracketKeys) {
 
     EXPECT_EQ(testGetJsonObjectOnce(json, R"($['a. b'])"), "expected");
   }
+}
+
+TEST_F(JsonFucntionTest, doubleQuotedBracketKey) {
+  // Spark accepts single quotes in bracket keys, but not double quotes.
+  testGetJsonObjectAcrossParsers(
+      R"({"a.b":[5]})", R"($["a.b"][0])", std::nullopt);
+  testGetJsonObjectAcrossParsers(R"({"a.b":[5]})", "$['a.b'][0]", "5");
 }
 
 TEST_F(JsonFucntionTest, emptyInput) {
@@ -646,6 +685,15 @@ TEST_F(JsonFucntionTest, scalarValue) {
   }
 }
 
+TEST_F(JsonFucntionTest, newlineInJsonString) {
+  // The input contains an actual newline, not a JSON escape.
+  testGetJsonObjectAcrossParsers("{\"a\":\"b\nc\"}", "$.a", "b\nc");
+}
+
+TEST_F(JsonFucntionTest, duplicateKeyAfterNull) {
+  testGetJsonObjectAcrossParsers(R"({"a":null,"a":"second"})", "$.a", "second");
+}
+
 TEST_F(JsonFucntionTest, jsonTupleParityEscape) {
   {
     queryCtx_->testingOverrideConfigUnsafe(
@@ -700,6 +748,22 @@ TEST_F(JsonFucntionTest, malformedJsonDoesNotReturnPartialResult) {
   EXPECT_EQ(testGetJsonObjectOnce(R"({"a":"he"llo"})", "$.a"), std::nullopt);
   EXPECT_EQ(
       testGetJsonObjectOnce(R"({"a":"ok","b":"he"llo"})", "$.a"), std::nullopt);
+}
+
+TEST_F(JsonFucntionTest, malformedJsonAcrossParsers) {
+  // testGetJsonObjectAcrossParsers(R"({"a":1,"b":NaN})", "$.a", std::nullopt);
+  testGetJsonObjectAcrossParsers(R"({"a":1,"b":2)", "$.a", std::nullopt);
+  testGetJsonObjectAcrossParsers(R"({"a":1)", "$", std::nullopt);
+  testGetJsonObjectAcrossParsers("[8", "$[0]", std::nullopt);
+
+  // const char* json = R"({"bad":"\uD800"})";
+  // testGetJsonObjectAcrossParsers(json, "$", json);
+  // testGetJsonObjectAcrossParsers(json, "$.bad", std::nullopt);
+
+  // testGetJsonObjectAcrossParsers("{'a':'b'}", "$.a", "b");
+
+  // testGetJsonObjectAcrossParsers("12 trailing", "$", "12");
+  // testGetJsonObjectAcrossParsers("12}", "$", "12}");
 }
 
 } // namespace

@@ -38,19 +38,35 @@ using namespace std::string_literals;
 using bytedance::bolt::functions::JsonPathTokenizer;
 using TokenList = std::vector<std::string>;
 
-#define EXPECT_TOKEN_EQ(path, expected)  \
-  {                                      \
-    auto jsonPath = path;                \
-    auto tokens = getTokens(jsonPath);   \
-    EXPECT_TRUE(bool(tokens));           \
-    EXPECT_EQ(expected, tokens.value()); \
+#define EXPECT_TOKEN_EQ_WITH_MODE(path, expected, sparkCompatible) \
+  {                                                                \
+    auto jsonPath = path;                                          \
+    auto tokens = getTokens(jsonPath, sparkCompatible);            \
+    ASSERT_TRUE(bool(tokens));                                     \
+    EXPECT_EQ(expected, tokens.value());                           \
   }
 
-#define EXPECT_TOKEN_INVALID(path) \
-  {                                \
-    auto tokens = getTokens(path); \
-    EXPECT_FALSE(bool(tokens));    \
+#define EXPECT_TOKEN_INVALID_WITH_MODE(path, sparkCompatible) \
+  {                                                           \
+    auto tokens = getTokens(path, sparkCompatible);           \
+    EXPECT_FALSE(bool(tokens));                               \
   }
+
+#define EXPECT_PRESTO_TOKEN_EQ(path, expected) \
+  EXPECT_TOKEN_EQ_WITH_MODE(path, expected, false)
+
+#define EXPECT_PRESTO_TOKEN_INVALID(path) \
+  EXPECT_TOKEN_INVALID_WITH_MODE(path, false)
+
+#define EXPECT_SPARK_TOKEN_EQ(path, expected) \
+  EXPECT_TOKEN_EQ_WITH_MODE(path, expected, true)
+
+#define EXPECT_SPARK_TOKEN_INVALID(path) \
+  EXPECT_TOKEN_INVALID_WITH_MODE(path, true)
+
+#define EXPECT_TOKEN_EQ(path, expected) EXPECT_PRESTO_TOKEN_EQ(path, expected)
+
+#define EXPECT_TOKEN_INVALID(path) EXPECT_PRESTO_TOKEN_INVALID(path)
 
 #define EXPECT_QUOTED_TOKEN_EQ(path, expected) \
   {                                            \
@@ -64,14 +80,15 @@ using TokenList = std::vector<std::string>;
     EXPECT_TOKEN_INVALID(invalidPath);      \
   }
 
-// The test is ported from Presto for compatibility
-folly::Expected<TokenList, bool> getTokens(const std::string& path) {
-  JsonPathTokenizer tokenizer(true);
+folly::Expected<TokenList, bool> getTokens(
+    const std::string& path,
+    bool sparkCompatible) {
+  JsonPathTokenizer tokenizer(sparkCompatible);
   tokenizer.reset(path);
   TokenList tokens;
   while (tokenizer.hasNext()) {
     if (auto token = tokenizer.getNext()) {
-      tokens.push_back(token.value());
+      tokens.push_back(token.value().token_);
     } else {
       tokens.clear();
       return folly::makeUnexpected(false);
@@ -80,11 +97,9 @@ folly::Expected<TokenList, bool> getTokens(const std::string& path) {
   return tokens;
 }
 
-TEST(JsonPathTokenizerTest, tokenizeTest) {
+TEST(JsonPathTokenizerTest, prestoCompatibility) {
   EXPECT_TOKEN_EQ("$"s, TokenList());
   EXPECT_TOKEN_EQ("$.foo"s, TokenList{"foo"s});
-  EXPECT_TOKEN_EQ("$[\"foo\"]"s, TokenList{"foo"s});
-  EXPECT_TOKEN_EQ("$[\"foo.bar\"]"s, TokenList{"foo.bar"s});
   EXPECT_TOKEN_EQ("$[42]"s, TokenList{"42"s});
   EXPECT_TOKEN_EQ("$.42"s, TokenList{"42"s});
   EXPECT_TOKEN_EQ("$.42.63"s, (TokenList{"42"s, "63"s}));
@@ -170,4 +185,19 @@ TEST(JsonPathTokenizerTest, tokenizeTest) {
   // 6. currently not supported syntax
   EXPECT_TOKEN_INVALID("$..");
   EXPECT_TOKEN_INVALID("$.address..");
+}
+
+TEST(JsonPathTokenizerTest, sparkCompatibility) {
+  EXPECT_SPARK_TOKEN_EQ("$['foo']"s, TokenList{"foo"s});
+  EXPECT_SPARK_TOKEN_EQ("$['foo.bar']"s, TokenList{"foo.bar"s});
+  EXPECT_SPARK_TOKEN_EQ("$[123]"s, TokenList{"123"s});
+  EXPECT_SPARK_TOKEN_INVALID("$[\"foo\"]"s);
+  EXPECT_SPARK_TOKEN_INVALID("$[\"foo.bar\"]"s);
+  EXPECT_SPARK_TOKEN_INVALID("$[foo]"s);
+  EXPECT_SPARK_TOKEN_INVALID("$[30day]"s);
+
+  EXPECT_PRESTO_TOKEN_EQ("$[\"foo\"]"s, TokenList{"foo"s});
+  EXPECT_PRESTO_TOKEN_EQ("$[\"foo.bar\"]"s, TokenList{"foo.bar"s});
+  EXPECT_PRESTO_TOKEN_EQ("$[foo]"s, TokenList{"foo"s});
+  EXPECT_PRESTO_TOKEN_EQ("$[30day]"s, TokenList{"30day"s});
 }
