@@ -53,7 +53,12 @@ constexpr int64_t kMinReclaimRunBytes = 2 * kChunkBytes;
 constexpr int64_t kRemoteSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
-constexpr uint32_t kDictMinProbeRows = 1024;
+/// The fewest rows the dictionary probe judges: the sixteen entries of a
+/// dictionary segment, kDictMinRepeatRatio times each. A table scan sizes
+/// its batches by the estimated bytes of the rows it reads, so a scan of a
+/// wide table can start a narrow shuffle with batches of a few hundred
+/// rows.
+constexpr uint32_t kDictMinProbeRows = 64;
 constexpr uint32_t kDictMinRepeatRatio = 4;
 /// A pressure spill writes the largest partitions until this share of the
 /// cell data is covered, and keeps the rest resident for the merge to write
@@ -409,10 +414,8 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // The single probe of the dictionary design: the first batch decides,
     // per string column and for the writer's lifetime, before its first
     // byte is split (cell bytes are final wire form; a payload's form
-    // cannot change once written). A first batch below the probe minimum -
-    // tiny, or sliced small because its rows are wide - therefore settles
-    // on no dictionary rather than deferring; wide rows gain little from
-    // 64-byte entries anyway.
+    // cannot change once written). A first batch below the probe minimum
+    // therefore settles on no dictionary rather than deferring.
     probeDictionary(numRows, decoded_, nullClass_);
     dictProbed_ = true;
   }
@@ -501,17 +504,39 @@ void CellShuffleWriter::probeDictionary(
     std::span<const DecodedVector> decoded,
     std::span<const NullClass> nullClass) {
   const auto& cellOpts = options_.cellOptions;
-  if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
+  // The probe runs once per writer and logs one line: the columns it
+  // decided, or why it decided none.
+  const auto skipped = [&](const std::string& reason) {
+    LOG(INFO) << fmt::format(
+        "CellShuffleWriter dictionary probe skipped ({} rows): {}",
+        numRows,
+        reason);
+  };
+  if (!cellOpts.enableStringDictionary) {
+    skipped("enableStringDictionary is off");
+    return;
+  }
+  if (numRows < kDictMinProbeRows) {
+    skipped(fmt::format(
+        "a first batch below {} rows, the probe minimum", kDictMinProbeRows));
     return;
   }
   // Per-column decisions, logged together after the loop.
   std::string enabled;
   std::string disabled;
+  uint32_t nestedStrings = 0;
+  uint32_t allNullStrings = 0;
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     // Every string column, or a nested layout's at the rows' positions.
-    if (!layout_.isStringColumn(col) ||
-        (shredder_ != nullptr && !shredder_->inRowSpace(col)) ||
-        nullClass[col] == NullClass::kAllNull) {
+    if (!layout_.isStringColumn(col)) {
+      continue;
+    }
+    if (shredder_ != nullptr && !shredder_->inRowSpace(col)) {
+      ++nestedStrings;
+      continue;
+    }
+    if (nullClass[col] == NullClass::kAllNull) {
+      ++allNullStrings;
       continue;
     }
     const auto& column = decoded[col];
@@ -565,8 +590,15 @@ void CellShuffleWriter::probeDictionary(
         serialized,
         nonNull);
   }
-  // The probe runs once per writer, so one line lists every probed column.
   if (enabled.empty() && disabled.empty()) {
+    skipped(
+        nestedStrings + allNullStrings == 0
+            ? std::string("no string column")
+            : fmt::format(
+                  "no string column to probe: {} all null in the first "
+                  "batch, {} inside nested values",
+                  allNullStrings,
+                  nestedStrings));
     return;
   }
   std::string parts;
