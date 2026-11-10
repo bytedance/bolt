@@ -2005,6 +2005,54 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
   }
 }
 
+TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
+  // Past cellSpillBytesPerStream for every stream of every partition, a
+  // local writer spills at a batch boundary though nothing presses on its
+  // memory - no pool limit, no reclaim; under a threshold its cells never
+  // reach, it spills nothing. On Celeborn, where a window is pushed only
+  // whole, the threshold changes nothing. Every row reads back, and a
+  // threshold that is not positive is an error.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(83);
+  for (const bool nested : {false, true}) {
+    // Some 10 MB of cells: far past 64 KiB a stream.
+    const auto input = skewedInput(kPartitions, 8, 4096, 50, 600, nested, rng);
+    for (const bool rss : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "{}, {}", nested ? "nested" : "flat", rss ? "rss" : "local"));
+      const auto write = [&](int64_t bytesPerStream) {
+        auto options = writerOptions(kPartitions, rss);
+        options.cellOptions.cellSpillBytesPerStream = bytesPerStream;
+        auto written = test::writeShuffle(options, input, pool());
+        test::expectReadsBack(
+            input, written, arrow::Compression::LZ4_FRAME, pool());
+        return written;
+      };
+      const auto low = write(64 << 10);
+      const auto high = write(std::numeric_limits<int64_t>::max());
+      if (rss) {
+        EXPECT_EQ(low.metrics.spillCount, high.metrics.spillCount);
+        EXPECT_EQ(
+            low.metrics.totalBytesWritten, high.metrics.totalBytesWritten);
+      } else {
+        // Spills into the spill memory, which writes nothing to disk
+        // without memory pressure: totalBytesEvicted, the bytes on disk,
+        // need not move.
+        EXPECT_GT(low.metrics.totalSpillFiles, 0);
+        EXPECT_EQ(high.metrics.totalSpillFiles, 0);
+      }
+    }
+  }
+
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.cellSpillBytesPerStream = 0;
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  const auto input = spreadInput(kPartitions, 1, 16, rng);
+  BOLT_ASSERT_USER_THROW(
+      writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
+      "cellSpillBytesPerStream must be positive");
+}
+
 TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
   CellShuffleWriter writer(
       writerOptions(2), pool(), arrow::default_memory_pool());

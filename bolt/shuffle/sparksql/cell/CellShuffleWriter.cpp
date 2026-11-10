@@ -221,6 +221,19 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       "CellShuffleOptions::reclaimRunFloorBytes must not be negative");
   reclaimRunFloorBytes_ =
       limit > 0 ? std::min<int64_t>(limit / 8, runFloor) : runFloor;
+  // Past this much cell data the cells spill without memory pressure, at a
+  // batch boundary: a share per stream of every partition.
+  const int64_t perStreamSpill = options_.cellOptions.cellSpillBytesPerStream;
+  BOLT_USER_CHECK_GT(
+      perStreamSpill,
+      0,
+      "CellShuffleOptions::cellSpillBytesPerStream must be positive");
+  const uint64_t streams =
+      static_cast<uint64_t>(numPartitions_) * std::max<uint32_t>(1, numStreams);
+  cellSpillThresholdBytes_ = static_cast<uint64_t>(perStreamSpill) >
+          std::numeric_limits<uint64_t>::max() / streams
+      ? std::numeric_limits<uint64_t>::max()
+      : static_cast<uint64_t>(perStreamSpill) * streams;
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });
@@ -253,7 +266,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
             << "), budget=" << budget << ", perStream=" << perStream
             << ", cellBytes=" << cellBytes
             << ", reclaimRunFloor=" << reclaimRunFloorBytes_
-            << ", spillMemory=" << spillMemory;
+            << ", spillMemory=" << spillMemory
+            << ", cellSpillThreshold=" << cellSpillThresholdBytes_;
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(
@@ -619,10 +633,9 @@ void CellShuffleWriter::reserveChunk() {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
-  // The threshold counts the spill data in memory too, which a flush gives
-  // back.
-  // By how much this growth passes the threshold; not past it when 0 or
-  // less.
+  // cellMemorySpillBytes counts the spill data in memory too, which a
+  // flush gives back.
+  // By how much this growth passes it; not past it when 0 or less.
   const auto overBytes = [&]() {
     return allocator_->allocatedBytes() + kChunkBytes +
         (spillMemory_ != nullptr ? spillMemory_->heldBytes() : 0) -
@@ -641,8 +654,8 @@ void CellShuffleWriter::reserveChunk() {
   }
   if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
     // Memory pressure: the oldest spill data in memory goes to disk first,
-    // what passes the threshold and at least a reservation's 8 MiB step,
-    // which may make the room.
+    // what passes cellMemorySpillBytes and at least a reservation's 8 MiB
+    // step, which may make the room.
     SealSpillTimer timer(*this);
     const int64_t over = overCap() ? overBytes() : 0;
     if (spillMemory_->release(std::max<int64_t>(over, 2 * kChunkBytes)) > 0 &&
@@ -718,6 +731,18 @@ void CellShuffleWriter::maybeSeal() {
         static_cast<uint64_t>(cellOpts.partitionSealBytes));
     pressure_.partitionSeals += sealed > 0;
     pressure_.partitionsSealed += sealed;
+  }
+  const uint64_t cellData = splitter_->cellDataBytes();
+  if (!isRemote_ && cellData > cellSpillThresholdBytes_) {
+    // Past the cell threshold, without memory pressure: the largest
+    // partitions spill down to half of it, into the spill memory. The
+    // others grow on until the next time, so a stream's frames carry about
+    // its share of the threshold, and the spills of a uniform shuffle
+    // spread over the partitions instead of coming together.
+    SealSpillTimer timer(*this);
+    ++pressure_.thresholdRuns;
+    pressure_.thresholdRunBytes +=
+        splitter_->spillPartitions(cellData - cellSpillThresholdBytes_ / 2);
   }
 }
 
@@ -954,7 +979,7 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       "reclaim={} ({:.1f}MB) growth={} ({:.1f}MB), growth flushes={}; "
       "compactions={} ({:.1f}MB emptied); full runs={}; seals rows={} "
       "memory={} nulls={} flush={} reserve={}; partition seals={} ({} "
-      "partitions); null peak={:.1f}MB",
+      "partitions); null peak={:.1f}MB; threshold runs={} ({:.1f}MB)",
       reclaims,
       idleReclaims,
       belowFloorReclaims,
@@ -982,7 +1007,9 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       seal(SealReason::kReserve),
       partitionSeals,
       partitionsSealed,
-      mb(nullPeakBytes));
+      mb(nullPeakBytes),
+      thresholdRuns,
+      mb(thresholdRunBytes));
 }
 
 std::string CellShuffleWriter::toString() const {
