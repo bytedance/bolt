@@ -61,7 +61,7 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `cellMemorySpillBytes` | `0` (off) | Spill threshold on the chunk memory plus the spill memory. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
-| `spillMemoryBytes` | `-1` | Local only: spill data - runs, sealed payloads, composite blocks - kept in memory until memory pressure, while the whole writer stays within half its memory limit, or 512 MiB with none (see [Spill memory](#spill-memory-local)). `-1` keeps what that half leaves; a positive value caps the spill data at that many bytes as well; `0` is off. |
+| `spillMemoryBytes` | `-1` | Local only: the newest spill data - runs, sealed payloads, composite blocks - kept in memory, at most this many bytes (see [Spill memory](#spill-memory-local)). `-1` is no cap of its own: it grows until the first memory pressure; `0` is off. |
 | `reclaimRunFloorBytes` | `64 MiB` | Local only: the cell data a writer must hold before a reclaim of a given size writes a run; below it, the reclaim frees only idle chunks and the spill memory. In effect the smaller of this and an eighth of the memory limit, this with none (see [Reclaim policy](#reclaim-policy-local)). `0` is off; a negative value is an error. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
@@ -234,51 +234,48 @@ mid-seal is deferred to the next boundary.
 ### Spill memory (local)
 
 What a local writer spills is copied into the data file by the merge
-anyway, so while memory is plentiful it waits in memory instead of on disk:
-the spill file keeps its newest bytes in 4 MiB pages of the writer's pool,
-accounted to it, and the merge copies them from there. A skewed task whose
-hot partitions seal payload after payload then needs no disk write and read
-for them. The pages of the Cell output's spill file and of the composite
-blocks' share one cap, `spillMemoryBytes`: only one kind holds data at a
-time, so the kind being written gets whatever the other does not hold.
+anyway, so the newest of it waits in memory instead of on disk: the spill
+file keeps its newest bytes in blocks of the writer's pool, accounted to
+it, and the merge copies them from there. A skewed task whose hot
+partitions seal payload after payload then needs no disk write and read
+for the last of them. The blocks of the Cell output's spill file and of the
+composite blocks' share one cap, `spillMemoryBytes`: only one kind holds
+data at a time, so the kind being written reuses the blocks the other
+holds. By default (`-1`) there is no cap of its own: the spill memory grows
+until the first memory pressure, and a reclaim finds it as the writer's
+memory, which competes with the task's other operators by size, as V1's
+payload cache does. A block is 4 MiB, smaller only under a cap below
+16 MiB, so that four fit. The `CellShuffleWriter init` log line shows the
+cap: `spillMemory=<cap>`, or `spillMemory=no cap`.
 
-Whatever the cap, a page is taken only while the writer's whole pool, the
-page included, holds at most half the writer's memory limit, as the cell
-size takes it, or 512 MiB with none. The whole pool is the cells' chunks,
-the null state, both outputs' pages, the staging lines and scratch: a cap
-on the pages alone would let cells and pages together reach the whole
-limit and, under Spark, take the task's execution memory from its other
-operators, which then spill. The check reads the pool's `usedBytes()`,
-once per new page. It counts every allocation at its size, so a page is
-one page more, and leaves out the reservation slack, which moves in steps
-of up to 8 MiB of its own and goes back at the next `release()`. By
-default (`-1`) that half is all that bounds the pages; a positive
-`spillMemoryBytes` caps them at that many bytes as well. The
-`CellShuffleWriter init` log line shows both caps:
-`spillMemory=<cap> (writer total <= <half>)`.
+A file keeps its blocks oldest first, and its bytes in memory are always
+its last: a block written out continues the file on disk. A file whose
+last block is full takes a new one while the spill memory still grows and
+stays within the cap. Otherwise it reuses the oldest block of the file
+holding the most, its own included, written out first, so the spill memory
+keeps the newest bytes at a constant size; with no block anywhere, it
+appends to disk.
 
-What decides is memory pressure, not whether the bytes are a seal or a run.
-Every pressure event writes the spill memory out first, in order, and then
-does what it would have done, straight to disk:
+The spill memory grows until the first memory pressure, and only reuses its
+blocks from then on. Every pressure event writes the oldest blocks out
+first, as much as it needs, and then does what it would have done:
 
-- a reclaim, which counts the pages freed towards its request;
-- a chunk reservation that fails or passes `cellMemorySpillBytes`, which
-  then tries once more before it spills;
-- the window seal a reclaim asks for;
-- composite rows short of room for the next batch, and a reclaim while
-  composite rows are held.
+- a reclaim writes out as much as the idle chunks left of its request,
+  every block for a reclaim of everything;
+- a chunk reservation that fails or passes `cellMemorySpillBytes` writes
+  out 8 MiB, a reservation's step, and tries once more before it spills;
+- composite rows short of room for the next batch write out what the batch
+  takes, and a reclaim while composite rows are held writes out what the
+  held rows leave of its request;
+- a block the pool cannot reserve ends the growth too.
 
-A page past the cap or past half the limit is no memory pressure: the
-file writes its pages out and starts them afresh, or, if even fresh pages
-do not fit, appends to disk and asks again a page's bytes later. A page
-the pool cannot reserve counts as pressure for the rest of that run. A
-file's bytes in memory are always its last: it writes them out before it
-writes anything else to disk. They stay put while the file is being
-appended to, or merged: a reclaim reached from inside a page's
-reservation, or during the merge, leaves them. Mode switches and the final
-merge are not pressure. `totalBytesEvicted` counts the bytes that reached
-the disk; the `CellShuffleWriter pressure` log line ends with the spill
-memory's peak and the bytes it flushed and appended to disk directly.
+A block's reservation may reclaim the writer, and a reclaim writes blocks
+out even while the output is writing: a file asks for a block only once its
+last one is full, so what is written out is whole. Nothing is written out
+during the merge, where the writer cannot be reclaimed. `totalBytesEvicted`
+counts the bytes that reached the disk; the `CellShuffleWriter pressure`
+log line ends with the spill memory's peak, the bytes and blocks it wrote
+out, and the bytes appended to disk directly.
 
 ### Reclaim policy (local)
 
@@ -287,9 +284,10 @@ is met:
 
 1. Return idle chunks (`shrink()`), the shredder's scratch and reservation
    slack. This is safe even while the output reads cells.
-2. Write the spill memory out, unless the output is reading cells.
-3. Skip the rest if that covered the request or the writer holds fewer
-   than two chunks.
+2. Write the oldest spill memory out, as much as the request still needs.
+   This is safe even while the output writes (see above).
+3. Skip the rest while the output reads cells, if that covered the
+   request, or if the writer holds fewer than two chunks.
 4. Skip the rest too, for a reclaim of a given size, while the cells hold
    less data than the run floor (below).
 5. Spill the largest partitions until the request is covered, and at least

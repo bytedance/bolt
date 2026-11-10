@@ -145,8 +145,8 @@ DEFINE_bool(
 DEFINE_int64(
     bolt_benchmark_shuffle_cell_spill_memory_bytes,
     -1,
-    "Cell writers' spillMemoryBytes: the spill data kept in memory until "
-    "memory pressure; -1 half the memory limit, 0 none.");
+    "Cell writers' spillMemoryBytes: the newest spill data kept in memory, "
+    "at most this many bytes; -1 no cap, 0 none.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;

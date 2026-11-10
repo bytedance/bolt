@@ -188,6 +188,7 @@ add_executable(
   CellNestedTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
+  SpillMemoryTest.cpp
 )
 
 target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)

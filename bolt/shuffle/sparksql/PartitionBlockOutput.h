@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdio>
+#include <deque>
 #include <functional>
 #include <initializer_list>
 #include <memory>
@@ -34,66 +35,50 @@ namespace bytedance::bolt::shuffle::sparksql {
 class ShuffleSpillFile;
 
 /// Memory in which the spill files of one writer keep their newest bytes
-/// until memory runs short, instead of on disk: a spill that the merge
-/// copies into the data file anyway then costs no disk write and read.
-/// Pages of the writer's pool, accounted to it: at most capBytes() of them
-/// over every file together, each taken only while the pool holds at most
-/// totalCapBytes() with it, the writer's cells and everything else it holds
-/// there included. A page past either cap is no memory pressure: the file
-/// writes its pages out and starts them afresh or, when even fresh ones
-/// pass a cap, appends a page's bytes to disk before it asks again. A
-/// memory pressure event is a Pressure: it writes every file's pages out
-/// first, and keeps appends on disk while it lives. A file's bytes in
-/// memory always end it, as it writes its pages out before it writes
-/// anything else to disk.
+/// instead of on disk: a spill that the merge copies into the data file
+/// anyway then costs no disk write and read. Blocks of one size from the
+/// writer's pool, accounted to it, at most capBytes() of them over every
+/// file together. A file keeps its blocks oldest first, and its bytes in
+/// memory always end it: a block written out continues the file on disk.
+///
+/// A file that needs a block takes a new one while the memory still grows
+/// and stays within the cap. Otherwise it reuses the oldest block of the
+/// file holding the most, the asking one included, written out first, so
+/// the memory keeps the newest bytes at a constant size; with no block
+/// anywhere, the file appends to disk. Memory pressure - release() - writes
+/// the oldest blocks out and frees them, and so does a failed reservation
+/// of a new block: either ends the growth for good, and the memory only
+/// reuses what it holds from then on.
+///
+/// A new block's reservation may reclaim the writer, and that reclaim may
+/// release() blocks of any file, the asking one included. A file asks only
+/// once its last block is full, so the blocks written out are whole and
+/// the file is consistent whenever that happens. During the merge nothing
+/// is released: the writer cannot be reclaimed while it stops.
 class SpillMemory {
  public:
-  /// Pages of up to 4 MiB from `pool`, which must outlive this object, as
-  /// must every file attached to it. A cap below one machine page keeps
-  /// nothing in memory.
-  SpillMemory(
-      memory::MemoryPool* pool,
-      int64_t capBytes,
-      int64_t totalCapBytes);
+  /// Blocks of up to 4 MiB from `pool`, at least four of them within
+  /// `capBytes`; `pool` must outlive this object, as must every file
+  /// attached to it. A cap below four machine pages keeps nothing in memory.
+  SpillMemory(memory::MemoryPool* pool, int64_t capBytes);
 
   SpillMemory(const SpillMemory&) = delete;
   SpillMemory& operator=(const SpillMemory&) = delete;
 
-  /// One memory pressure event, for as long as it lives. It first writes
-  /// out the pages of every file but one whose bytes must stay where they
-  /// are - in the middle of an append, or frozen for its merge - then keeps
-  /// every append on disk. Does nothing for a null `memory`.
-  class Pressure {
-   public:
-    explicit Pressure(SpillMemory* memory);
-    ~Pressure();
+  /// Memory pressure: writes the oldest blocks out, of the file holding the
+  /// most first, and frees them until at least `bytes` are freed - none for
+  /// 0 or less - and ends the growth. Returns the bytes freed.
+  int64_t release(int64_t bytes);
 
-    Pressure(const Pressure&) = delete;
-    Pressure& operator=(const Pressure&) = delete;
+  /// release() of every block.
+  int64_t releaseAll();
 
-    /// The page bytes the first step freed.
-    int64_t freedBytes() const {
-      return freedBytes_;
-    }
-
-   private:
-    SpillMemory* const memory_;
-    int64_t freedBytes_{0};
-  };
-
-  /// The most page bytes the files hold together.
+  /// The most block bytes the files hold together.
   int64_t capBytes() const {
     return capBytes_;
   }
 
-  /// The most the pool may hold, a new page included, for that page to be
-  /// taken. The pool's usedBytes() counts every allocation from it at its
-  /// size, a page as one page more; read once per page.
-  int64_t totalCapBytes() const {
-    return totalCapBytes_;
-  }
-
-  /// Page bytes the files hold now, and the most they held.
+  /// Block bytes the files hold now, and the most they held.
   int64_t heldBytes() const {
     return heldBytes_;
   }
@@ -101,7 +86,7 @@ class SpillMemory {
     return peakBytes_;
   }
 
-  /// Bytes the files wrote out of their pages, and how many times.
+  /// Bytes the files wrote out of their blocks, and how many blocks.
   uint64_t flushedBytes() const {
     return flushedBytes_;
   }
@@ -109,8 +94,7 @@ class SpillMemory {
     return flushes_;
   }
 
-  /// Bytes the files appended to disk directly: under pressure, past a cap,
-  /// or for want of a page.
+  /// Bytes the files appended to disk directly, for want of a block.
   uint64_t directBytes() const {
     return directBytes_;
   }
@@ -118,26 +102,29 @@ class SpillMemory {
  private:
   friend class ShuffleSpillFile;
 
-  /// Whether `bytes` more of pages stay within both caps.
-  bool fits(int64_t bytes) const;
+  /// A block for a file whose last block is full: a new one, or the oldest
+  /// of the file holding the most, written out. False when there is none.
+  bool takeBlock(memory::ContiguousAllocation& block);
 
-  /// A page for a file, reserved through the pool first as a cell chunk is;
-  /// false when the reservation fails.
-  bool fundPage(memory::ContiguousAllocation& page);
+  /// The file holding the most blocks; null when none holds one.
+  ShuffleSpillFile* largestFile() const;
+
+  /// Writes the oldest block of the file holding the most out and frees it;
+  /// false when no file holds a block.
+  bool releaseOne();
 
   memory::MemoryPool* const pool_;
   const int64_t capBytes_;
-  const int64_t totalCapBytes_;
   /// A power of two; 0 keeps nothing in memory.
-  const uint64_t pageBytes_;
-  const uint32_t pageShift_;
+  const uint64_t blockBytes_;
+  const uint32_t blockShift_;
+  /// False once memory ran short: the blocks held are reused from then on.
+  bool growing_{true};
   int64_t heldBytes_{0};
   int64_t peakBytes_{0};
   uint64_t flushedBytes_{0};
   uint64_t flushes_{0};
   uint64_t directBytes_{0};
-  /// Live Pressure events: appends go to disk while there is one.
-  uint32_t pressureDepth_{0};
   std::vector<ShuffleSpillFile*> files_;
 };
 
@@ -145,9 +132,9 @@ class SpillMemory {
 /// back at any offset. On local disk, the file is created on the first byte
 /// it gets, in a random configured directory so concurrent tasks spread
 /// their I/O over the disks, and removed by remove() or on destruction.
-/// Attached to a SpillMemory, it keeps its newest bytes in pages while that
-/// has room and no pressure: the offsets stay the same, [0, diskEnd) on disk
-/// and [diskEnd, end()) in memory.
+/// Attached to a SpillMemory, it keeps its newest bytes in blocks of it:
+/// the offsets stay the same, [0, diskEnd) on disk and [diskEnd, end()) in
+/// memory, packed from the oldest block's start.
 class ShuffleSpillFile {
  public:
   /// `name` tells a task's spill files apart when, with no configured
@@ -177,7 +164,7 @@ class ShuffleSpillFile {
   void read(uint64_t offset, void* out, size_t bytes) const;
 
   /// Hands the `bytes` from `offset` to `out` in order, in pieces: those on
-  /// disk through a 64 KiB buffer, those in memory straight from the pages.
+  /// disk through a 64 KiB buffer, those in memory straight from the blocks.
   void copyTo(
       uint64_t offset,
       uint64_t bytes,
@@ -197,34 +184,12 @@ class ShuffleSpillFile {
     return frozen_;
   }
 
-  /// Closes and deletes the file, and frees its pages.
+  /// Closes and deletes the file, and frees its blocks.
   void remove();
-
-  /// Writes the bytes in memory out to disk, in order, and frees their
-  /// pages; returns the page bytes freed. Does nothing - returns 0 - in the
-  /// middle of an append, or once frozen: the merge reads the pages.
-  int64_t flushMemory();
 
   /// Bytes written to disk: the evict metric.
   int64_t bytesWritten() const {
     return static_cast<int64_t>(diskEnd_);
-  }
-
-  /// Bytes in memory now, and the most there were.
-  uint64_t memoryBytes() const {
-    return pages_.empty() ? 0 : end_ - diskEnd_;
-  }
-  uint64_t peakMemoryBytes() const {
-    return peakMemoryBytes_;
-  }
-
-  /// Bytes flushMemory() and the cap wrote out of memory, and how many
-  /// times.
-  uint64_t memoryFlushedBytes() const {
-    return memoryFlushedBytes_;
-  }
-  uint64_t memoryFlushes() const {
-    return memoryFlushes_;
   }
 
   /// Disk write and flush time: the evict metric.
@@ -233,17 +198,16 @@ class ShuffleSpillFile {
   }
 
  private:
+  friend class SpillMemory;
+
   void openFile();
 
   /// Appends to disk, behind every byte: none may be in memory.
   void appendToDisk(const void* data, size_t bytes);
 
-  /// Appends to the pages, writing them out first when the pages it needs
-  /// would pass a cap; false when it must go to disk instead.
-  bool appendToMemory(const char* data, size_t bytes);
-
-  /// flushMemory() of an append, which may.
-  int64_t writeOutMemory();
+  /// Writes the oldest block's bytes out to disk, readable at once, and
+  /// moves the block into `block`.
+  void writeOutOldest(memory::ContiguousAllocation& block);
 
   void readFromDisk(uint64_t offset, char* out, size_t bytes) const;
 
@@ -261,20 +225,10 @@ class ShuffleSpillFile {
   uint64_t end_{0};
   /// Where the bytes in memory start: everything before is on disk.
   uint64_t diskEnd_{0};
-  /// The bytes from diskEnd_ on, packed from the first page's start.
-  std::vector<memory::ContiguousAllocation> pages_;
-  uint64_t peakMemoryBytes_{0};
-  uint64_t memoryFlushedBytes_{0};
-  uint64_t memoryFlushes_{0};
+  /// The bytes from diskEnd_ on, oldest first: all blocks but the last
+  /// are full.
+  std::deque<memory::ContiguousAllocation> blocks_;
   bool frozen_{false};
-  bool appending_{false};
-  /// A page could not be funded: memory is short, so appends go to disk
-  /// until the next flush() ends the run they belong to.
-  bool unfunded_{false};
-  /// The caps left no room even for fresh pages: appends go to disk until
-  /// the file reaches this offset, a page's bytes on, before they ask for a
-  /// page again.
-  uint64_t diskUntil_{0};
   uint64_t writeTimeNs_{0};
   /// patch()es not applied yet: offset and bytes.
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
@@ -302,7 +256,7 @@ class DataFileWriter {
   void patch(uint64_t position, const void* data, size_t bytes);
 
   /// Copies `bytes` of `spill` from `begin`: the part on disk through a
-  /// bounce buffer, the part in memory straight from its pages.
+  /// bounce buffer, the part in memory straight from its blocks.
   void copyFrom(const ShuffleSpillFile& spill, uint64_t begin, uint64_t bytes);
 
   /// Flushes and closes; fills partitionLengths, totalBytesWritten and
