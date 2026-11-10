@@ -60,7 +60,7 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `cellMemorySpillBytes` | `0` (off) | Spill threshold on the chunk memory plus the spill memory. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
+| `cellMemorySpillRatio` | `0` (off) | Spill threshold on the chunk memory plus the spill memory, as a share of the writer's memory limit: the tighter of its pool's cap and the task's execution memory, which the `CellShuffleWriter init` line shows with the threshold (`memorySpillThreshold`). From `0` to `2`, as a task may hold more than its share while fewer tasks run; `0`, or no limit, is off. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
 | `spillMemoryBytes` | `-1` | Local only: the newest spill data - runs, sealed payloads, composite blocks - kept in memory, at most this many bytes (see [Spill memory](#spill-memory-local)). `-1` is no cap of its own: it grows until the first memory pressure; `0` is off. |
 | `reclaimRunFloorBytes` | `64 MiB` | Local only: the cell data a writer must hold before a reclaim of a given size writes a run; below it, the reclaim frees only idle chunks and the spill memory. In effect the smaller of this and an eighth of the memory limit, this with none (see [Reclaim policy](#reclaim-policy-local)). `0` is off; a negative value is an error. |
 | `cellSpillBytesPerStream` | `512 KiB` | Local only: the cell data the writer holds per stream of every partition before it spills without memory pressure: at a batch boundary, cell data past partitions x streams x this many bytes spills the largest partitions down to half (see [Cell threshold](#cell-threshold-local)). A very large value turns it off; it must be positive. |
@@ -204,7 +204,8 @@ budget far above the real one would waste much of the real memory. The
 
 - **`reserveChunk`** is the allocator's callback, called only when the
   freelist is empty and a new chunk is needed. Locally, if the chunk passes
-  `cellMemorySpillBytes` or `maybeReserve` fails, it writes the spill memory
+  the memory threshold (`cellMemorySpillRatio` of the memory limit) or
+  `maybeReserve` fails, it writes the spill memory
   out and tries once more; only if that fails too does it spill the largest
   partitions until half of the used cell bytes are covered, and the growth
   then reuses their recycled cells. On Celeborn it only sets a seal request
@@ -212,8 +213,8 @@ budget far above the real one would waste much of the real memory. The
   may spill, so growth there proceeds unreserved.
 - **`reserveSlice`** (Celeborn only) runs before each slice of a batch: it
   reserves the slice's estimated bytes plus one chunk, plus twice the largest
-  partition's bytes for the push. If that fails, or passes
-  `cellMemorySpillBytes`, the window is pushed first (`SealReason::kReserve`).
+  partition's bytes for the push. If that fails, or passes the memory
+  threshold, the window is pushed first (`SealReason::kReserve`).
 
 `DataCells::append` takes every cell it needs before it copies a byte, so a
 spill fired from inside a growth sees only complete earlier appends.
@@ -281,7 +282,7 @@ first, as much as it needs, and then does what it would have done:
 
 - a reclaim writes out as much as the idle chunks left of its request,
   every block for a reclaim of everything;
-- a chunk reservation that fails or passes `cellMemorySpillBytes` writes
+- a chunk reservation that fails or passes the memory threshold writes
   out 8 MiB, a reservation's step, and tries once more before it spills;
 - composite rows short of room for the next batch write out what the batch
   takes, and a reclaim while composite rows are held writes out what the

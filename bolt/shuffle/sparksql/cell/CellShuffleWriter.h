@@ -45,9 +45,10 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// cell threshold - CellShuffleOptions::cellSpillBytesPerStream for every
 /// stream of every partition - spills the largest partitions down to half
 /// of it, without memory pressure. Under pressure, the choke point is
-/// reserveChunk() at chunk growth, where a failed maybeReserve - or
-/// cellMemorySpillBytes passed - spills the largest partitions until half
-/// the cell data is covered. A reclaim frees idle chunks first, then runs
+/// reserveChunk() at chunk growth, where a failed maybeReserve - or the
+/// memory threshold passed, CellShuffleOptions::cellMemorySpillRatio of the
+/// memory limit - spills the largest partitions until half the cell data is
+/// covered. A reclaim frees idle chunks first, then runs
 /// partial spills and compaction, and spills everything only when those
 /// fall short; one of a given size writes no run while the cells hold less
 /// data than the run floor (CellShuffleOptions::reclaimRunFloorBytes).
@@ -58,7 +59,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// the merge copies it from there. It grows until the first memory pressure
 /// and from then on reuses its blocks, writing the oldest out. Every
 /// pressure event - a reclaim, a chunk reservation that fails or passes
-/// cellMemorySpillBytes, composite rows short of room - writes its oldest
+/// the memory threshold, composite rows short of room - writes its oldest
 /// blocks out first, as much as the event needs, then does what it did
 /// before. A reclaim writes them out even while the output writes: a
 /// block's reservation, which may reclaim the writer, is taken only between
@@ -187,8 +188,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       uint32_t numRows,
       std::span<const DecodedVector> decoded,
       std::span<const NullClass> nullClass);
-  /// The allocator's ReserveChunkFn: reserves a chunk's memory within
-  /// cellMemorySpillBytes. Locally, when it cannot, it writes the spill
+  /// The allocator's ReserveChunkFn: reserves a chunk's memory within the
+  /// memory threshold. Locally, when it cannot, it writes the spill
   /// memory out and tries once more; then it spills the largest partitions
   /// until half the cell data is covered, and the growth takes their
   /// recycled cells. Remotely, a window is released only whole at a batch
@@ -219,6 +220,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// hold less data than this. CellShuffleOptions::reclaimRunFloorBytes, at
   /// most an eighth of the memory limit, set at the first batch; 0 is off.
   int64_t reclaimRunFloorBytes_{0};
+  /// The memory threshold on the chunk memory plus the spill memory:
+  /// CellShuffleOptions::cellMemorySpillRatio of the memory limit, set at
+  /// the first batch; 0 is off.
+  int64_t memorySpillThresholdBytes_{0};
   /// The cell threshold: cell data past it spills at the next batch
   /// boundary, down to half. CellShuffleOptions::cellSpillBytesPerStream
   /// times the partitions and streams, saturating; set at the first batch.
