@@ -84,6 +84,11 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
     ASSERT_NE(::mkdtemp(pathTemplate), nullptr);
     dir_ = pathTemplate;
     dataFile_ = dir_ + "/data";
+    // The writers' pool, limited so that a cellMemorySpillRatio has a limit
+    // to take its share of.
+    writerRoot_ = memory::memoryManager()->addRootPool(
+        "cellNestedWriter", test::kSpillLimitBytes);
+    writerPool_ = writerRoot_->addLeafChild("writer");
   }
 
   void TearDown() override {
@@ -204,7 +209,13 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
           nullptr,
       const std::vector<ReadShape>& readShapes = test::kReadShapes) {
     test::roundTrip(
-        input, numPartitions, dataFile_, pool(), tune, check, readShapes);
+        input,
+        numPartitions,
+        dataFile_,
+        writerPool_.get(),
+        tune,
+        check,
+        readShapes);
   }
 
   /// `input` as a partitioning without a pid assigns its rows: all to
@@ -242,7 +253,7 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
         first->size(),
         first->estimateFlatSize(),
         int64_t{1} << 30,
-        pool(),
+        writerPool_.get(),
         arrow::default_memory_pool());
     BOLT_CHECK_NOT_NULL(dynamic_cast<CellShuffleWriter*>(writer.get()));
     return test::writeShuffle(
@@ -254,6 +265,8 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
   /// Holds the data file and, should V1 spill, its spill files.
   std::string dir_;
   std::string dataFile_;
+  std::shared_ptr<memory::MemoryPool> writerRoot_;
+  std::shared_ptr<memory::MemoryPool> writerPool_;
 };
 
 TEST_F(CellNestedTest, nestedRoundTrips) {
@@ -750,7 +763,7 @@ TEST_F(CellNestedTest, spillsAndSeals) {
         // batch, on RSS a push at the cap per batch, each closing the
         // window before partition 0's payload passes its bound.
         {"all", [](CellShuffleOptions& cell, bool rss) {
-           cell.cellMemorySpillBytes = 4 << 20;
+           cell.cellMemorySpillRatio = test::spillRatio(4 << 20);
            cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
            cell.nullMemLimitBytes = 4 << 10;
          }}};
@@ -1416,7 +1429,7 @@ TEST_F(CellNestedTest, singleAndRoundRobinRoundTrips) {
           auto& cell = writer.cellOptions;
           cell.nativeNestedTypes = schema.native;
           if (limited) {
-            cell.cellMemorySpillBytes = 4 << 20;
+            cell.cellMemorySpillRatio = test::spillRatio(4 << 20);
             cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
             cell.nullMemLimitBytes = 4 << 10;
             // The seals through the spill file on disk, not spill memory.
@@ -1953,12 +1966,14 @@ TEST_F(CellNestedTest, writerReturnsScratchAfterEachBatch) {
              test::evenOffsets(kRowsOfMany, kManyStructs / kRowsOfMany),
              structs)});
   };
-  // A pool of the writer's own, and a cap that every window passes at its
-  // first chunk: on an RSS client, the window goes out as the batch ends.
-  auto root = memory::memoryManager()->addRootPool("cellNestedScratch");
+  // A pool of the writer's own, and a threshold of a byte, which every
+  // window passes at its first chunk: on an RSS client, the window goes out
+  // as the batch ends.
+  auto root = memory::memoryManager()->addRootPool(
+      "cellNestedScratch", test::kSpillLimitBytes);
   auto writerPool = root->addLeafChild("writer");
   auto options = writerOptions(kPartitions, true);
-  options.cellOptions.cellMemorySpillBytes = 1;
+  options.cellOptions.cellMemorySpillRatio = test::spillRatio(1);
   CellShuffleWriter writer(
       options, writerPool.get(), arrow::default_memory_pool());
   const auto reclaim = [&] {

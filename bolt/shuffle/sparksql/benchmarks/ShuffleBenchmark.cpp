@@ -147,6 +147,11 @@ DEFINE_int64(
     -1,
     "Cell writers' spillMemoryBytes: the newest spill data kept in memory, "
     "at most this many bytes; -1 no cap, 0 none.");
+DEFINE_double(
+    bolt_benchmark_shuffle_cell_memory_spill_ratio,
+    0,
+    "Cell writers' cellMemorySpillRatio: the spill threshold on chunk and "
+    "spill memory, as a share of the memory limit; 0 is off.");
 DEFINE_int64(
     bolt_benchmark_shuffle_cell_spill_bytes_per_stream,
     512 << 10,
@@ -2195,6 +2200,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
       FLAGS_bolt_benchmark_shuffle_cell_spill_memory_bytes;
   options.cellOptions.cellSpillBytesPerStream =
       FLAGS_bolt_benchmark_shuffle_cell_spill_bytes_per_stream;
+  options.cellOptions.cellMemorySpillRatio =
+      FLAGS_bolt_benchmark_shuffle_cell_memory_spill_ratio;
   return options;
 }
 

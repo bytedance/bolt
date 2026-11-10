@@ -221,6 +221,14 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       "CellShuffleOptions::reclaimRunFloorBytes must not be negative");
   reclaimRunFloorBytes_ =
       limit > 0 ? std::min<int64_t>(limit / 8, runFloor) : runFloor;
+  // The memory threshold: a share of the limit, off with none.
+  const double spillRatio = options_.cellOptions.cellMemorySpillRatio;
+  BOLT_USER_CHECK(
+      spillRatio >= 0 && spillRatio <= 2,
+      "CellShuffleOptions::cellMemorySpillRatio must be within [0, 2], got {}",
+      spillRatio);
+  memorySpillThresholdBytes_ =
+      static_cast<int64_t>(spillRatio * static_cast<double>(limit));
   // Past this much cell data the cells spill without memory pressure, at a
   // batch boundary: a share per stream of every partition.
   const int64_t perStreamSpill = options_.cellOptions.cellSpillBytesPerStream;
@@ -266,6 +274,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
             << "), budget=" << budget << ", perStream=" << perStream
             << ", cellBytes=" << cellBytes
             << ", reclaimRunFloor=" << reclaimRunFloorBytes_
+            << ", memorySpillThreshold=" << memorySpillThresholdBytes_
             << ", spillMemory=" << spillMemory
             << ", cellSpillThreshold=" << cellSpillThresholdBytes_;
 }
@@ -305,7 +314,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     const int64_t sliceBytes = estimatedBytes + kChunkBytes;
     const int64_t pushBytes =
         2 * static_cast<int64_t>(splitter_->maxPartitionBytes());
-    const int64_t cap = options_.cellOptions.cellMemorySpillBytes;
+    const int64_t cap = memorySpillThresholdBytes_;
     if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
         !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
       releaseWindow(SealReason::kReserve);
@@ -632,17 +641,16 @@ void CellShuffleWriter::reserveChunk() {
   if (!initialized_ || splitter_->isWritingOutput()) {
     return;
   }
-  const auto& cellOpts = options_.cellOptions;
-  // cellMemorySpillBytes counts the spill data in memory too, which a
+  // The memory threshold counts the spill data in memory too, which a
   // flush gives back.
   // By how much this growth passes it; not past it when 0 or less.
   const auto overBytes = [&]() {
     return allocator_->allocatedBytes() + kChunkBytes +
         (spillMemory_ != nullptr ? spillMemory_->heldBytes() : 0) -
-        cellOpts.cellMemorySpillBytes;
+        memorySpillThresholdBytes_;
   };
   const auto overCap = [&]() {
-    return cellOpts.cellMemorySpillBytes > 0 && overBytes() > 0;
+    return memorySpillThresholdBytes_ > 0 && overBytes() > 0;
   };
   if (isRemote_) {
     // A remote window is pushed only whole, at a batch boundary: ask for
@@ -654,7 +662,7 @@ void CellShuffleWriter::reserveChunk() {
   }
   if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
     // Memory pressure: the oldest spill data in memory goes to disk first,
-    // what passes cellMemorySpillBytes and at least a reservation's 8 MiB
+    // what passes the memory threshold and at least a reservation's 8 MiB
     // step, which may make the room.
     SealSpillTimer timer(*this);
     const int64_t over = overCap() ? overBytes() : 0;
