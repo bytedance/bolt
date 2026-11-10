@@ -448,6 +448,284 @@ TEST_F(TemporalFunctionsTest, precisionPartialSelection) {
           input));
 }
 
+TEST_F(TemporalFunctionsTest, timestampTruncateConstantPrecision) {
+  const std::array<uint64_t, 10> positiveNanos = {
+      0,
+      100000000,
+      120000000,
+      123000000,
+      123400000,
+      123450000,
+      123456000,
+      123456700,
+      123456780,
+      123456789};
+  const std::array<Timestamp, 10> negative = {
+      Timestamp(0, 0),
+      Timestamp(-1, 200000000),
+      Timestamp(-1, 130000000),
+      Timestamp(-1, 123000000),
+      Timestamp(-1, 123400000),
+      Timestamp(-1, 123450000),
+      Timestamp(-1, 123456000),
+      Timestamp(-1, 123456700),
+      Timestamp(-1, 123456780),
+      Timestamp(-1, 123456789)};
+  const auto values = makeNullableFlatVector<Timestamp>(
+      {Timestamp(-1, 123456789),
+       Timestamp(0, 123456789),
+       Timestamp(253402300799, 123456789),
+       std::nullopt});
+  for (int32_t p = 0; p <= 9; ++p) {
+    SCOPED_TRACE(p);
+    const auto expression =
+        fmt::format("flink_timestamp_truncate(c0, cast({} as integer))", p);
+    const auto expected = makeNullableFlatVector<Timestamp>(
+        {negative[p],
+         Timestamp(0, positiveNanos[p]),
+         Timestamp(253402300799, positiveNanos[p]),
+         std::nullopt});
+    assertEqualVectors(expected, evaluate(expression, makeRowVector({values})));
+    const auto indices = makeIndices(8, [](auto row) { return (7 - row) % 4; });
+    assertEqualVectors(
+        wrapInDictionary(indices, 8, expected),
+        evaluate(
+            expression, makeRowVector({wrapInDictionary(indices, 8, values)})));
+    assertEqualVectors(
+        BaseVector::wrapInConstant(8, 0, expected),
+        evaluate(
+            expression,
+            makeRowVector({BaseVector::wrapInConstant(8, 0, values)})));
+  }
+}
+
+TEST_F(TemporalFunctionsTest, timestampTruncateDigitThreshold) {
+  struct TestCase {
+    Timestamp input;
+    int32_t precision;
+    Timestamp expected;
+  };
+  const std::vector<TestCase> cases = {
+      {Timestamp(0, 0), 0, Timestamp(0, 0)},
+      {Timestamp(0, 1), 0, Timestamp(0, 0)},
+      {Timestamp(0, 9), 1, Timestamp(0, 9)},
+      {Timestamp(0, 10), 1, Timestamp(0, 0)},
+      {Timestamp(0, 99), 2, Timestamp(0, 99)},
+      {Timestamp(0, 100), 2, Timestamp(0, 0)},
+      {Timestamp(0, 999), 3, Timestamp(0, 999)},
+      {Timestamp(0, 1000), 3, Timestamp(0, 0)},
+      {Timestamp(0, 9999), 4, Timestamp(0, 9999)},
+      {Timestamp(0, 10000), 4, Timestamp(0, 0)},
+      {Timestamp(0, 99999), 5, Timestamp(0, 99999)},
+      {Timestamp(0, 100001), 5, Timestamp(0, 100000)},
+      {Timestamp(0, 999999), 6, Timestamp(0, 999999)},
+      {Timestamp(0, 1000001), 6, Timestamp(0, 1000000)},
+      {Timestamp(0, 9999999), 7, Timestamp(0, 9999999)},
+      {Timestamp(0, 10000001), 7, Timestamp(0, 10000000)},
+      {Timestamp(0, 99999999), 8, Timestamp(0, 99999999)},
+      {Timestamp(0, 100000001), 8, Timestamp(0, 100000000)},
+      {Timestamp(0, 999999999), 9, Timestamp(0, 999999999)},
+      {Timestamp(-1, 123), 3, Timestamp(-1, 123)},
+      {Timestamp(-1, 999999), 0, Timestamp(-1, 0)},
+      {Timestamp(-62167219200LL, 123456789), 0, Timestamp(-62167219199LL, 0)},
+      {Timestamp(-62167219200LL, 123456789),
+       2,
+       Timestamp(-62167219200LL, 130000000)}};
+  std::vector<Timestamp> values;
+  std::vector<int32_t> precisions;
+  std::vector<Timestamp> expected;
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.input.getSeconds());
+    SCOPED_TRACE(test.input.getNanos());
+    SCOPED_TRACE(test.precision);
+    EXPECT_EQ(
+        test.expected,
+        evaluateTimestamp(
+            fmt::format(
+                "flink_timestamp_truncate(c0, cast({} as integer))",
+                test.precision),
+            test.input));
+    values.push_back(test.input);
+    precisions.push_back(test.precision);
+    expected.push_back(test.expected);
+  }
+  assertEqualVectors(
+      makeFlatVector<Timestamp>(expected),
+      evaluate(
+          "flink_timestamp_truncate(c0, c1)",
+          makeRowVector(
+              {makeFlatVector<Timestamp>(values),
+               makeFlatVector<int32_t>(precisions)})));
+}
+
+TEST_F(TemporalFunctionsTest, timestampTruncateDynamicPrecisionAndErrors) {
+  const std::vector<std::optional<int32_t>> precisions = {
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, 10, std::nullopt};
+  const auto input = makeRowVector(
+      {makeConstant<Timestamp>(Timestamp(-1, 999999999), precisions.size()),
+       makeNullableFlatVector<int32_t>(precisions)});
+  const auto expected = makeNullableFlatVector<Timestamp>(
+      {Timestamp(0, 0),
+       Timestamp(0, 0),
+       Timestamp(0, 0),
+       Timestamp(-1, 999000000),
+       Timestamp(-1, 999900000),
+       Timestamp(-1, 999990000),
+       Timestamp(-1, 999999000),
+       Timestamp(-1, 999999900),
+       Timestamp(-1, 999999990),
+       Timestamp(-1, 999999999),
+       std::nullopt,
+       std::nullopt,
+       std::nullopt});
+  assertEqualVectors(
+      expected, evaluate("try(flink_timestamp_truncate(c0, c1))", input));
+  BOLT_ASSERT_THROW(
+      evaluate("flink_timestamp_truncate(c0, c1)", input),
+      "Timestamp precision must be between 0 and 9");
+  for (const auto precision : {-1, 10}) {
+    const auto expression = fmt::format(
+        "flink_timestamp_truncate(c0, cast({} as integer))", precision);
+    BOLT_ASSERT_THROW(
+        evaluateTimestamp(expression, Timestamp(0, 1)),
+        "Timestamp precision must be between 0 and 9");
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateTimestamp("try(" + expression + ")", Timestamp(0, 1)));
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateTimestamp(expression, std::optional<Timestamp>()));
+  }
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateTimestamp(
+          "flink_timestamp_truncate(c0, cast(null as integer))",
+          Timestamp(0, 1)));
+}
+
+TEST_F(TemporalFunctionsTest, timestampTruncateMillisLimitsAndErrors) {
+  const std::array<Timestamp, 4> minimum = {
+      Timestamp(-9223372036854775LL, 0),
+      Timestamp(-9223372036854776LL, 200000000),
+      Timestamp(-9223372036854776LL, 200000000),
+      Timestamp::minMillis()};
+  const std::array<Timestamp, 4> maximum = {
+      Timestamp(9223372036854775LL, 0),
+      Timestamp(9223372036854775LL, 800000000),
+      Timestamp(9223372036854775LL, 800000000),
+      Timestamp::maxMillis()};
+  const auto limits = makeRowVector({makeFlatVector<Timestamp>(
+      {Timestamp::minMillis(), Timestamp::maxMillis()})});
+  for (int32_t p = 0; p <= 3; ++p) {
+    SCOPED_TRACE(p);
+    assertEqualVectors(
+        makeFlatVector<Timestamp>({minimum[p], maximum[p]}),
+        evaluate(
+            fmt::format("flink_timestamp_truncate(c0, cast({} as integer))", p),
+            limits));
+  }
+  // Both out-of-range values reach the truncation nano threshold for p=3.
+  const auto mixed = makeRowVector({makeNullableFlatVector<Timestamp>(
+      {Timestamp(0, 123456789),
+       Timestamp(Timestamp::min().getSeconds(), 1000),
+       Timestamp(-1, 999999999),
+       Timestamp::max(),
+       std::nullopt})});
+  for (const auto precision : {0, 3}) {
+    SCOPED_TRACE(precision);
+    const auto expression = fmt::format(
+        "flink_timestamp_truncate(c0, cast({} as integer))", precision);
+    assertEqualVectors(
+        makeNullableFlatVector<Timestamp>(
+            {precision == 0 ? Timestamp(0, 0) : Timestamp(0, 123000000),
+             std::nullopt,
+             precision == 0 ? Timestamp(0, 0) : Timestamp(-1, 999000000),
+             std::nullopt,
+             std::nullopt}),
+        evaluate("try(" + expression + ")", mixed));
+    BOLT_ASSERT_THROW(evaluate(expression, mixed), "to milliseconds");
+  }
+}
+
+TEST_F(TemporalFunctionsTest, timestampTruncatePartialSelection) {
+  const auto values = makeNullableFlatVector<Timestamp>(
+      {Timestamp(0, 123456789),
+       Timestamp(-1, 123456789),
+       std::nullopt,
+       Timestamp(1, 123456789),
+       Timestamp::max(),
+       Timestamp(-1, 123),
+       Timestamp::min()});
+  const auto expected = makeNullableFlatVector<Timestamp>(
+      {Timestamp(0, 123456789),
+       Timestamp(-1, 123000000),
+       std::nullopt,
+       Timestamp(1, 123000000),
+       Timestamp::max(),
+       Timestamp(-1, 123),
+       Timestamp::min()});
+  assertEqualVectors(
+      expected,
+      evaluate(
+          "if(c1, flink_timestamp_truncate(c0, cast(9 as integer)), flink_timestamp_truncate(c0, cast(3 as integer)))",
+          makeRowVector(
+              {values,
+               makeFlatVector<bool>(
+                   {true, false, true, false, true, false, true})})));
+  assertEqualVectors(
+      expected,
+      evaluate(
+          "if(c2, flink_timestamp_truncate(c0, c1), c0)",
+          makeRowVector(
+              {values,
+               makeFlatVector<int32_t>({9, 3, 9, 3, -1, 3, 10}),
+               makeFlatVector<bool>(
+                   {true, true, true, true, false, true, false})})));
+}
+
+TEST_F(TemporalFunctionsTest, timestampTruncateAndPrecisionAreIndependent) {
+  const auto values = makeNullableFlatVector<Timestamp>(
+      {Timestamp(0, 123),
+       Timestamp(0, 123),
+       Timestamp(-1, 123456789),
+       Timestamp(-1, 123456789),
+       std::nullopt,
+       Timestamp::max(),
+       Timestamp::min(),
+       Timestamp(0, 123456789)});
+  const auto input = makeRowVector(
+      {values,
+       makeFlatVector<bool>(
+           {true, false, true, false, true, false, false, false}),
+       makeFlatVector<int32_t>({3, 3, 0, 0, 3, 0, 0, 9})});
+  assertEqualVectors(
+      makeNullableFlatVector<Timestamp>(
+          {Timestamp(0, 123),
+           Timestamp(0, 0),
+           Timestamp(0, 0),
+           Timestamp(-1, 0),
+           std::nullopt,
+           Timestamp(Timestamp::max().getSeconds(), 0),
+           Timestamp::min(),
+           Timestamp(0, 123456789)}),
+      evaluate(
+          "if(c1, flink_timestamp_truncate(c0, c2), flink_timestamp_precision(c0, c2))",
+          input));
+  assertEqualVectors(
+      makeNullableFlatVector<Timestamp>(
+          {Timestamp(0, 123),
+           Timestamp(0, 0),
+           Timestamp(-1, 123000000),
+           Timestamp(-1, 123000000),
+           std::nullopt,
+           Timestamp(Timestamp::max().getSeconds(), 999000000),
+           Timestamp::min(),
+           Timestamp(0, 123000000)}),
+      evaluate(
+          "if(c1, flink_timestamp_truncate(c0, cast(3 as integer)), flink_timestamp_precision(c0, cast(3 as integer)))",
+          input));
+}
+
 TEST_F(TemporalFunctionsTest, timeCasts) {
   const std::vector<std::optional<int32_t>> millis = {
       0,
@@ -888,6 +1166,49 @@ TEST_F(TemporalFunctionsTest, defaultJvmTimeZone) {
           "1970-01-01"));
 }
 
+TEST_F(TemporalFunctionsTest, defaultJvmSystemVTimeZone) {
+  struct TestCase {
+    const char* input;
+    const char* expected;
+  };
+  // Timestamp.valueOf(...).toLocalDateTime() normalizes gaps in Java 8's
+  // default JVM time zone while preserving ordinary local timestamps.
+  const TestCase cases[] = {
+      {"2024-01-15 12:00:00", "2024-01-15 12:00:00"},
+      {"2024-07-15 12:00:00", "2024-07-15 12:00:00"},
+      {"2024-03-31 02:30:00", "2024-03-31 02:30:00"},
+      {"2024-04-28 02:30:00.123456789", "2024-04-28 03:30:00.123456789"},
+      {"2024-10-27 01:30:00", "2024-10-27 01:30:00"},
+      {"1974-01-06 02:30:00", "1974-01-06 03:30:00"},
+      {"1975-02-23 02:30:00", "1975-02-23 03:30:00"}};
+  for (
+      const auto* expression :
+      {"flink_string_to_timestamp(c0, true, 'SystemV/EST5EDT', cast(-18000 as integer))",
+       "to_timestamp(c0, 'yyyy/MM/dd', 'SystemV/EST5EDT', cast(-18000 as integer))"}) {
+    SCOPED_TRACE(expression);
+    for (const auto& test : cases) {
+      SCOPED_TRACE(test.input);
+      EXPECT_EQ(
+          timestamp(test.expected),
+          parseString(expression, " " + std::string(test.input) + " "));
+    }
+    EXPECT_EQ(std::nullopt, parseString(expression, std::nullopt));
+  }
+  EXPECT_EQ(
+      timestamp("2024-04-28 02:30:00.123456789"),
+      parseString(
+          "flink_string_to_timestamp(c0, true, 'SystemV/EST5EDT', cast(-18000 as integer))",
+          "2024-04-28 02:30:00.123456789"));
+  for (
+      const auto* expression :
+      {"flink_string_to_timestamp(c0, true, 'SystemV/EST5', cast(-18000 as integer))",
+       "to_timestamp(c0, 'yyyy/MM/dd', 'SystemV/EST5', cast(-18000 as integer))"}) {
+    EXPECT_EQ(
+        timestamp("2024-04-28 02:30:00.123456789"),
+        parseString(expression, " 2024-04-28 02:30:00.123456789 "));
+  }
+}
+
 TEST_F(TemporalFunctionsTest, legacyTimeZoneBoundary) {
   EXPECT_EQ(
       timestamp("1900-01-01 08:05:43"),
@@ -1100,6 +1421,39 @@ TEST_F(TemporalFunctionsTest, timestampToLongZones) {
         evaluateOnce<int64_t>(
             "try(timestamp_to_long(c0, 'America/New_York'))",
             std::optional<Timestamp>(timestamp(text))));
+  }
+}
+
+TEST_F(TemporalFunctionsTest, timestampToLongSystemVTimeZone) {
+  auto values = makeRowVector({makeNullableFlatVector<Timestamp>(
+      {timestamp("2024-01-15 12:00:00.123"),
+       timestamp("2024-07-15 12:00:00.123"),
+       timestamp("2024-03-31 12:00:00.123"),
+       std::nullopt})});
+  for (const auto* zone : {"SystemV/EST5EDT", "SystemV/EST5"}) {
+    SCOPED_TRACE(zone);
+    const auto summerUtc = std::string_view(zone) == "SystemV/EST5EDT"
+        ? "2024-07-15 16:00:00.123"
+        : "2024-07-15 17:00:00.123";
+    auto expected = makeNullableFlatVector<int64_t>(
+        {timestamp("2024-01-15 17:00:00.123").toMillis(),
+         timestamp(summerUtc).toMillis(),
+         timestamp("2024-03-31 17:00:00.123").toMillis(),
+         std::nullopt});
+    assertEqualVectors(
+        expected,
+        evaluate("timestamp_to_long(c0, '" + std::string(zone) + "')", values));
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kSessionTimezone, zone},
+         {core::QueryConfig::kAdjustTimestampToTimezone, "true"}});
+    assertEqualVectors(expected, evaluate("timestamp_to_long(c0)", values));
+  }
+  for (const auto* local : {"2024-04-28 02:30:00", "2024-10-27 01:30:00"}) {
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateOnce<int64_t>(
+            "try(timestamp_to_long(c0, 'SystemV/EST5EDT'))",
+            std::optional<Timestamp>(timestamp(local))));
   }
 }
 
@@ -1595,6 +1949,7 @@ TEST_F(TemporalFunctionsTest, prefixedRegistration) {
        {"to_timestamp",
         "flink_string_to_timestamp",
         "flink_timestamp_precision",
+        "flink_timestamp_truncate",
         "flink_timestamp_to_utc",
         "flink_timestamp_to_utc_later_offset",
         "flink_timestamp_from_utc",
@@ -1654,6 +2009,25 @@ TEST_F(TemporalFunctionsTest, prefixedRegistration) {
       parseString(
           "test_flink_timestamp_precision(test_flink_string_to_timestamp(c0, true), cast(3 as integer))",
           std::string("1970-01-01 00:00:00.123456789")));
+  EXPECT_EQ(
+      Timestamp(-1, 130000000),
+      evaluateTimestamp(
+          "test_flink_timestamp_truncate(c0, cast(2 as integer))",
+          Timestamp(-1, 123456789)));
+  EXPECT_EQ(
+      Timestamp(-1, 120000000),
+      evaluateTimestamp(
+          "test_flink_timestamp_precision(c0, cast(2 as integer))",
+          Timestamp(-1, 123456789)));
+  for (const auto* name :
+       {"flink_timestamp_truncate",
+        "test_flink_timestamp_truncate",
+        "flink_timestamp_precision",
+        "test_flink_timestamp_precision"}) {
+    const auto signatures = getSignatureStrings(name);
+    EXPECT_EQ(signatures.size(), 1);
+    EXPECT_EQ(signatures.count("(timestamp,integer) -> timestamp"), 1);
+  }
 }
 
 } // namespace

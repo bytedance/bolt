@@ -120,6 +120,10 @@ inline int32_t simpleCalendarField(DateTimeFormatSpecifier specifier) {
       return -1;
   }
 }
+/// Resolves ICU offsets, using built-in SystemV metadata for unknown IDs.
+std::pair<int32_t, int32_t> simpleTimeZoneOffsetsFromIcu(
+    std::string_view name,
+    const icu::TimeZone& javaZone);
 std::pair<int32_t, int32_t> simpleTimeZoneOffsets(
     const tz::TimeZone* zone,
     const DateTimeFormatterContext* context = nullptr);

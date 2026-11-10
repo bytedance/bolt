@@ -38,7 +38,9 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
 #include "bolt/functions/lib/DateTimeFormatterCache.h"
+#include "bolt/functions/lib/DateTimeFormatterInternal.h"
 #include "bolt/type/TimestampConversion.h"
+#include "bolt/type/tz/SystemVTimeZone.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 #include <gtest/gtest.h>
@@ -1907,7 +1909,20 @@ TEST_F(DateTimeFormatterTest, javaTimeZoneIds) {
         "UT",
         "GMT",
         "Etc/GMT+5",
-        "Zulu"}) {
+        "Zulu",
+        "SystemV/AST4",
+        "SystemV/CST6",
+        "SystemV/EST5",
+        "SystemV/HST10",
+        "SystemV/MST7",
+        "SystemV/PST8",
+        "SystemV/YST9",
+        "SystemV/AST4ADT",
+        "SystemV/CST6CDT",
+        "SystemV/EST5EDT",
+        "SystemV/MST7MDT",
+        "SystemV/PST8PDT",
+        "SystemV/YST9YDT"}) {
     SCOPED_TRACE(name);
     auto parsed = buildJavaDateTimeFormatter("VV'@'yyyy")
                       ->parse(std::string(name) + "@1970");
@@ -1932,8 +1947,7 @@ TEST_F(DateTimeFormatterTest, javaTimeZoneIds) {
         "asia/shanghai",
         "EST",
         "MST",
-        "HST",
-        "SystemV/EST5EDT"}) {
+        "HST"}) {
     EXPECT_TRUE(buildJavaDateTimeFormatter("VV")->parse(name).hasError());
   }
 }
@@ -1981,6 +1995,219 @@ TEST_F(DateTimeFormatterTest, javaTimeZoneFormatting) {
     output.resize(
         formatter->format(Timestamp(0, 0), utc, output.size(), output.data()));
     EXPECT_EQ(output, expected) << pattern;
+  }
+}
+
+TEST_F(DateTimeFormatterTest, systemVTimeZoneOffsetsWithoutIcu) {
+  struct Case {
+    const char* name;
+    int32_t rawOffset;
+    int32_t daylightSaving;
+  };
+  const Case cases[] = {
+      {"SystemV/AST4", -14400, 0},
+      {"SystemV/AST4ADT", -14400, 3600},
+      {"SystemV/CST6", -21600, 0},
+      {"SystemV/CST6CDT", -21600, 3600},
+      {"SystemV/EST5", -18000, 0},
+      {"SystemV/EST5EDT", -18000, 3600},
+      {"SystemV/HST10", -36000, 0},
+      {"SystemV/MST7", -25200, 0},
+      {"SystemV/MST7MDT", -25200, 3600},
+      {"SystemV/PST8", -28800, 0},
+      {"SystemV/PST8PDT", -28800, 3600},
+      {"SystemV/YST9", -32400, 0},
+      {"SystemV/YST9YDT", -32400, 3600},
+  };
+  // Exercise the unknown-ID branch even when ICU ships all SystemV zones.
+  const auto& unknown = icu::TimeZone::getUnknown();
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.name);
+    const std::pair<int32_t, int32_t> expected{
+        test.rawOffset, test.daylightSaving};
+    EXPECT_EQ(
+        detail::simpleTimeZoneOffsetsFromIcu(test.name, unknown), expected);
+
+    const auto* zone = tz::locateZone(test.name);
+    DateTimeFormatterContext context;
+    context.timezoneRawOffsets[zone->id()] = test.rawOffset + 600;
+    EXPECT_EQ(
+        detail::simpleTimeZoneOffsets(zone, &context),
+        (std::pair<int32_t, int32_t>{
+            test.rawOffset + 600, test.daylightSaving}));
+    EXPECT_EQ(detail::simpleTimeZoneOffsets(zone), expected);
+  }
+
+  // Recognized ICU data takes precedence over the built-in fallback.
+  const auto& gmt = *icu::TimeZone::getGMT();
+  EXPECT_EQ(
+      detail::simpleTimeZoneOffsetsFromIcu("SystemV/EST5EDT", gmt),
+      (std::pair<int32_t, int32_t>{
+          gmt.getRawOffset() / 1000, gmt.getDSTSavings() / 1000}));
+  for (const auto* name : {"America/New_York", "SystemV/UTC0"}) {
+    SCOPED_TRACE(name);
+    EXPECT_EQ(
+        detail::simpleTimeZoneOffsetsFromIcu(name, unknown),
+        (std::pair<int32_t, int32_t>{
+            unknown.getRawOffset() / 1000, unknown.getDSTSavings() / 1000}));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, systemVTimeZoneFormatting) {
+  struct Case {
+    const char* name;
+    const char* winter;
+    const char* summer;
+  };
+  // OpenJDK 8 DateTimeFormatter and SimpleDateFormat agree on these names.
+  const Case cases[] = {
+      {"SystemV/AST4",
+       "AST Atlantic Standard Time -0400 -04:00",
+       "AST Atlantic Standard Time -0400 -04:00"},
+      {"SystemV/CST6",
+       "CST Central Standard Time -0600 -06:00",
+       "CST Central Standard Time -0600 -06:00"},
+      {"SystemV/EST5",
+       "EST Eastern Standard Time -0500 -05:00",
+       "EST Eastern Standard Time -0500 -05:00"},
+      {"SystemV/HST10",
+       "HST Hawaii Standard Time -1000 -10:00",
+       "HST Hawaii Standard Time -1000 -10:00"},
+      {"SystemV/MST7",
+       "MST Mountain Standard Time -0700 -07:00",
+       "MST Mountain Standard Time -0700 -07:00"},
+      {"SystemV/PST8",
+       "PST Pacific Standard Time -0800 -08:00",
+       "PST Pacific Standard Time -0800 -08:00"},
+      {"SystemV/YST9",
+       "AKST Alaska Standard Time -0900 -09:00",
+       "AKST Alaska Standard Time -0900 -09:00"},
+      {"SystemV/AST4ADT",
+       "AST Atlantic Standard Time -0400 -04:00",
+       "ADT Atlantic Daylight Time -0300 -03:00"},
+      {"SystemV/CST6CDT",
+       "CST Central Standard Time -0600 -06:00",
+       "CDT Central Daylight Time -0500 -05:00"},
+      {"SystemV/EST5EDT",
+       "EST Eastern Standard Time -0500 -05:00",
+       "EDT Eastern Daylight Time -0400 -04:00"},
+      {"SystemV/MST7MDT",
+       "MST Mountain Standard Time -0700 -07:00",
+       "MDT Mountain Daylight Time -0600 -06:00"},
+      {"SystemV/PST8PDT",
+       "PST Pacific Standard Time -0800 -08:00",
+       "PDT Pacific Daylight Time -0700 -07:00"},
+      {"SystemV/YST9YDT",
+       "AKST Alaska Standard Time -0900 -09:00",
+       "AKDT Alaska Daylight Time -0800 -08:00"},
+  };
+  for (bool simple : {false, true}) {
+    SCOPED_TRACE(simple ? "SimpleDateFormat" : "DateTimeFormatter");
+    const auto formatter = simple ? buildSimpleDateTimeFormatter("z zzzz Z XXX")
+                                  : buildJavaDateTimeFormatter("z zzzz Z XXX");
+    for (const auto& test : cases) {
+      SCOPED_TRACE(test.name);
+      const auto* zone = tz::locateZone(test.name);
+      for (const auto& [seconds, expected] :
+           {std::pair{1704067200LL, test.winter},
+            std::pair{1719792000LL, test.summer}}) {
+        SCOPED_TRACE(seconds);
+        std::string output(formatter->maxResultSize(zone), '\0');
+        output.resize(formatter->format(
+            Timestamp(seconds, 0), zone, output.size(), output.data()));
+        EXPECT_EQ(output, expected);
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, systemVLocalTimeResolution) {
+  struct Case {
+    const char* input;
+    int64_t earliest;
+    int64_t latest;
+  };
+  const Case cases[] = {
+      {"2024-04-28 01:30:00", 1714285800, 1714285800},
+      {"2024-04-28 02:30:00", 1714289400, 1714289400},
+      {"2024-04-28 03:30:00", 1714289400, 1714289400},
+      {"2024-10-27 00:30:00", 1730003400, 1730003400},
+      {"2024-10-27 01:30:00", 1730007000, 1730010600},
+      {"2024-10-27 02:30:00", 1730014200, 1730014200},
+  };
+  const auto* zone = tz::locateZone("SystemV/EST5EDT");
+  for (bool simple : {false, true}) {
+    SCOPED_TRACE(simple ? "SimpleDateFormat" : "DateTimeFormatter");
+    const auto formatter = simple
+        ? buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss")
+        : buildJavaDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+    // Query adjacent unique times before gaps and overlaps to exercise the
+    // SimpleDateFormat interval cache as well as the transition itself.
+    for (const auto& test : cases) {
+      SCOPED_TRACE(test.input);
+      const auto result = formatter->parseToUtc(test.input, zone);
+      ASSERT_FALSE(result.hasError());
+      EXPECT_EQ(
+          result.value().timestamp,
+          Timestamp(simple ? test.latest : test.earliest, 0));
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, systemVWideLocalTimeCache) {
+  const auto formatter = buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  const auto* zone = tz::detail::locateBuiltinSystemVZone("SystemV/EST5EDT");
+  ASSERT_NE(nullptr, zone);
+  ASSERT_EQ(nullptr, zone->tz());
+  // Warm the summer interval before querying the autumn overlap. These years
+  // exceed date::year::max(), but remain in Java's signed millisecond range.
+  for (const auto& [input, seconds] :
+       {std::pair{"32768-07-01 12:00:00", 971906745600LL},
+        std::pair{"32768-10-27 01:30:00", 971916906600LL},
+        std::pair{"294000-07-01 12:00:00", 9215592451200LL},
+        std::pair{"294000-10-29 01:30:00", 9215602785000LL}}) {
+    SCOPED_TRACE(input);
+    const auto result = formatter->parseToUtc(input, zone);
+    ASSERT_FALSE(result.hasError());
+    EXPECT_EQ(result.value().timestamp, Timestamp(seconds, 0));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, systemVLargeYears) {
+  const auto* zone = tz::detail::locateBuiltinSystemVZone("SystemV/EST5EDT");
+  ASSERT_NE(nullptr, zone);
+  ASSERT_EQ(nullptr, zone->tz());
+  struct Case {
+    const char* input;
+    int64_t earliest;
+    int64_t latest;
+  };
+  // Java ZoneRules and SimpleDateFormat references beyond 32-bit epoch days.
+  const Case cases[] = {
+      {"6000000-01-01 00:00:00", 189279544798800LL, 189279544798800LL},
+      {"6000000-04-30 01:30:00", 189279555172200LL, 189279555172200LL},
+      {"6000000-04-30 02:30:00", 189279555175800LL, 189279555175800LL},
+      {"6000000-04-30 03:30:00", 189279555175800LL, 189279555175800LL},
+      {"6000000-07-01 12:00:00", 189279560563200LL, 189279560563200LL},
+      {"6000000-10-29 00:30:00", 189279570889800LL, 189279570889800LL},
+      {"6000000-10-29 01:30:00", 189279570893400LL, 189279570897000LL},
+      {"6000000-10-29 02:30:00", 189279570900600LL, 189279570900600LL},
+      {"292000000-07-01 12:00:00", 9214567832563200LL, 9214567832563200LL}};
+  for (bool simple : {false, true}) {
+    SCOPED_TRACE(simple ? "SimpleDateFormat" : "DateTimeFormatter");
+    const auto formatter = simple
+        ? buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss")
+        : buildJavaDateTimeFormatter("uuuu-MM-dd HH:mm:ss");
+    for (const auto& test : cases) {
+      SCOPED_TRACE(test.input);
+      const auto input =
+          simple ? std::string(test.input) : "+" + std::string(test.input);
+      const auto result = formatter->parseToUtc(input, zone);
+      ASSERT_FALSE(result.hasError());
+      EXPECT_EQ(
+          Timestamp(simple ? test.latest : test.earliest, 0),
+          result.value().timestamp);
+    }
   }
 }
 

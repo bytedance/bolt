@@ -525,8 +525,11 @@ class SelectiveColumnReader {
   // Returns read values for 'rows' in 'vector'. This can be called
   // multiple times for consecutive subsets of 'rows'. If 'isFinal' is
   // true, this is free not to maintain the information mapping values
-  // to rows. TODO: Consider isFinal as template parameter.
-  template <typename T, typename TVector>
+  // to rows. 'TResult' is the native type of the returned vector. It defaults
+  // to 'TVector' and must have the same width. It lets unsigned file values
+  // be compacted as 'TVector' and returned with the signed native type of
+  // 'type'. TODO: Consider isFinal as template parameter.
+  template <typename T, typename TVector, typename TResult = TVector>
   void getFlatValues(
       RowSet rows,
       VectorPtr* FOLLY_NONNULL result,
