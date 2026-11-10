@@ -225,6 +225,8 @@ struct NestedScenario {
 /// seed.
 constexpr vector_size_t kNestedBatches[] = {1500, 1, 0, 2500, 7, 900, 3};
 constexpr uint64_t kNestedSeed = 0x6e57ed;
+/// The capacity of the writer's pool, its memory limit.
+constexpr int64_t kWriterPoolBytes = int64_t{8} << 30;
 
 class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
@@ -241,7 +243,7 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
     // The writer sizes its cells from its pool's capacity: a fixed one, so
     // nothing of the process's memory configuration reaches the bytes.
     writerRoot_ =
-        memory::memoryManager()->addRootPool("cellGolden", int64_t{8} << 30);
+        memory::memoryManager()->addRootPool("cellGolden", kWriterPoolBytes);
     writerPool_ = writerRoot_->addLeafChild("writer");
   }
 
@@ -711,7 +713,7 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
     options.nullMemLimitBytes = 1 << 10;
   };
   const auto spills = [](CellShuffleOptions& options) {
-    options.cellMemorySpillBytes = 4 << 20;
+    options.cellMemorySpillRatio = test::spillRatio(4 << 20, kWriterPoolBytes);
   };
   const std::vector<Scenario> scenarios = {
       {"p1_none", 1, false, false, nullptr, false, false},
@@ -752,7 +754,8 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        true,
        false,
        [](CellShuffleOptions& options) {
-         options.cellMemorySpillBytes = 4 << 20;
+         options.cellMemorySpillRatio =
+             test::spillRatio(4 << 20, kWriterPoolBytes);
          options.partitionSealBytes = 96 << 10;
          options.nullMemLimitBytes = 8 << 10;
        },

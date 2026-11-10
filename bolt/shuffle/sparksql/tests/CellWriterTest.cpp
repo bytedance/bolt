@@ -114,6 +114,17 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     return test::shuffleOptions(dataFile_, numPartitions, compression, rss);
   }
 
+  /// A writer pool of test::kSpillLimitBytes: the memory limit a
+  /// cellMemorySpillRatio takes its share of.
+  memory::MemoryPool* limitedPool() {
+    if (limitedPool_ == nullptr) {
+      limitedRoot_ = memory::memoryManager()->addRootPool(
+          "cellWriterLimited", test::kSpillLimitBytes);
+      limitedPool_ = limitedRoot_->addLeafChild("writer");
+    }
+    return limitedPool_.get();
+  }
+
   /// test::roundTrip() through this test's data file, at the default read
   /// shapes.
   void roundTrip(
@@ -318,6 +329,8 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
 
   std::string dir_;
   std::string dataFile_;
+  std::shared_ptr<memory::MemoryPool> limitedRoot_;
+  std::shared_ptr<memory::MemoryPool> limitedPool_;
 };
 
 TEST_F(CellWriterTest, factoryPicksTheCellWriter) {
@@ -675,9 +688,9 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   const auto write =
       [&](bool rss, arrow::Compression::type compression, bool streaming) {
         auto options = writerOptions(kPartitions, rss, compression);
-        options.cellOptions.cellMemorySpillBytes = 8 << 20;
+        options.cellOptions.cellMemorySpillRatio = test::spillRatio(8 << 20);
         options.cellOptions.streamCompression = streaming;
-        auto written = test::writeShuffle(options, input, pool());
+        auto written = test::writeShuffle(options, input, limitedPool());
         test::expectReadsBack(input, written, compression, pool());
         return written;
       };
@@ -824,9 +837,9 @@ TEST_F(CellWriterTest, spillsCompressInSealedAndResidualWindows) {
                                     : arrow::Compression::UNCOMPRESSED;
       auto options = writerOptions(kPartitions);
       options.partitionWriterOptions.compressionType = codec;
-      options.cellOptions.cellMemorySpillBytes = 8 << 20;
+      options.cellOptions.cellMemorySpillRatio = test::spillRatio(8 << 20);
       options.cellOptions.partitionSealBytes = seal ? 4 << 20 : 1LL << 30;
-      const auto written = test::writeShuffle(options, input, pool());
+      const auto written = test::writeShuffle(options, input, limitedPool());
       test::expectReadsBack(input, written, codec, pool());
       EXPECT_GT(written.metrics.totalBytesEvicted, 0);
       EXPECT_EQ(written.metrics.spillCount > 0, seal);
@@ -1809,7 +1822,7 @@ TEST_F(CellWriterTest, reclaimWritesSpillMemoryOutFirst) {
 
 TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   // A hot partition seals into spill memory while the others keep growing,
-  // so the cells take chunk after chunk. cellMemorySpillBytes at the peak of
+  // so the cells take chunk after chunk. A memory threshold at the peak of
   // a writer without spill memory counts the spill memory too: it trips at
   // a growth, and writing the oldest spill memory out, as much as passes
   // the threshold, makes the room. No cell spills, and the data file is
@@ -1833,8 +1846,8 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
     peak = leaf->peakBytes();
   }
   options.cellOptions.spillMemoryBytes = -1;
-  options.cellOptions.cellMemorySpillBytes = peak;
-  const auto written = test::writeShuffle(options, input, pool());
+  options.cellOptions.cellMemorySpillRatio = test::spillRatio(peak);
+  const auto written = test::writeShuffle(options, input, limitedPool());
   EXPECT_GT(written.metrics.totalBytesEvicted, 0);
   EXPECT_LE(
       written.metrics.totalBytesEvicted, reference.metrics.totalBytesEvicted);
@@ -1843,7 +1856,7 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
 
   // 24 MiB, a third of it held by another consumer, raised after the last
   // batch so that stop() has room.
-  options.cellOptions.cellMemorySpillBytes = 0;
+  options.cellOptions.cellMemorySpillRatio = 0;
   auto root =
       memory::memoryManager()->addRootPool("cellGrowthTightPool", 24 << 20);
   auto leaf = root->addLeafChild("writer");
@@ -1970,8 +1983,8 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
           skewedInput(kPartitions, 8, 4096, 50, 600, nested, rng);
       auto options = quietOptions();
       options.cellOptions.partitionSealBytes = 2 << 20;
-      options.cellOptions.cellMemorySpillBytes = 4 << 20;
-      const auto busy = test::writeShuffle(options, input, pool());
+      options.cellOptions.cellMemorySpillRatio = test::spillRatio(4 << 20);
+      const auto busy = test::writeShuffle(options, input, limitedPool());
       expectTimes(busy);
       EXPECT_GT(busy.metrics.spillCount, 0);
       if (!rss) {
@@ -2051,6 +2064,43 @@ TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
   BOLT_ASSERT_USER_THROW(
       writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
       "cellSpillBytesPerStream must be positive");
+}
+
+TEST_F(CellWriterTest, memorySpillRatioIsAShareOfTheMemoryLimit) {
+  // cellMemorySpillRatio sets the memory threshold as a share of the
+  // writer's memory limit, here its pool's cap: some 10 MB of cells spill
+  // past 1/1024 of 4 GiB, stay under 1/1024 of 64 GiB, and with no limit
+  // there is no threshold. A ratio outside [0, 2] is an error.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(89);
+  const auto input = skewedInput(kPartitions, 8, 4096, 50, 600, false, rng);
+  const auto evicted = [&](int64_t limitBytes) {
+    auto options = writerOptions(kPartitions);
+    // Spills to disk, where totalBytesEvicted counts them.
+    options.cellOptions.spillMemoryBytes = 0;
+    options.cellOptions.cellMemorySpillRatio = 1.0 / 1024;
+    auto root = limitBytes > 0
+        ? memory::memoryManager()->addRootPool("cellRatio", limitBytes)
+        : memory::memoryManager()->addRootPool("cellRatio");
+    auto leaf = root->addLeafChild("writer");
+    const auto written = test::writeShuffle(options, input, leaf.get());
+    test::expectReadsBack(
+        input, written, arrow::Compression::LZ4_FRAME, pool());
+    return written.metrics.totalBytesEvicted;
+  };
+  EXPECT_GT(evicted(int64_t{4} << 30), 0);
+  EXPECT_EQ(evicted(int64_t{64} << 30), 0);
+  EXPECT_EQ(evicted(0), 0);
+
+  for (const double ratio : {-0.5, 2.5}) {
+    SCOPED_TRACE(ratio);
+    auto options = writerOptions(kPartitions);
+    options.cellOptions.cellMemorySpillRatio = ratio;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    BOLT_ASSERT_USER_THROW(
+        writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
+        "cellMemorySpillRatio must be within [0, 2]");
+  }
 }
 
 TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {

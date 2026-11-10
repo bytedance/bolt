@@ -95,8 +95,12 @@ enum class ShuffleWriterType {
 // thresholds push the window at the next batch boundary instead.
 struct CellShuffleOptions {
   // Spill threshold on the chunk memory plus the spill data kept in memory
-  // (spillMemoryBytes); 0 disables it. Not a hard memory cap.
-  int64_t cellMemorySpillBytes = 0;
+  // (spillMemoryBytes), as a share of the writer's memory limit: the
+  // tighter of its pool's cap and the task's execution memory, which the
+  // CellShuffleWriter init line shows. From 0 to 2: past 1, a task may
+  // hold more than its share while fewer tasks run. 0, or no limit, turns
+  // it off. Not a hard memory cap.
+  double cellMemorySpillRatio = 0;
   // Local shuffle: the newest spill data - runs and sealed payloads on
   // their way to the merge, the composite rows' blocks included - kept in
   // memory instead of the spill files, in blocks of up to 4 MiB of the
@@ -104,11 +108,11 @@ struct CellShuffleOptions {
   // memory for a new block, it writes its oldest block to disk and reuses
   // it. Memory pressure writes its oldest blocks to disk first, as much as
   // the event needs: a reclaim, a chunk reservation that fails or passes
-  // cellMemorySpillBytes, or composite rows short of room; from the first
-  // such event on, it only reuses the blocks it holds. -1: no cap of its
-  // own; it grows until the first memory pressure, and a reclaim then
-  // finds it as the writer's memory, competing with the task's other
-  // operators by size. 0: off, every spill byte goes to disk.
+  // the cellMemorySpillRatio threshold, or composite rows short of room;
+  // from the first such event on, it only reuses the blocks it holds. -1:
+  // no cap of its own; it grows until the first memory pressure, and a
+  // reclaim then finds it as the writer's memory, competing with the task's
+  // other operators by size. 0: off, every spill byte goes to disk.
   int64_t spillMemoryBytes = -1;
   // Local shuffle: the cell data a writer must hold before a reclaim of a
   // given size writes a run of it to disk. Below it, the reclaim frees only

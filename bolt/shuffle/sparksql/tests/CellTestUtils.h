@@ -91,6 +91,17 @@ inline void removeShuffleFiles(const std::string& dataFile) {
   ::unlink((dataFile + ".raw.spill").c_str());
 }
 
+/// The memory limit of the writer pool a test gives cellMemorySpillRatio:
+/// from 4 GiB up, a limit sizes the cells and the run floor as no limit
+/// does, so the ratio sets only the threshold.
+constexpr int64_t kSpillLimitBytes = int64_t{4} << 30;
+
+/// The cellMemorySpillRatio of a threshold of `bytes` under a memory limit
+/// of `limitBytes`: exact for a limit that is a power of two.
+inline double spillRatio(int64_t bytes, int64_t limitBytes = kSpillLimitBytes) {
+  return static_cast<double>(bytes) / static_cast<double>(limitBytes);
+}
+
 /// A hash shuffle of `numPartitions` partitions, compressed as
 /// `compression`, into `dataFile` or, when `rss`, pushed to a
 /// RecordingRssClient.
