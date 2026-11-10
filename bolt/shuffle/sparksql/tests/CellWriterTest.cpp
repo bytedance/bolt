@@ -1722,9 +1722,9 @@ TEST_F(CellWriterTest, sealsWaitInSpillMemoryWithMemoryToSpare) {
   // flat, nested, and with composite rows between the ordinary ones. With
   // memory to spare the seals and the composite blocks wait in spill memory
   // for the merge, and nothing reaches the disk. With spill memory off all
-  // of it does, and with 64 KiB of it, which fills and goes to disk again
-  // and again, all but the last 64 KiB. The data file is the same byte for
-  // byte, and every row reads back.
+  // of it does, and with 64 KiB of it, which keeps only the newest 64 KiB
+  // and writes its oldest block out again and again, all but those. The
+  // data file is the same byte for byte, and every row reads back.
   constexpr int32_t kPartitions = 5;
   constexpr int64_t kTinyBytes = 64 << 10;
   std::mt19937 rng(67);
@@ -1763,11 +1763,13 @@ TEST_F(CellWriterTest, sealsWaitInSpillMemoryWithMemoryToSpare) {
 }
 
 TEST_F(CellWriterTest, reclaimWritesSpillMemoryOutFirst) {
-  // Seals with memory to spare wait in spill memory. A reclaim writes it to
-  // disk first, and asked for little takes nothing else: the pool's usage
-  // drops by what it freed, at least what reached the disk. Asked for more
-  // than the idle chunks and the spill memory hold, it still spills
-  // partitions, straight to disk. Every row reads back.
+  // Seals with memory to spare wait in spill memory. A reclaim takes the
+  // idle chunks first, then the oldest spill memory, as much as it still
+  // needs: asked for a byte twice - the first may take only idle chunks -
+  // it has written out a block or two of it, 4 MiB each, and the pool's
+  // usage drops by what it freed, at least what reached the disk. Asked for
+  // more than the idle chunks and the spill memory hold, it writes the rest
+  // out and spills partitions too. Every row reads back.
   constexpr int32_t kPartitions = 6;
   std::mt19937 rng(71);
   const auto input = skewedInput(kPartitions, 12, 4096, 50, 600, false, rng);
@@ -1792,12 +1794,13 @@ TEST_F(CellWriterTest, reclaimWritesSpillMemoryOutFirst) {
         }
         ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
         const int64_t used = leaf->usedBytes();
-        const int64_t freed = reclaim(1);
+        int64_t freed = reclaim(1);
+        freed += reclaim(1);
         const int64_t evicted = writer.metrics().totalBytesEvicted;
         EXPECT_GT(evicted, 0);
+        EXPECT_LE(evicted, int64_t{8} << 20);
         EXPECT_GE(freed, evicted);
         EXPECT_EQ(used - leaf->usedBytes(), freed);
-        // The spill memory is empty now: what reaches the disk is cells.
         reclaim(leaf->usedBytes() * 3 / 4);
         EXPECT_GT(writer.metrics().totalBytesEvicted, evicted);
       });
@@ -1808,12 +1811,12 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   // A hot partition seals into spill memory while the others keep growing,
   // so the cells take chunk after chunk. cellMemorySpillBytes at the peak of
   // a writer without spill memory counts the spill memory too: it trips at
-  // a growth, and writing the spill memory out makes the room. No cell
-  // spills, and the data file is that writer's, byte for byte. In a root
-  // pool that another consumer, as a task's other operators do, leaves too
-  // small for the cells and the spill memory together - the spill memory
-  // keeps the writer itself within half its limit - the reservations fail
-  // instead, and every row still reads back.
+  // a growth, and writing the oldest spill memory out, as much as passes
+  // the threshold, makes the room. No cell spills, and the data file is
+  // that writer's, byte for byte. In a root pool that another consumer, as
+  // a task's other operators do, leaves too small for the cells and the
+  // spill memory together, the reservations fail instead, and every row
+  // still reads back.
   constexpr int32_t kPartitions = 64;
   std::mt19937 rng(73);
   const auto input = skewedInput(kPartitions, 30, 4096, 50, 400, false, rng);
@@ -1863,20 +1866,18 @@ TEST_F(CellWriterTest, chunkGrowthWritesSpillMemoryOutFirst) {
   other->free(held, kOtherBytes);
 }
 
-TEST_F(CellWriterTest, spillMemoryKeepsTheWriterWithinHalfItsLimit) {
-  // Seals with memory to spare wait in spill memory only while the whole
-  // writer - its cells and the pages together - stays within half its
-  // memory limit: a page past that, like one past the cap, writes the spill
-  // memory out and starts it afresh. Under a 64 MiB pool, every 16 MB
-  // batch seals: each partition past partitionSealBytes, or the window for
-  // its nulls. By default, and with a cap of the spill memory's own above
-  // that half, the writer peaks within half the pool, a page and a chunk
-  // above it at most; part of the seals still waits in memory, and every
-  // row reads back.
+TEST_F(CellWriterTest, spillMemoryKeepsTheNewestSealsUnderALimit) {
+  // Under a 64 MiB pool, every 16 MB batch seals: each partition past
+  // partitionSealBytes, or the window for its nulls. The seals fill the
+  // spill memory, which then writes its oldest blocks out to take the
+  // newest, and the cells' growth meets the pool's limit, which writes
+  // spill memory out first and ends its growth. With no cap of the spill
+  // memory's own, by default, and with one of 48 MiB, the writer stays
+  // within the pool, part of the seals still waits in memory at the merge,
+  // and every row reads back.
   constexpr int32_t kPartitions = 8;
   constexpr vector_size_t kRows = 4096;
   constexpr int64_t kLimit = 64 << 20;
-  constexpr int64_t kPageAndChunk = 8 << 20;
   std::mt19937 rng(83);
   ShuffleInput input;
   for (int batch = 0; batch < 4; ++batch) {
@@ -1916,7 +1917,7 @@ TEST_F(CellWriterTest, spillMemoryKeepsTheWriterWithinHalfItsLimit) {
       const auto written = test::writeShuffle(writer, options, input, pool());
       const auto& metrics = written.metrics;
       EXPECT_EQ(metrics.spillCount, static_cast<int64_t>(input.data.size()));
-      EXPECT_LE(metrics.peakBytes, kLimit / 2 + kPageAndChunk);
+      EXPECT_LE(metrics.peakBytes, kLimit);
       EXPECT_GT(metrics.totalBytesEvicted, 0);
       EXPECT_LT(metrics.totalBytesEvicted, metrics.totalBytesWritten);
       test::expectReadsBack(

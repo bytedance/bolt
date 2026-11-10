@@ -83,8 +83,8 @@ class CompositeShuffleWriter : public ShuffleWriter {
   virtual PartitionBlockOutput& output() = 0;
 
   /// The memory the outputs' spill files keep their newest bytes in, or
-  /// null. Memory pressure on the composite side writes it to disk first,
-  /// and the held rows straight after it.
+  /// null. Memory pressure on the composite side writes its oldest blocks
+  /// to disk first, and the held rows after it, into the blocks it holds.
   virtual SpillMemory* spillMemory() {
     return nullptr;
   }

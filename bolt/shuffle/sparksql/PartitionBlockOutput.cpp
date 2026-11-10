@@ -21,7 +21,6 @@
 #include <cstring>
 #include <random>
 
-#include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 
 #include "bolt/common/base/Exceptions.h"
@@ -32,66 +31,93 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
 
-/// Large enough that a page is one pool allocation per few runs, small
-/// enough that a file's last, partly filled page wastes little.
-constexpr uint64_t kMaxSpillPageBytes = 4 << 20;
+/// Large enough that a block is one pool allocation per few runs, small
+/// enough that a file's last, partly filled block wastes little.
+constexpr uint64_t kMaxSpillBlockBytes = 4 << 20;
 
-/// The largest power of two up to kMaxSpillPageBytes within `capBytes`, or 0
-/// when not even a machine page fits.
-uint64_t spillPageBytes(int64_t capBytes) {
-  if (capBytes < static_cast<int64_t>(memory::AllocationTraits::kPageSize)) {
+/// The largest power of two up to kMaxSpillBlockBytes that fits four times
+/// within `capBytes`, so that what the memory keeps moves in steps of a
+/// quarter of it at most; 0 when not even a machine page does.
+uint64_t spillBlockBytes(int64_t capBytes) {
+  const int64_t quarter = capBytes / 4;
+  if (quarter < static_cast<int64_t>(memory::AllocationTraits::kPageSize)) {
     return 0;
   }
   return std::min<uint64_t>(
-      kMaxSpillPageBytes, folly::prevPowTwo(static_cast<uint64_t>(capBytes)));
+      kMaxSpillBlockBytes, folly::prevPowTwo(static_cast<uint64_t>(quarter)));
 }
 
 } // namespace
 
-SpillMemory::SpillMemory(
-    memory::MemoryPool* pool,
-    int64_t capBytes,
-    int64_t totalCapBytes)
+SpillMemory::SpillMemory(memory::MemoryPool* pool, int64_t capBytes)
     : pool_(pool),
       capBytes_(std::max<int64_t>(capBytes, 0)),
-      totalCapBytes_(std::max<int64_t>(totalCapBytes, 0)),
-      pageBytes_(spillPageBytes(capBytes)),
-      pageShift_(pageBytes_ == 0 ? 0 : folly::findLastSet(pageBytes_) - 1) {}
+      blockBytes_(spillBlockBytes(capBytes)),
+      blockShift_(blockBytes_ == 0 ? 0 : folly::findLastSet(blockBytes_) - 1) {}
 
-bool SpillMemory::fits(int64_t bytes) const {
-  // usedBytes(), not reservedBytes(): the reservation also holds the
-  // pool's rounding and the slack each chunk's or page's maybeReserve()
-  // takes, in steps of up to 8 MiB that no page lines up with, until the
-  // next release().
-  return heldBytes_ + bytes <= capBytes_ &&
-      pool_->usedBytes() + bytes <= totalCapBytes_;
-}
-
-bool SpillMemory::fundPage(memory::ContiguousAllocation& page) {
-  if (!pool_->maybeReserve(pageBytes_)) {
+bool SpillMemory::takeBlock(memory::ContiguousAllocation& block) {
+  if (growing_ && heldBytes_ + static_cast<int64_t>(blockBytes_) <= capBytes_) {
+    // Reserved first, as a cell chunk is. The reservation may reclaim the
+    // writer, which may write blocks of any file out: the asking file's
+    // last block is full, so they are whole.
+    if (pool_->maybeReserve(blockBytes_)) {
+      pool_->allocateContiguous(
+          memory::AllocationTraits::numPages(blockBytes_), block);
+      heldBytes_ += static_cast<int64_t>(blockBytes_);
+      peakBytes_ = std::max(peakBytes_, heldBytes_);
+      return true;
+    }
+    growing_ = false;
+  }
+  auto* file = largestFile();
+  if (file == nullptr) {
     return false;
   }
-  pool_->allocateContiguous(
-      memory::AllocationTraits::numPages(pageBytes_), page);
-  heldBytes_ += static_cast<int64_t>(pageBytes_);
-  peakBytes_ = std::max(peakBytes_, heldBytes_);
+  file->writeOutOldest(block);
   return true;
 }
 
-SpillMemory::Pressure::Pressure(SpillMemory* memory) : memory_(memory) {
-  if (memory_ == nullptr) {
-    return;
+ShuffleSpillFile* SpillMemory::largestFile() const {
+  ShuffleSpillFile* largest = nullptr;
+  for (auto* file : files_) {
+    if (!file->blocks_.empty() &&
+        (largest == nullptr ||
+         file->blocks_.size() > largest->blocks_.size())) {
+      largest = file;
+    }
   }
-  for (auto* file : memory_->files_) {
-    freedBytes_ += file->flushMemory();
-  }
-  ++memory_->pressureDepth_;
+  return largest;
 }
 
-SpillMemory::Pressure::~Pressure() {
-  if (memory_ != nullptr) {
-    --memory_->pressureDepth_;
+bool SpillMemory::releaseOne() {
+  auto* file = largestFile();
+  if (file == nullptr) {
+    return false;
   }
+  BOLT_CHECK(!file->frozen_, "shuffle spill memory released during the merge");
+  memory::ContiguousAllocation block;
+  file->writeOutOldest(block);
+  // `block` goes back to the pool as it leaves.
+  heldBytes_ -= static_cast<int64_t>(blockBytes_);
+  return true;
+}
+
+int64_t SpillMemory::release(int64_t bytes) {
+  growing_ = false;
+  int64_t freed = 0;
+  while (freed < bytes && releaseOne()) {
+    freed += static_cast<int64_t>(blockBytes_);
+  }
+  return freed;
+}
+
+int64_t SpillMemory::releaseAll() {
+  growing_ = false;
+  int64_t freed = 0;
+  while (releaseOne()) {
+    freed += static_cast<int64_t>(blockBytes_);
+  }
+  return freed;
 }
 
 ShuffleSpillFile::ShuffleSpillFile(
@@ -140,19 +166,33 @@ void ShuffleSpillFile::openFile() {
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
   BOLT_CHECK(!frozen_, "shuffle spill file appended after it was frozen");
   const uint64_t offset = end_;
-  if (memory_ == nullptr || memory_->pageBytes_ == 0) {
+  if (memory_ == nullptr || memory_->blockBytes_ == 0) {
     appendToDisk(data, bytes);
     return offset;
   }
-  // A Pressure reached from inside - a page's reservation may reclaim this
-  // writer - must leave the pages alone.
-  appending_ = true;
-  SCOPE_EXIT {
-    appending_ = false;
-  };
-  if (!appendToMemory(static_cast<const char*>(data), bytes)) {
-    writeOutMemory();
-    appendToDisk(data, bytes);
+  const uint64_t blockBytes = memory_->blockBytes_;
+  const auto* source = static_cast<const char*>(data);
+  while (bytes > 0) {
+    // Recomputed after a block is taken: taking one may write blocks of
+    // this file out.
+    const uint64_t room = blocks_.size() * blockBytes - (end_ - diskEnd_);
+    if (room == 0) {
+      // Taken with the last block full only, so that what a reclaim reached
+      // from the reservation writes out of this file is whole.
+      memory::ContiguousAllocation block;
+      if (!memory_->takeBlock(block)) {
+        // No block anywhere: none of this file's bytes is in memory either.
+        appendToDisk(source, bytes);
+        break;
+      }
+      blocks_.push_back(std::move(block));
+      continue;
+    }
+    const size_t piece = std::min<uint64_t>(room, bytes);
+    ::memcpy(blocks_.back().data<char>() + (blockBytes - room), source, piece);
+    end_ += piece;
+    source += piece;
+    bytes -= piece;
   }
   return offset;
 }
@@ -180,93 +220,29 @@ void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
   }
 }
 
-bool ShuffleSpillFile::appendToMemory(const char* data, size_t bytes) {
-  auto& memory = *memory_;
-  if (memory.pressureDepth_ > 0 || unfunded_ || end_ < diskUntil_) {
-    return false;
-  }
-  const uint64_t pageBytes = memory.pageBytes_;
-  // The pages that `bytes` more need beyond the room in the last one.
-  const auto newPagesFor = [&]() -> uint64_t {
-    const uint64_t room = pages_.size() * pageBytes - memoryBytes();
-    return bytes <= room ? 0 : (bytes - room + pageBytes - 1) / pageBytes;
-  };
-  // Only new pages ask the caps, so the pool is read once per page.
-  const auto fits = [&](uint64_t newPages) {
-    return newPages == 0 ||
-        memory.fits(static_cast<int64_t>(newPages * pageBytes));
-  };
-  uint64_t newPages = newPagesFor();
-  if (!fits(newPages)) {
-    // Past a cap - the pages', or the pool's, which the cells fill too -
-    // is no memory pressure: the bytes in memory go to disk, and this
-    // append starts the memory afresh, unless it alone, or with what the
-    // other files and the rest of the pool hold, passes a cap too. Then it
-    // goes to disk, and so do the appends of the next page's bytes, before
-    // one asks for a page again.
-    writeOutMemory();
-    newPages = newPagesFor();
-    if (!fits(newPages)) {
-      diskUntil_ = end_ + pageBytes;
-      return false;
-    }
-  }
-  for (uint64_t i = 0; i < newPages; ++i) {
-    memory::ContiguousAllocation page;
-    if (!memory.fundPage(page)) {
-      // The pool has no room: memory is short.
-      unfunded_ = true;
-      return false;
-    }
-    pages_.push_back(std::move(page));
-  }
-  const uint64_t offset = end_;
-  end_ += bytes;
-  visitMemory(offset, bytes, [&](char* to, size_t piece) {
-    ::memcpy(to, data, piece);
-    data += piece;
-  });
-  peakMemoryBytes_ = std::max(peakMemoryBytes_, end_ - diskEnd_);
-  return true;
-}
-
-int64_t ShuffleSpillFile::flushMemory() {
-  if (appending_ || frozen_) {
-    return 0;
-  }
-  return writeOutMemory();
-}
-
-int64_t ShuffleSpillFile::writeOutMemory() {
-  if (pages_.empty()) {
-    return 0;
-  }
-  const uint64_t bytes = end_ - diskEnd_;
+void ShuffleSpillFile::writeOutOldest(memory::ContiguousAllocation& block) {
+  const uint64_t bytes =
+      std::min<uint64_t>(memory_->blockBytes_, end_ - diskEnd_);
   if (bytes > 0) {
     if (file_ == nullptr) {
       openFile();
     }
+    size_t written;
     int status;
     {
       NanosecondTimer timer(&writeTimeNs_);
-      visitMemory(diskEnd_, bytes, [&](const char* data, size_t piece) {
-        const size_t written = ::fwrite(data, 1, piece, file_);
-        BOLT_CHECK_EQ(written, piece, "shuffle spill write failed");
-      });
+      written = ::fwrite(blocks_.front().data<char>(), 1, bytes, file_);
       // Readable at once, as they were in memory.
       status = ::fflush(file_);
     }
+    BOLT_CHECK_EQ(written, bytes, "shuffle spill write failed");
     BOLT_CHECK_EQ(status, 0, "shuffle spill flush failed");
-    diskEnd_ = end_;
-    memoryFlushedBytes_ += bytes;
-    ++memoryFlushes_;
+    diskEnd_ += bytes;
     memory_->flushedBytes_ += bytes;
     ++memory_->flushes_;
   }
-  const auto freed = static_cast<int64_t>(pages_.size() * memory_->pageBytes_);
-  pages_.clear();
-  memory_->heldBytes_ -= freed;
-  return freed;
+  block = std::move(blocks_.front());
+  blocks_.pop_front();
 }
 
 template <typename Visit>
@@ -278,22 +254,20 @@ void ShuffleSpillFile::visitMemory(
     return;
   }
   BOLT_CHECK(
-      offset >= diskEnd_ && offset + bytes <= end_ && !pages_.empty(),
+      offset >= diskEnd_ && offset + bytes <= end_ && !blocks_.empty(),
       "shuffle spill memory read out of range");
-  const uint64_t pageBytes = memory_->pageBytes_;
+  const uint64_t blockBytes = memory_->blockBytes_;
   uint64_t at = offset - diskEnd_;
   while (bytes > 0) {
-    const uint64_t inPage = at & (pageBytes - 1);
-    const uint64_t piece = std::min(bytes, pageBytes - inPage);
-    visit(pages_[at >> memory_->pageShift_].data<char>() + inPage, piece);
+    const uint64_t inBlock = at & (blockBytes - 1);
+    const uint64_t piece = std::min(bytes, blockBytes - inBlock);
+    visit(blocks_[at >> memory_->blockShift_].data<char>() + inBlock, piece);
     at += piece;
     bytes -= piece;
   }
 }
 
 void ShuffleSpillFile::flush() {
-  // A run ends here: the next may find pages again.
-  unfunded_ = false;
   if (file_ == nullptr) {
     return;
   }
@@ -380,10 +354,10 @@ void ShuffleSpillFile::readFromDisk(uint64_t offset, char* out, size_t bytes)
 }
 
 void ShuffleSpillFile::remove() {
-  if (!pages_.empty()) {
+  if (!blocks_.empty()) {
     memory_->heldBytes_ -=
-        static_cast<int64_t>(pages_.size() * memory_->pageBytes_);
-    pages_.clear();
+        static_cast<int64_t>(blocks_.size() * memory_->blockBytes_);
+    blocks_.clear();
   }
   if (file_ != nullptr) {
     ::fclose(file_);

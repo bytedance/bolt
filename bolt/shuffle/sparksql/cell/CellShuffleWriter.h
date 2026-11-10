@@ -50,13 +50,16 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// (CellShuffleOptions::reclaimRunFloorBytes). Accounting is the
 /// allocator's exact chunk/cell counters.
 ///
-/// Locally, what spills - runs and sealed payloads, the composite blocks
-/// too - stays in a SpillMemory of the writer's pool while there is no
-/// memory pressure and the whole writer, cells and pages together, holds at
-/// most half its memory limit, and the merge copies it from there. Every
+/// Locally, the newest of what spills - runs and sealed payloads, the
+/// composite blocks too - stays in a SpillMemory of the writer's pool, and
+/// the merge copies it from there. It grows until the first memory pressure
+/// and from then on reuses its blocks, writing the oldest out. Every
 /// pressure event - a reclaim, a chunk reservation that fails or passes the
-/// threshold, the seal a reclaim asks for - writes that memory to disk
-/// first, then does what it did before, straight to disk.
+/// threshold, composite rows short of room - writes its oldest blocks out
+/// first, as much as the event needs, then does what it did before. A
+/// reclaim writes them out even while the output writes: a block's
+/// reservation, which may reclaim the writer, is taken only between
+/// blocks.
 ///
 /// On Celeborn a window can only be pushed whole, so every one of those
 /// spills becomes a seal at the next batch boundary instead: batches are
