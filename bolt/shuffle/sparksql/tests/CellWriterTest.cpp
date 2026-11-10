@@ -948,6 +948,35 @@ TEST_F(CellWriterTest, dictionaryVocabularies) {
   }
 }
 
+TEST_F(CellWriterTest, dictionaryProbeTakesAFirstBatchOf64Rows) {
+  // A table scan of wide rows can start a shuffle with small batches. The
+  // first batch decides the dictionary form, and 64 rows are enough to
+  // judge: two words take dictionary form after a first batch of 64 rows,
+  // and not after one of 63, which leaves the writer without it for good.
+  // Every row reads back either way.
+  constexpr int32_t kPartitions = 2;
+  for (const vector_size_t firstRows : {64, 63}) {
+    SCOPED_TRACE(firstRows);
+    ShuffleInput input;
+    for (const vector_size_t rows : {firstRows, 1000}) {
+      input.data.push_back(
+          makeRowVector({makeFlatVector<StringView>(rows, [](auto row) {
+            return StringView(row % 2 == 0 ? "even" : "odd");
+          })}));
+      input.pids.push_back(roundRobinPids(rows, kPartitions));
+    }
+    const auto written =
+        test::writeShuffle(writerOptions(kPartitions), input, pool());
+    if (firstRows >= 64) {
+      EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
+    } else {
+      EXPECT_EQ(written.metrics.dictionaryMatchedRows, 0);
+    }
+    test::expectReadsBack(
+        input, written, arrow::Compression::LZ4_FRAME, pool());
+  }
+}
+
 TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
   // One large payload per partition comes out over many batches of
   // batchSize rows; payloads near a batch's size straddle batches, and
@@ -995,8 +1024,8 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
       input = sliceBatches(data, pids, windowRows);
     }
     const auto written = test::writeShuffle(options, input, pool());
-    // The dictionary probe needs a first batch of 1024 rows.
-    if (windowRows == 0 || windowRows >= 1024) {
+    // The dictionary probe needs a first batch of 64 rows.
+    if (windowRows == 0 || windowRows >= 64) {
       EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
     }
     const auto rows = input.rowsOf(kPartitions);
