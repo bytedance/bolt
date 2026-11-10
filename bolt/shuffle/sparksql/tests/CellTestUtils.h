@@ -105,6 +105,10 @@ inline ShuffleWriterOptions shuffleOptions(
   partitionWriter.numPartitions = numPartitions;
   partitionWriter.dataFile = dataFile;
   partitionWriter.compressionType = compression;
+  // No cell threshold: a test of it opts in, and the others see only the
+  // spills of the memory they set.
+  options.cellOptions.cellSpillBytesPerStream =
+      std::numeric_limits<int64_t>::max();
   if (rss) {
     partitionWriter.partitionWriterType = PartitionWriterType::kCeleborn;
     partitionWriter.rssClient = std::make_shared<RecordingRssClient>();
