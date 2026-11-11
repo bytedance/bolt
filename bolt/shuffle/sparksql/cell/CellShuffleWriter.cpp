@@ -230,18 +230,26 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   memorySpillThresholdBytes_ =
       static_cast<int64_t>(spillRatio * static_cast<double>(limit));
   // Past this much cell data the cells spill without memory pressure, at a
-  // batch boundary: a share per stream of every partition.
+  // batch boundary: a share per stream of every partition, and at least
+  // the floor.
   const int64_t perStreamSpill = options_.cellOptions.cellSpillBytesPerStream;
   BOLT_USER_CHECK_GT(
       perStreamSpill,
       0,
       "CellShuffleOptions::cellSpillBytesPerStream must be positive");
+  const int64_t minSpill = options_.cellOptions.cellSpillMinBytes;
+  BOLT_USER_CHECK_GE(
+      minSpill,
+      0,
+      "CellShuffleOptions::cellSpillMinBytes must not be negative");
   const uint64_t streams =
       static_cast<uint64_t>(numPartitions_) * std::max<uint32_t>(1, numStreams);
-  cellSpillThresholdBytes_ = static_cast<uint64_t>(perStreamSpill) >
-          std::numeric_limits<uint64_t>::max() / streams
-      ? std::numeric_limits<uint64_t>::max()
-      : static_cast<uint64_t>(perStreamSpill) * streams;
+  cellSpillThresholdBytes_ = std::max(
+      static_cast<uint64_t>(perStreamSpill) >
+              std::numeric_limits<uint64_t>::max() / streams
+          ? std::numeric_limits<uint64_t>::max()
+          : static_cast<uint64_t>(perStreamSpill) * streams,
+      static_cast<uint64_t>(minSpill));
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });
