@@ -97,13 +97,12 @@ using RunStreamSize = folly::FunctionRef<uint64_t(uint32_t stream)>;
 /// the same streams. Stream s of every run must therefore be the same
 /// stream.
 ///
-/// Streaming feeds a frame to the codec straight from the visitor, piece by
-/// piece, and gathers its output in a fixed buffer: no workspace sized by
-/// the data, ever, and no copy of the input besides the codec's own into its
-/// window. One-shot gathers each frame into a workspace from the spill pool
-/// and compresses it at once: spills and seals come when the task's pool is
-/// short, and must not fail for the memory meant to relieve it. Codecs with
-/// no stream form are always one-shot. Both write the same layouts.
+/// Streaming compresses a frame straight from the visitor through fixed
+/// buffers: no workspace sized by the data, ever. One-shot gathers each
+/// frame into a workspace from the spill pool and compresses it at once:
+/// spills and seals come when the task's pool is short, and must not fail
+/// for the memory meant to relieve it. Codecs with no stream form are
+/// always one-shot. Both write the same layouts.
 class RunCompressor {
  public:
   /// Compresses with `options`' codec; stores everything when it is
@@ -259,8 +258,9 @@ class RunCompressor {
   std::unique_ptr<Codec> codec_;
   /// Null when one-shot.
   std::unique_ptr<StreamCompressor> streamCompressor_;
-  /// streamCompressor_'s output buffer, a fixed size for the compressor's
-  /// life.
+  /// streamCompressor_'s input staging and output buffers, fixed sizes for
+  /// the compressor's life.
+  std::vector<uint8_t> stage_;
   std::vector<uint8_t> out_;
   /// One-shot workspaces: the gathered frame and its compressed form, or a
   /// null body's.
