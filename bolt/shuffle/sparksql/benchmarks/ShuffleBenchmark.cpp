@@ -157,6 +157,11 @@ DEFINE_int64(
     512 << 10,
     "Cell writers' cellSpillBytesPerStream: past this much cell data for "
     "every stream of every partition, they spill without memory pressure.");
+DEFINE_int64(
+    bolt_benchmark_shuffle_cell_spill_min_bytes,
+    64 << 20,
+    "Cell writers' cellSpillMinBytes: the least threshold "
+    "bolt_benchmark_shuffle_cell_spill_bytes_per_stream sets.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -2200,6 +2205,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
       FLAGS_bolt_benchmark_shuffle_cell_spill_memory_bytes;
   options.cellOptions.cellSpillBytesPerStream =
       FLAGS_bolt_benchmark_shuffle_cell_spill_bytes_per_stream;
+  options.cellOptions.cellSpillMinBytes =
+      FLAGS_bolt_benchmark_shuffle_cell_spill_min_bytes;
   options.cellOptions.cellMemorySpillRatio =
       FLAGS_bolt_benchmark_shuffle_cell_memory_spill_ratio;
   return options;
