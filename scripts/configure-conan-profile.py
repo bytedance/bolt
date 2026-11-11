@@ -1134,6 +1134,13 @@ def main() -> int:
             libc_version=args.libc_version,
             pgo=None if is_build_profile else args.pgo,
         )
+    if not args.profile_name:
+        default_profile = conan_home / "profiles" / "default"
+        if not default_profile.exists() and not default_profile.is_symlink():
+            default_profile.symlink_to(DEFAULT_HOST_PROFILE_NAME)
+            print(
+                f"✅ Created Conan profile symlink: {default_profile} -> {DEFAULT_HOST_PROFILE_NAME}"
+            )
     return 0
 
 
