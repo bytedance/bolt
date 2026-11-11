@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include "bolt/functions/InlineFlatten.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/lib/StringUtil.h"
 #include "bolt/functions/lib/string/StringImpl.h"
@@ -311,6 +312,13 @@ class Converter {
     }
 
     const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+    if constexpr (
+        kIsInSpark && std::is_same_v<FromKind, DateKind> &&
+        std::is_same_v<ToKind, StringKind>) {
+      legacyDateFormat_ =
+          functions::parseTimePolicy(queryConfig.timeParserPolicy()) ==
+          functions::TimePolicy::LEGACY;
+    }
     auto sessionTzName = queryConfig.sessionTimezone();
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
       timeZone_ = tz::locateZone(sessionTzName);
@@ -623,7 +631,27 @@ class Converter {
       }
     } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
-        auto output = DATE()->toString(from);
+        std::string output;
+        if constexpr (kIsInSpark) {
+          std::tm date;
+          BOLT_CHECK(
+              Timestamp::epochToUtc(from * Timestamp::kSecondsInDay, date));
+          // LEGACY's yyyy is a year of era: proleptic year 0 is 1 BC.
+          // This only changes year presentation, not calendar rebasing.
+          constexpr int32_t kTmYearBase = 1900;
+          const auto year = date.tm_year + kTmYearBase;
+          if (legacyDateFormat_ && year <= 0) {
+            date.tm_year = 1 - year - kTmYearBase;
+          }
+          const TimestampToStringOptions options = {
+              .leadingPositiveSign = !legacyDateFormat_,
+              .zeroPaddingYear = true,
+              .mode = TimestampToStringOptions::Mode::kDateOnly,
+          };
+          output = Timestamp::tmToString(date, 0, options);
+        } else {
+          output = DATE()->toString(from);
+        }
         to.set(output);
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
@@ -839,6 +867,7 @@ class Converter {
   const tz::TimeZone* timeZone_ = nullptr;
   bool isFlinkCompatible_ = false;
   bool trimStringToFloatingPointControlChars_ = false;
+  bool legacyDateFormat_ = false;
 
   bool canAsInlinedStr_ = false;
 };
