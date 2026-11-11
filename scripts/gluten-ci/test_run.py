@@ -575,7 +575,8 @@ import sys
 from zipfile import ZipFile
 
 assert sys.argv[1:5] == ["-ntp", "clean", "install",
-    "-Pbackends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,lance,celeborn,uniffle"]
+    "-Pbackends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,lance,celeborn,uniffle,"
+    "bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon"]
 assert f"-Dmaven.repo.local={{os.environ['GLUTEN_MAVEN_REPO']}}" in sys.argv
 assert "-DskipTests" in sys.argv
 revision = subprocess.check_output(

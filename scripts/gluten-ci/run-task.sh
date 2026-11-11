@@ -19,6 +19,14 @@
 set -euo pipefail
 
 kind=$1 stage=$2 spark=$3 jdk=$4 profiles=$5 selector=$6
+# Connector UT dependencies are opt-in to the Bolt task, not shared backend profiles.
+if [[ ",$profiles," == *,backends-bolt,* ]]; then
+  for connector in delta hudi iceberg paimon; do
+    if [[ ",$profiles," == *,"$connector",* ]]; then
+      profiles+=",bolt-ut-$connector"
+    fi
+  done
+fi
 export GLUTEN_DIR=$7 BOLT_HOME=$8
 bolt=$BOLT_HOME
 export GLUTEN_CI_DRIVER_DIR=$9 GLUTEN_REPORTS_DIR=${10}
