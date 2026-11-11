@@ -321,6 +321,53 @@ TEST(TypeTest, dateToString) {
   EXPECT_EQ(DATE()->toString(-1855961014), "-5079479-05-03");
 }
 
+TEST(TypeTest, dateToStringOptions) {
+  const DateToStringOptions proleptic = {
+      .leadingPositiveSign = true,
+      .zeroPaddingYear = true,
+  };
+  const DateToStringOptions yearOfEra = {
+      .zeroPaddingYear = true,
+      .yearOfEra = true,
+  };
+  struct TestCase {
+    int32_t day;
+    const char* original;
+    const char* proleptic;
+    const char* yearOfEra;
+  };
+  const std::vector<TestCase> cases = {
+      {0, "1970-01-01", "1970-01-01", "1970-01-01"},
+      {-719162, "1-01-01", "0001-01-01", "0001-01-01"},
+      {-719528, "-01-01", "0000-01-01", "0001-01-01"},
+      {-719893, "-1-01-01", "-0001-01-01", "0002-01-01"},
+      {2932897, "10000-01-01", "+10000-01-01", "10000-01-01"},
+      // Proleptic boundary strings agree with Java LocalDate.ofEpochDay.
+      {std::numeric_limits<int32_t>::min(),
+       "-5877641-06-23",
+       "-5877641-06-23",
+       "5877642-06-23"},
+      {std::numeric_limits<int32_t>::max(),
+       "5881580-07-11",
+       "+5881580-07-11",
+       "5881580-07-11"},
+  };
+  for (const auto& sample : cases) {
+    SCOPED_TRACE(sample.day);
+    EXPECT_EQ(DATE()->toString(sample.day), sample.original);
+    EXPECT_EQ(
+        DATE()->toString(sample.day, DateToStringOptions{}), sample.original);
+    EXPECT_EQ(DATE()->toString(sample.day, proleptic), sample.proleptic);
+    EXPECT_EQ(DATE()->toString(sample.day, yearOfEra), sample.yearOfEra);
+  }
+  // Each presentation option can also be used independently.
+  EXPECT_EQ(DATE()->toString(-719893, {.yearOfEra = true}), "2-01-01");
+  EXPECT_EQ(
+      DATE()->toString(-719893, {.zeroPaddingYear = true}), "-0001-01-01");
+  EXPECT_EQ(
+      DATE()->toString(2932897, {.leadingPositiveSign = true}), "+10000-01-01");
+}
+
 TEST(TypeTest, parseStringToDate) {
   auto parseDate = [](const std::string& dateStr) {
     return DATE()->toDays(dateStr);

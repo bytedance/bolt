@@ -1362,6 +1362,18 @@ FOLLY_ALWAYS_INLINE bool Type::isIntervalYearMonth() const {
   return (this == INTERVAL_YEAR_MONTH().get());
 }
 
+struct DateToStringOptions {
+  /// Add '+' to positive years greater than 9999.
+  bool leadingPositiveSign = false;
+
+  /// Pad the year magnitude to at least four digits.
+  bool zeroPaddingYear = false;
+
+  /// Display proleptic years <= 0 as 1 - year (year of era).
+  /// This changes year presentation only, without calendar rebasing.
+  bool yearOfEra = false;
+};
+
 /// Date is represented as the number of days since epoch start using int32_t.
 class DateType : public IntegerType {
  private:
@@ -1386,6 +1398,8 @@ class DateType : public IntegerType {
   }
 
   std::string toString(int32_t days) const;
+
+  std::string toString(int32_t days, const DateToStringOptions& options) const;
 
   int32_t toDays(folly::StringPiece in, bool* nullOutput = nullptr) const;
 
