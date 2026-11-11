@@ -2022,27 +2022,29 @@ TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
   // Past cellSpillBytesPerStream for every stream of every partition, a
   // local writer spills at a batch boundary though nothing presses on its
   // memory - no pool limit, no reclaim; under a threshold its cells never
-  // reach, it spills nothing. On Celeborn, where a window is pushed only
-  // whole, the threshold changes nothing. Every row reads back, and a
-  // threshold that is not positive is an error.
+  // reach, the floor cellSpillMinBytes raised it to among them, it spills
+  // nothing. On Celeborn, where a window is pushed only whole, the
+  // threshold changes nothing. Every row reads back, and a threshold that
+  // is not positive, or a negative floor, is an error.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(83);
   for (const bool nested : {false, true}) {
-    // Some 10 MB of cells: far past 64 KiB a stream.
+    // Some 10 MB of cells: far past 64 KiB a stream, short of 64 MiB.
     const auto input = skewedInput(kPartitions, 8, 4096, 50, 600, nested, rng);
     for (const bool rss : {false, true}) {
       SCOPED_TRACE(fmt::format(
           "{}, {}", nested ? "nested" : "flat", rss ? "rss" : "local"));
-      const auto write = [&](int64_t bytesPerStream) {
+      const auto write = [&](int64_t bytesPerStream, int64_t minBytes) {
         auto options = writerOptions(kPartitions, rss);
         options.cellOptions.cellSpillBytesPerStream = bytesPerStream;
+        options.cellOptions.cellSpillMinBytes = minBytes;
         auto written = test::writeShuffle(options, input, pool());
         test::expectReadsBack(
             input, written, arrow::Compression::LZ4_FRAME, pool());
         return written;
       };
-      const auto low = write(64 << 10);
-      const auto high = write(std::numeric_limits<int64_t>::max());
+      const auto low = write(64 << 10, 0);
+      const auto high = write(std::numeric_limits<int64_t>::max(), 0);
       if (rss) {
         EXPECT_EQ(low.metrics.spillCount, high.metrics.spillCount);
         EXPECT_EQ(
@@ -2053,17 +2055,25 @@ TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
         // need not move.
         EXPECT_GT(low.metrics.totalSpillFiles, 0);
         EXPECT_EQ(high.metrics.totalSpillFiles, 0);
+        EXPECT_EQ(write(64 << 10, 64 << 20).metrics.totalSpillFiles, 0);
       }
     }
   }
 
-  auto options = writerOptions(kPartitions);
-  options.cellOptions.cellSpillBytesPerStream = 0;
-  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
   const auto input = spreadInput(kPartitions, 1, 16, rng);
-  BOLT_ASSERT_USER_THROW(
-      writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
-      "cellSpillBytesPerStream must be positive");
+  const auto expectRejected = [&](int64_t bytesPerStream,
+                                  int64_t minBytes,
+                                  const std::string& error) {
+    auto options = writerOptions(kPartitions);
+    options.cellOptions.cellSpillBytesPerStream = bytesPerStream;
+    options.cellOptions.cellSpillMinBytes = minBytes;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    BOLT_ASSERT_USER_THROW(
+        writer.split(test::withPid(input.pids[0], input.data[0], pool()), 0),
+        error);
+  };
+  expectRejected(0, 0, "cellSpillBytesPerStream must be positive");
+  expectRejected(64 << 10, -1, "cellSpillMinBytes must not be negative");
 }
 
 TEST_F(CellWriterTest, memorySpillRatioIsAShareOfTheMemoryLimit) {

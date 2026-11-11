@@ -128,13 +128,19 @@ struct CellShuffleOptions {
   int64_t reclaimRunFloorBytes = 64LL << 20;
   // Local shuffle: the cell data the writer holds per stream of every
   // partition before it spills without memory pressure. At a batch
-  // boundary, cell data past partitions x streams x this many bytes spills,
-  // the largest partitions first, down to half of it: the cells stay
-  // bounded, their frames large enough to compress well, and the rest of
-  // the memory keeps compressed spill data instead. When the product passes
-  // what memory allows, memory pressure comes first and the writer spills
-  // as before; a very large value turns this off. Must be positive.
+  // boundary, cell data past partitions x streams x this many bytes, and
+  // at least cellSpillMinBytes, spills, the largest partitions first, down
+  // to half of it: the cells stay bounded, their frames large enough to
+  // compress well, and the rest of the memory keeps compressed spill data
+  // instead. When the threshold passes what memory allows, memory pressure
+  // comes first and the writer spills as before; a very large value turns
+  // this off. Must be positive.
   int64_t cellSpillBytesPerStream = 512LL << 10;
+  // Local shuffle: the least threshold cellSpillBytesPerStream sets. A
+  // shuffle of a few partitions would otherwise spill its cells in runs of
+  // a few MiB, each a frame per stream for the reader to decompress. Must
+  // not be negative.
+  int64_t cellSpillMinBytes = 64LL << 20;
   // Seal a partition's payload at a batch boundary once it exceeds this
   // size; other partitions stay open.
   int64_t partitionSealBytes = 40LL << 20;

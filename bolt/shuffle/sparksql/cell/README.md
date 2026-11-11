@@ -63,7 +63,8 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | `cellMemorySpillRatio` | `0` (off) | Spill threshold on the chunk memory plus the spill memory, as a share of the writer's memory limit: the tighter of its pool's cap and the task's execution memory, which the `CellShuffleWriter init` line shows with the threshold (`memorySpillThreshold`). From `0` to `2`, as a task may hold more than its share while fewer tasks run; `0`, or no limit, is off. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
 | `spillMemoryBytes` | `-1` | Local only: the newest spill data - runs, sealed payloads, composite blocks - kept in memory, at most this many bytes (see [Spill memory](#spill-memory-local)). `-1` is no cap of its own: it grows until the first memory pressure; `0` is off. |
 | `reclaimRunFloorBytes` | `64 MiB` | Local only: the cell data a writer must hold before a reclaim of a given size writes a run; below it, the reclaim frees only idle chunks and the spill memory. In effect the smaller of this and an eighth of the memory limit, this with none (see [Reclaim policy](#reclaim-policy-local)). `0` is off; a negative value is an error. |
-| `cellSpillBytesPerStream` | `512 KiB` | Local only: the cell data the writer holds per stream of every partition before it spills without memory pressure: at a batch boundary, cell data past partitions x streams x this many bytes spills the largest partitions down to half (see [Cell threshold](#cell-threshold-local)). A very large value turns it off; it must be positive. |
+| `cellSpillBytesPerStream` | `512 KiB` | Local only: the cell data the writer holds per stream of every partition before it spills without memory pressure: at a batch boundary, cell data past partitions x streams x this many bytes, and at least `cellSpillMinBytes`, spills the largest partitions down to half (see [Cell threshold](#cell-threshold-local)). A very large value turns it off; it must be positive. |
+| `cellSpillMinBytes` | `64 MiB` | Local only: the least threshold `cellSpillBytesPerStream` sets, so that a shuffle of a few partitions does not spill its cells in runs of a few MiB. A negative value is an error. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
 | `enableStringDictionary` | `true` | Probe the first batch to enable dictionary form per string column. |
@@ -238,14 +239,17 @@ mid-seal is deferred to the next boundary.
 The cells hold data not yet compressed; the spill memory holds compressed
 data, several times more rows per byte. So the writer bounds the cells
 without waiting for memory pressure: at a batch boundary, cell data past
-`cellSpillBytesPerStream` (512 KiB) for every stream of every partition
-spills the largest partitions down to half of that, into the spill memory.
+`cellSpillBytesPerStream` (512 KiB) for every stream of every partition,
+and at least `cellSpillMinBytes` (64 MiB), spills the largest partitions
+down to half of that, into the spill memory.
 The other partitions grow on until the next time, so the spills of a
 uniform shuffle spread over the partitions instead of coming together.
 A stream's frames carry about its share of the threshold, a wide stream's
-more: the narrow streams beside it leave it theirs.
+more: the narrow streams beside it leave it theirs. The floor keeps a
+shuffle of a few partitions, whose product is a few MiB, from spilling
+runs that small, each a frame per stream for the reader to decompress.
 
-When partitions x streams x 512 KiB passes what memory allows, memory
+When the threshold passes what memory allows, memory
 pressure comes first and the writer spills as it did before, at a reclaim
 or a chunk growth. The `CellShuffleWriter init` log line shows the
 threshold (`cellSpillThreshold`), and the pressure line counts its runs

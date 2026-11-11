@@ -43,11 +43,12 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design). Locally, at a batch boundary, cell data past the
 /// cell threshold - CellShuffleOptions::cellSpillBytesPerStream for every
-/// stream of every partition - spills the largest partitions down to half
-/// of it, without memory pressure. Under pressure, the choke point is
-/// reserveChunk() at chunk growth, where a failed maybeReserve - or the
-/// memory threshold passed, CellShuffleOptions::cellMemorySpillRatio of the
-/// memory limit - spills the largest partitions until half the cell data is
+/// stream of every partition, at least cellSpillMinBytes - spills the
+/// largest partitions down to half of it, without memory pressure. Under
+/// pressure, the choke point is reserveChunk() at chunk growth, where a
+/// failed maybeReserve - or the memory threshold passed,
+/// CellShuffleOptions::cellMemorySpillRatio of the memory limit - spills
+/// the largest partitions until half the cell data is
 /// covered. A reclaim frees idle chunks first, then runs
 /// partial spills and compaction, and spills everything only when those
 /// fall short; one of a given size writes no run while the cells hold less
@@ -226,7 +227,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   int64_t memorySpillThresholdBytes_{0};
   /// The cell threshold: cell data past it spills at the next batch
   /// boundary, down to half. CellShuffleOptions::cellSpillBytesPerStream
-  /// times the partitions and streams, saturating; set at the first batch.
+  /// times the partitions and streams, saturating, and at least
+  /// cellSpillMinBytes; set at the first batch.
   uint64_t cellSpillThresholdBytes_{0};
   PressureStats pressure_;
   /// Time the flat path spends decoding the columns of its batches and
