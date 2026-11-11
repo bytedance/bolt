@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Check the pinned Gluten workflow mirror
+        run: python3 .github/scripts/sync_gluten_ci_workflow.py
       - name: Compute CI fingerprint
         id: fingerprint
         run: |
@@ -246,12 +248,32 @@ jobs:
           "$PYTHON_CI" -I -B -m unittest discover \
             -s "$GITHUB_WORKSPACE/bolt/python/tests/integration" -p 'test_*.py' -v
 
+  gluten-backend-compile:
+    name: Compile Gluten Bolt backend
+    needs: reuse-check
+    if: ${{ needs.reuse-check.outputs.hit != 'true' }}
+    uses: ./.github/workflows/bolt_backend_x86.yml
+    with:
+      mode: compile
+      bolt_repository: ${{ github.repository }}
+      bolt_sha: ${{ github.sha }}
+      gluten_repository: apache/gluten
+      # Pin Apache source after the required native/test changes land on its main branch.
+      gluten_sha: APACHE_GLUTEN_COMMIT_REQUIRED
+      helper_repository: ${{ github.repository }}
+      helper_sha: ${{ github.sha }}
+      driver_repository: bytedance/bolt
+      driver_sha: 72f74589df524b2f4a7695b4f10c5b13a95812e8
+
   source-result:
-    needs: [reuse-check, changes, build-test, build-only, python-check]
+    needs: [reuse-check, changes, build-test, build-only, python-check, gluten-backend-compile]
     if: >-
       ${{ always() &&
           needs.reuse-check.result == 'success' &&
           needs.changes.result == 'success' &&
+          (needs.gluten-backend-compile.result == 'success' ||
+           (needs.gluten-backend-compile.result == 'skipped' &&
+            needs.reuse-check.outputs.hit == 'true')) &&
           (needs.build-test.result == 'success' ||
            needs.build-test.result == 'skipped') &&
           (needs.build-only.result == 'success' ||
