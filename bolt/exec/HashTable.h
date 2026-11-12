@@ -341,9 +341,9 @@ class BaseHashTable {
   /// owned by 'this'.
   virtual int64_t allocatedBytes() const = 0;
 
-  /// Deletes any content of 'this' but does not free the memory. Can
-  /// be used for flushing a partial group by, for example.
-  virtual void clear() = 0;
+  /// Deletes all rows. Retains the lookup allocation for reuse unless
+  /// 'freeTable' is true, for example after spilling all rows.
+  virtual void clear(bool freeTable = false) = 0;
 
   /// Returns the capacity of the internal hash table which is number of rows
   /// it can stores in a group by or hash join build.
@@ -724,7 +724,11 @@ class HashTable : public BaseHashTable {
       int32_t maxRows,
       char** rows) override;
 
-  void clear() override;
+  void clear(bool freeTable = false) override;
+
+  char** testingTable() const {
+    return table_;
+  }
 
   void directAddRows(
       HashLookup& lookup,

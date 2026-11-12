@@ -432,6 +432,8 @@ class GroupingSet {
 
   void adjustBypassHashTable(common::SpillConfig* spillConf);
 
+  void clearTableAfterSpill();
+
   std::vector<column_index_t> keyChannels_;
 
   /// A subset of grouping keys on which the input is clustered.
