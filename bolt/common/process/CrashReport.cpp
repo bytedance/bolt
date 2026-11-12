@@ -19,14 +19,19 @@
 #include <backtrace.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#if defined(OS_MACOSX)
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#else
 #include <link.h>
+#endif
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <libunwind.h>
 #endif
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <time.h>
-#include <ucontext.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -223,6 +228,53 @@ const char* engineName(StackTraceEngine engine) {
   return "unknown";
 }
 
+#if defined(OS_MACOSX)
+void cacheLoadedObject(
+    const mach_header* header,
+    intptr_t slide,
+    const char* path) {
+  const size_t objectIndex = static_cast<size_t>(kLoadedObjectCount);
+  if (objectIndex >= kMaxLoadedObjects) {
+    return;
+  }
+
+  uintptr_t begin = UINTPTR_MAX;
+  uintptr_t end = 0;
+  const auto* command = reinterpret_cast<const load_command*>(header + 1);
+  for (uint32_t index = 0; index < header->ncmds; ++index) {
+    if (command->cmd == LC_SEGMENT_64) {
+      const auto* segment =
+          reinterpret_cast<const segment_command_64*>(command);
+      if (segment->vmsize != 0) {
+        const uintptr_t segmentBegin =
+            static_cast<uintptr_t>(slide) + segment->vmaddr;
+        const uintptr_t segmentEnd = segmentBegin + segment->vmsize;
+        if (segmentBegin < begin) {
+          begin = segmentBegin;
+        }
+        if (segmentEnd > end) {
+          end = segmentEnd;
+        }
+      }
+    }
+    command = reinterpret_cast<const load_command*>(
+        reinterpret_cast<const char*>(command) + command->cmdsize);
+  }
+  if (begin == UINTPTR_MAX || end <= begin) {
+    return;
+  }
+
+  auto& object = kLoadedObjects[objectIndex];
+  object.begin = begin;
+  object.end = end;
+  object.loadBias = static_cast<uintptr_t>(slide);
+  copyString(
+      object.path,
+      sizeof(object.path),
+      path == nullptr || path[0] == '\0' ? "<main-executable>" : path);
+  kLoadedObjectCount = static_cast<sig_atomic_t>(objectIndex + 1);
+}
+#else
 int32_t cacheLoadedObject(
     struct dl_phdr_info* info,
     size_t /* size */,
@@ -267,25 +319,43 @@ int32_t cacheLoadedObject(
   kLoadedObjectCount = static_cast<sig_atomic_t>(objectIndex + 1);
   return 0;
 }
+#endif
 
 void cacheLoadedObjects() {
 #if defined(__linux__)
   const ssize_t pathLength =
       readlink("/proc/self/exe", kExecutablePath, sizeof(kExecutablePath) - 1);
-#elif defined(__FreeBSD__)
-  const ssize_t pathLength = readlink(
-      "/proc/curproc/file", kExecutablePath, sizeof(kExecutablePath) - 1);
-#else
-  const ssize_t pathLength = -1;
-#endif
   if (pathLength > 0) {
     kExecutablePath[pathLength] = '\0';
   } else {
     kExecutablePath[0] = '\0';
   }
+#elif defined(__FreeBSD__)
+  const ssize_t pathLength = readlink(
+      "/proc/curproc/file", kExecutablePath, sizeof(kExecutablePath) - 1);
+  if (pathLength > 0) {
+    kExecutablePath[pathLength] = '\0';
+  } else {
+    kExecutablePath[0] = '\0';
+  }
+#else
+  kExecutablePath[0] = '\0';
+#endif
 
   kLoadedObjectCount = 0;
+#if defined(OS_MACOSX)
+  const uint32_t imageCount = _dyld_image_count();
+  for (uint32_t index = 0; index < imageCount &&
+       static_cast<size_t>(kLoadedObjectCount) < kMaxLoadedObjects;
+       ++index) {
+    cacheLoadedObject(
+        _dyld_get_image_header(index),
+        _dyld_get_image_vmaddr_slide(index),
+        _dyld_get_image_name(index));
+  }
+#else
   (void)dl_iterate_phdr(cacheLoadedObject, nullptr);
+#endif
   if (static_cast<size_t>(kLoadedObjectCount) == kMaxLoadedObjects) {
     writeToStderr(
         "[CrashReporter] Warning: Loaded-object cache is full; addresses in "
@@ -523,7 +593,10 @@ uintptr_t getInstructionPointer(void* ucontext) {
     return 0;
   }
 
-#if defined(__x86_64__) && defined(REG_RIP)
+#if defined(OS_MACOSX) && defined(__aarch64__)
+  const auto* context = static_cast<const ucontext_t*>(ucontext);
+  return static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#elif defined(__x86_64__) && defined(REG_RIP)
   const auto* context = static_cast<const ucontext_t*>(ucontext);
   return static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__aarch64__)

@@ -38,6 +38,9 @@ class EventFd {
 
  private:
   ScopedFd fd_;
+#if defined(OS_MACOSX)
+  ScopedFd notifyFd_;
+#endif
 };
 
 } // namespace bytedance::bolt::memory::bm
