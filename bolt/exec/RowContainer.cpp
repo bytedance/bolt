@@ -908,18 +908,29 @@ void RowContainer::extractStringsBatch(
   auto* rawValues = result->mutableRawValues();
   auto maxRows = numRows + resultOffset;
   const bool useRowNumbers = !rowNumbers.empty();
-  // Allocate the null bitmap only when a null can appear in this batch: the
-  // column has nulls, or row-number extraction maps entries to missing rows.
-  // This keeps mayHaveNulls() false for null-free columns, matching the
-  // per-row extraction semantics.
   const bool hasMissingRows = useRowNumbers &&
       std::any_of(rowNumbers.begin(),
                   rowNumbers.end(),
                   [](vector_size_t rowNumber) { return rowNumber < 0; });
   uint64_t* rawNulls = nullptr;
-  if (hasNulls || hasMissingRows) {
-    auto& nullBuffer = result->mutableNulls(maxRows);
-    rawNulls = nullBuffer->asMutable<uint64_t>();
+  // Keep updating a bitmap left over from a previous use of this result
+  // vector so stale NULL bits are cleared for rows this batch overwrites,
+  // and allocate one lazily when the first null is written. A fresh
+  // null-free extraction leaves the vector without a bitmap, so
+  // mayHaveNulls() stays false, matching the per-row extraction semantics.
+  auto ensureNulls = [&]() {
+    if (rawNulls == nullptr) {
+      auto& nullBuffer = result->mutableNulls(maxRows);
+      rawNulls = nullBuffer->asMutable<uint64_t>();
+      // Rows produced before the first null are non-null by construction;
+      // zero the window so they read as valid.
+      for (int32_t j = resultOffset; j < maxRows; ++j) {
+        bits::setNull(rawNulls, j, false);
+      }
+    }
+  };
+  if (result->mayHaveNulls() || hasNulls || hasMissingRows) {
+    ensureNulls();
   }
 
   struct RowMeta {
@@ -959,8 +970,7 @@ void RowContainer::extractStringsBatch(
     auto resultIndex = resultOffset + i;
 
     if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
-      // Reaching a null implies hasNulls or a missing row number, so the
-      // bitmap was allocated above.
+      ensureNulls();
       bits::setNull(rawNulls, resultIndex, true);
       meta[i] = {nullptr, 0, false};
     } else {
@@ -1049,18 +1059,29 @@ void RowContainer::extractContinuousStringsBatch(
   auto* rawValues = result->mutableRawValues();
   auto maxRows = numRows + resultOffset;
   const bool useRowNumbers = !rowNumbers.empty();
-  // Allocate the null bitmap only when a null can appear in this batch: the
-  // column has nulls, or row-number extraction maps entries to missing rows.
-  // This keeps mayHaveNulls() false for null-free columns, matching the
-  // per-row extraction semantics.
   const bool hasMissingRows = useRowNumbers &&
       std::any_of(rowNumbers.begin(),
                   rowNumbers.end(),
                   [](vector_size_t rowNumber) { return rowNumber < 0; });
   uint64_t* rawNulls = nullptr;
-  if (hasNulls || hasMissingRows) {
-    auto& nullBuffer = result->mutableNulls(maxRows);
-    rawNulls = nullBuffer->asMutable<uint64_t>();
+  // Keep updating a bitmap left over from a previous use of this result
+  // vector so stale NULL bits are cleared for rows this batch overwrites,
+  // and allocate one lazily when the first null is written. A fresh
+  // null-free extraction leaves the vector without a bitmap, so
+  // mayHaveNulls() stays false, matching the per-row extraction semantics.
+  auto ensureNulls = [&]() {
+    if (rawNulls == nullptr) {
+      auto& nullBuffer = result->mutableNulls(maxRows);
+      rawNulls = nullBuffer->asMutable<uint64_t>();
+      // Rows produced before the first null are non-null by construction;
+      // zero the window so they read as valid.
+      for (int32_t j = resultOffset; j < maxRows; ++j) {
+        bits::setNull(rawNulls, j, false);
+      }
+    }
+  };
+  if (result->mayHaveNulls() || hasNulls || hasMissingRows) {
+    ensureNulls();
   }
 
   struct RowMeta {
@@ -1099,8 +1120,7 @@ void RowContainer::extractContinuousStringsBatch(
     auto resultIndex = resultOffset + i;
 
     if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
-      // Reaching a null implies hasNulls or a missing row number, so the
-      // bitmap was allocated above.
+      ensureNulls();
       bits::setNull(rawNulls, resultIndex, true);
       meta[i] = {nullptr, 0};
     } else {
