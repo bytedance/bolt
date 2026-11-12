@@ -18,7 +18,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 
-#if defined(OS_MACOSX)
+#if defined(__APPLE__)
 #include <fcntl.h>
 #else
 #include <sys/eventfd.h>
@@ -30,7 +30,7 @@
 namespace bytedance::bolt::memory::bm {
 
 EventFd::EventFd() {
-#if defined(OS_MACOSX)
+#if defined(__APPLE__)
   int pipeFds[2];
   BOLT_CHECK_EQ(::pipe(pipeFds), 0, "pipe failed: {}", std::strerror(errno));
   fd_.reset(pipeFds[0]);
@@ -60,7 +60,7 @@ int EventFd::fd() const {
 void EventFd::notify() const {
   uint64_t value = 1;
   while (true) {
-#if defined(OS_MACOSX)
+#if defined(__APPLE__)
     const auto written = ::write(notifyFd_.get(), &value, sizeof(value));
 #else
     const auto written = ::write(fd_.get(), &value, sizeof(value));

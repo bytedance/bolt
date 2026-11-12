@@ -69,6 +69,17 @@ TEST(CrashReportTest, ReportsAndTerminatesWithOriginalSignal) {
 }
 
 TEST(CrashReportTest, FormatsLibunwindBackendConsistently) {
+#if defined(OS_MACOSX)
+  // macOS reports the fault PC even though this backend cannot unwind frames.
+  const char* expected =
+      "Instruction pointer: 0x(.|\n)*elf=0x(.|\n)*in [?][?]"
+      "(.|\n)*Stack trace \\(best-effort, backend=libunwind\\):"
+      "(.|\n)*raw unwinding is unsupported on this platform";
+#else
+  const char* expected =
+      "Stack trace \\(best-effort, backend=libunwind\\):"
+      "(.|\n)*#   0 0x(.|\n)*elf=0x(.|\n)*in [?][?]";
+#endif
   EXPECT_EXIT(
       {
         disableCoreDumps();
@@ -77,8 +88,7 @@ TEST(CrashReportTest, FormatsLibunwindBackendConsistently) {
         _exit(99);
       },
       testing::KilledBySignal(SIGABRT),
-      "Stack trace \\(best-effort, backend=libunwind\\):"
-      "(.|\n)*#   0 0x(.|\n)*elf=0x(.|\n)*in [?][?]");
+      expected);
 }
 
 TEST(CrashReportTest, FormatsBacktraceBackendConsistently) {

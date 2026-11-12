@@ -38,7 +38,8 @@ class EventFd {
 
  private:
   ScopedFd fd_;
-#if defined(OS_MACOSX)
+  // Keep the layout independent of private build-system definitions.
+#if defined(__APPLE__)
   ScopedFd notifyFd_;
 #endif
 };

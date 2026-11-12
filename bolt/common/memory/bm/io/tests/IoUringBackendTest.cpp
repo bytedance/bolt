@@ -34,7 +34,7 @@
 
 using namespace bytedance::bolt::memory::bm;
 
-#ifdef IO_URING_SUPPORTED
+#if defined(IO_URING_SUPPORTED) || defined(OS_MACOSX)
 namespace {
 
 std::unique_ptr<char[]> makeBuffer(size_t size) {
@@ -92,11 +92,13 @@ std::unique_ptr<DiskIoSchedulerImpl> makeSchedulerOrSkip(
     return std::make_unique<DiskIoSchedulerImpl>(
         config, std::make_unique<IoUringBackend>(config.ringDepth));
   } catch (const std::exception& ex) {
+#ifdef IO_URING_SUPPORTED
     if (std::string(ex.what()).find("Operation not permitted") !=
         std::string::npos) {
       skipReason = "io_uring is not permitted in this runtime";
       return nullptr;
     }
+#endif
     throw;
   }
 }
@@ -144,5 +146,28 @@ TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {
   EXPECT_EQ(0, result.bytes);
   EXPECT_EQ(IoErrorCode::BackendIoError, result.error);
   EXPECT_EQ(EBADF, result.nativeErrorCode);
+}
+
+TEST(IoUringBackendTest, shortReadReturnsPartialBuffer) {
+  TempFd file;
+  ASSERT_GE(file.fd(), 0);
+  const std::string contents(1024, 's');
+  ASSERT_EQ(
+      contents.size(), ::write(file.fd(), contents.data(), contents.size()));
+
+  std::string skipReason;
+  auto scheduler = makeSchedulerOrSkip(makeConfig(), skipReason);
+  if (!scheduler) {
+    GTEST_SKIP() << skipReason;
+  }
+
+  auto request = makeRequest(IoOpcode::Read, file.fd(), makeBuffer(4096));
+  auto result = scheduler->submit(std::move(request)).get();
+  EXPECT_EQ(IoErrorCode::ShortIo, result.error);
+  EXPECT_EQ(contents.size(), result.bytes);
+  EXPECT_EQ(0, result.nativeErrorCode);
+  ASSERT_NE(nullptr, result.buffer.data());
+  EXPECT_EQ(
+      0, std::memcmp(contents.data(), result.buffer.data(), contents.size()));
 }
 #endif

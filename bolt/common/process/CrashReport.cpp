@@ -21,7 +21,7 @@
 #include <execinfo.h>
 #if defined(OS_MACOSX)
 #include <mach-o/dyld.h>
-#include <mach-o/loader.h>
+#include "bolt/common/process/MachOImage-inl.h"
 #else
 #include <link.h>
 #endif
@@ -46,7 +46,12 @@ namespace {
 constexpr size_t kSafeStrlenMax = 40960;
 constexpr size_t kAlternateStackSize = 64 * 1024;
 constexpr size_t kMaxStackFrames = 100;
+#if defined(OS_MACOSX)
+constexpr size_t kMaxLoadedObjects = 1024;
+constexpr size_t kMaxLoadedSegments = 4096;
+#else
 constexpr size_t kMaxLoadedObjects = 256;
+#endif
 constexpr size_t kMaxObjectPathSize = 1024;
 constexpr const char* kJsigLibSymbol = "JVM_get_signal_action";
 
@@ -58,8 +63,13 @@ struct FatalSignalState {
 };
 
 struct LoadedObject {
+#if defined(OS_MACOSX)
+  size_t firstSegment;
+  size_t segmentCount;
+#else
   uintptr_t begin;
   uintptr_t end;
+#endif
   uintptr_t loadBias;
   char path[kMaxObjectPathSize];
 };
@@ -94,6 +104,11 @@ volatile sig_atomic_t kSelectedEngine{
 volatile sig_atomic_t kOfflineDemangle{0};
 struct backtrace_state* kBacktraceState{nullptr};
 LoadedObject kLoadedObjects[kMaxLoadedObjects]{};
+#if defined(OS_MACOSX)
+// Paths are stored once per image, not once per executable segment.
+detail::MachOSegment kLoadedSegments[kMaxLoadedSegments]{};
+size_t kLoadedSegmentCount{0};
+#endif
 volatile sig_atomic_t kLoadedObjectCount{0};
 char kExecutablePath[kMaxObjectPathSize]{};
 
@@ -238,35 +253,36 @@ void cacheLoadedObject(
     return;
   }
 
-  uintptr_t begin = UINTPTR_MAX;
-  uintptr_t end = 0;
-  const auto* command = reinterpret_cast<const load_command*>(header + 1);
-  for (uint32_t index = 0; index < header->ncmds; ++index) {
-    if (command->cmd == LC_SEGMENT_64) {
-      const auto* segment =
-          reinterpret_cast<const segment_command_64*>(command);
-      if (segment->vmsize != 0) {
-        const uintptr_t segmentBegin =
-            static_cast<uintptr_t>(slide) + segment->vmaddr;
-        const uintptr_t segmentEnd = segmentBegin + segment->vmsize;
-        if (segmentBegin < begin) {
-          begin = segmentBegin;
-        }
-        if (segmentEnd > end) {
-          end = segmentEnd;
-        }
-      }
-    }
-    command = reinterpret_cast<const load_command*>(
-        reinterpret_cast<const char*>(command) + command->cmdsize);
+  if (header == nullptr) {
+    return;
   }
-  if (begin == UINTPTR_MAX || end <= begin) {
+  const size_t headerSize = detail::machOHeaderSize(header->magic);
+  if (headerSize == 0 || header->sizeofcmds > SIZE_MAX - headerSize) {
+    return;
+  }
+  // dyld owns the mapped header and command region; validate every command
+  // against that region before reading its fields.
+  size_t segmentCount = 0;
+  if (!detail::collectMachOExecutableSegments(
+          header,
+          headerSize + header->sizeofcmds,
+          slide,
+          kLoadedSegments + kLoadedSegmentCount,
+          kMaxLoadedSegments - kLoadedSegmentCount,
+          segmentCount)) {
+    writeToStderr(
+        "[CrashReporter] Warning: Skipping image with invalid Mach-O commands "
+        "or a full executable-segment cache.\n");
+    return;
+  }
+  if (segmentCount == 0) {
     return;
   }
 
   auto& object = kLoadedObjects[objectIndex];
-  object.begin = begin;
-  object.end = end;
+  object.firstSegment = kLoadedSegmentCount;
+  object.segmentCount = segmentCount;
+  kLoadedSegmentCount += segmentCount;
   object.loadBias = static_cast<uintptr_t>(slide);
   copyString(
       object.path,
@@ -344,6 +360,7 @@ void cacheLoadedObjects() {
 
   kLoadedObjectCount = 0;
 #if defined(OS_MACOSX)
+  kLoadedSegmentCount = 0;
   const uint32_t imageCount = _dyld_image_count();
   for (uint32_t index = 0; index < imageCount &&
        static_cast<size_t>(kLoadedObjectCount) < kMaxLoadedObjects;
@@ -367,9 +384,20 @@ const LoadedObject* findLoadedObject(uintptr_t address) {
   const size_t objectCount = static_cast<size_t>(kLoadedObjectCount);
   for (size_t index = 0; index < objectCount; ++index) {
     const auto& object = kLoadedObjects[index];
+#if defined(OS_MACOSX)
+    for (size_t segmentIndex = object.firstSegment;
+         segmentIndex < object.firstSegment + object.segmentCount;
+         ++segmentIndex) {
+      const auto& segment = kLoadedSegments[segmentIndex];
+      if (segment.contains(address)) {
+        return &object;
+      }
+    }
+#else
     if (address >= object.begin && address < object.end) {
       return &object;
     }
+#endif
   }
   return nullptr;
 }
