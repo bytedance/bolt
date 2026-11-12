@@ -26,6 +26,7 @@
 #include <random>
 #include <sstream>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/exec/radixsort/RadixSortKey.h"
 #include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 #include "bolt/exec/radixsort/RadixSortRun.h"
@@ -872,6 +873,75 @@ TEST_F(RadixSortKeyCodecTest, mapVarcharVarcharKeyCanonicalOrdering) {
   verifyAllFlags({makeStringStringMaps()});
 }
 
+TEST_F(RadixSortKeyCodecTest, mapCardinalityAndInterleavedValues) {
+  auto maps = makeMaps(
+      {1, 2, 2, 2, 2, 2, 0, std::nullopt},
+      makeStringVector(
+          VARCHAR(), {"z", "a", "b", "b", "a", "c", "a", "a", "b", "a", "c"}),
+      makeStringVector(
+          VARCHAR(),
+          {"same",
+           "same",
+           "same",
+           "a",
+           "z",
+           "a",
+           "a",
+           std::nullopt,
+           "same",
+           "a",
+           "same"}));
+  verifyAllFlags({maps});
+  // Exercise recursion and fields following the variable-length Map body.
+  verifyAllFlags({makeArrays({1, 1, 1, 1, 1, 1, 1, 1}, maps)});
+}
+
+TEST_F(RadixSortKeyCodecTest, mapFloatingPointValuesAndNestedKeys) {
+  auto maps = makeMaps(
+      {1, 2, 2, 2},
+      makeVector<int32_t>(INTEGER(), {9, 1, 2, 1, 3, 1, 3}),
+      makeVector<double>(
+          DOUBLE(),
+          {0,
+           10,
+           0,
+           std::numeric_limits<double>::quiet_NaN(),
+           0,
+           std::numeric_limits<double>::infinity(),
+           0}));
+  // Floating-point keys/values use the custom encoded comparator as well as
+  // byte sorting; it must consume the same cardinality/interleaved layout.
+  verifyAllFlags({maps});
+  auto outer =
+      makeMaps({2, 2}, maps, makeVector<int64_t>(BIGINT(), {0, 1, 0, 1}));
+  verifyAllFlags({outer});
+}
+
+TEST_F(RadixSortKeyCodecTest, sparkMapDecodeRejectsInvalidCardinality) {
+  if (!kSparkCompatible) {
+    GTEST_SKIP() << "Tests Spark's cardinality-prefixed Map encoding";
+  }
+  std::unique_ptr<RadixSortKeyCodec> codec;
+  RadixSortKeyCodec::bind({MAP(INTEGER(), INTEGER())}, {CompareFlags{}}, codec);
+  for (const std::string bytes :
+       {std::string("\x02\x00\x00\x00", 4),
+        std::string("\x02\x00\x00\x00\x01", 5),
+        std::string("\x02\x7f\xff\xff\xff\x01\x01", 7),
+        std::string("\x02\x00\x00\x00\x01\x02\x01", 7)}) {
+    SCOPED_TRACE(hex(bytes));
+    const std::array<EncodedKeyView, 1> keys{EncodedKeyView{bytes}};
+    BufferPtr scratch;
+    RowVectorPtr result;
+    EXPECT_THROW(
+        codec->decode(keys, {}, {}, pool_.get(), scratch, result),
+        BoltException);
+    ASSERT_NE(result, nullptr);
+    auto* map = result->childAt(0)->as<MapVector>();
+    EXPECT_EQ(map->mapKeys()->size(), 0);
+    EXPECT_EQ(map->mapValues()->size(), 0);
+  }
+}
+
 TEST_F(RadixSortKeyCodecTest, mapKeyEncodingDoesNotCanonicalizeInput) {
   const std::array<vector_size_t, 3> offsets{0, 3, 6};
   const std::array<vector_size_t, 3> sizes{3, 3, 2};
@@ -1042,8 +1112,10 @@ TEST_F(RadixSortKeyCodecTest, nestedComplexVariableKeySizes) {
   auto run = createRun(input, compareFlags);
   ASSERT_TRUE(run->keyLayout().isVariable());
   ASSERT_EQ(run->size(), 3);
-  EXPECT_EQ(logicalKeyAt(*run, 0).size(), 34);
-  EXPECT_EQ(logicalKeyAt(*run, 1).size(), 15);
+  // Each non-null Map uses a four-byte count in Spark, rather than two
+  // delimiters. Row 0 contains one non-null Map, row 1 contains two.
+  EXPECT_EQ(logicalKeyAt(*run, 0).size(), kSparkCompatible ? 36 : 34);
+  EXPECT_EQ(logicalKeyAt(*run, 1).size(), kSparkCompatible ? 19 : 15);
   EXPECT_EQ(logicalKeyAt(*run, 2).size(), 7);
 }
 
