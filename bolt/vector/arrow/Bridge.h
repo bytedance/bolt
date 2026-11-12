@@ -181,11 +181,12 @@ class ReusableArrowBatchPool {
   /// the schema was rebuilt, and false if a cached schema was reused. The
   /// caller releases schema and array through their release callbacks.
   ///
-  /// This pool is not thread-safe. Export and release all Arrow structures
-  /// produced by a pool, including any moved child arrays, using external
-  /// synchronization. The pool must outlive all Arrow structures exported from
-  /// it. The supplied MemoryPool must outlive the ReusableArrowBatchPool
-  /// because reusable slots may retain small scratch buffers between exports.
+  /// Export calls must be serialized. Release callbacks for distinct exported
+  /// structures, including moved child arrays, may run concurrently with export
+  /// and with each other. Do not release the same structure concurrently. The
+  /// pool must outlive all Arrow structures exported from it. The supplied
+  /// MemoryPool must outlive the ReusableArrowBatchPool because reusable slots
+  /// may retain small scratch buffers between exports.
   bool exportToArrow(
       const VectorPtr& vector,
       memory::MemoryPool* pool,

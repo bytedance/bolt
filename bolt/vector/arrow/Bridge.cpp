@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <string_view>
 #include <utility>
 #include "bolt/buffer/Buffer.h"
@@ -166,6 +167,8 @@ class BoltToArrowBridgeHolder {
   struct ReusableReleaseState {
     // Child nodes stay at stable addresses, but consumers may move an
     // ArrowArray before releasing it. Keep the stable tree here for reuse.
+    // Parent release calls child callbacks while holding the same slot lock.
+    std::recursive_mutex mutex;
     std::atomic_size_t activeCount{0};
     std::atomic_bool inUse{false};
   };
@@ -201,6 +204,10 @@ class BoltToArrowBridgeHolder {
 
   bool ownsReleaseState() const {
     return ownsReleaseState_;
+  }
+
+  std::shared_ptr<ReusableReleaseState> releaseState() const {
+    return releaseState_;
   }
 
   bool tryAcquireReusableSlot() {
@@ -488,13 +495,6 @@ class BoltToArrowBridgeHolder {
   void resetReusableNode(ArrowArray& releasedArray) {
     if (active_) {
       resetLocalBuffers();
-      active_ = false;
-      const auto previousActiveCount =
-          releaseState_->activeCount.fetch_sub(1, std::memory_order_acq_rel);
-      BOLT_CHECK_GT(previousActiveCount, 0);
-      if (previousActiveCount == 1) {
-        releaseState_->inUse.store(false, std::memory_order_release);
-      }
     }
 
     if (registeredArray_ != nullptr) {
@@ -504,6 +504,16 @@ class BoltToArrowBridgeHolder {
     if (registeredArray_ != &releasedArray) {
       resetArrowArray(releasedArray, nullptr);
       releasedArray.private_data = nullptr;
+    }
+
+    if (active_) {
+      active_ = false;
+      const auto previousActiveCount =
+          releaseState_->activeCount.fetch_sub(1, std::memory_order_acq_rel);
+      BOLT_CHECK_GT(previousActiveCount, 0);
+      if (previousActiveCount == 1) {
+        releaseState_->inUse.store(false, std::memory_order_release);
+      }
     }
   }
 
@@ -623,6 +633,8 @@ static void releaseArrowArray(ArrowArray* arrowArray) {
   auto* bridgeHolder =
       static_cast<BoltToArrowBridgeHolder*>(arrowArray->private_data);
   if (bridgeHolder && bridgeHolder->reusable()) {
+    auto releaseState = bridgeHolder->releaseState();
+    std::lock_guard<std::recursive_mutex> lock(releaseState->mutex);
     if (bridgeHolder->ownsReleaseState()) {
       bridgeHolder->resetReusableArray(*arrowArray);
     } else {
@@ -4047,6 +4059,8 @@ class ArraySlot {
  public:
   ArraySlot() {
     initializeReusableArrowArray(array_);
+    releaseState_ = static_cast<BoltToArrowBridgeHolder*>(array_.private_data)
+                        ->releaseState();
   }
 
   ArraySlot(const ArraySlot&) = delete;
@@ -4060,6 +4074,8 @@ class ArraySlot {
       const VectorPtr& vector,
       memory::MemoryPool* pool,
       const ArrowOptions& options) {
+    auto releaseState = releaseState_;
+    std::lock_guard<std::recursive_mutex> lock(releaseState->mutex);
     // The consumer's array release callback returns this lease. The source
     // ArrowArray may already look released after ownership is moved.
     auto* holder = static_cast<BoltToArrowBridgeHolder*>(array_.private_data);
@@ -4074,6 +4090,8 @@ class ArraySlot {
     } catch (...) {
       releaseReusableArrowArray(array_);
       initializeReusableArrowArray(array_);
+      releaseState_ = static_cast<BoltToArrowBridgeHolder*>(array_.private_data)
+                          ->releaseState();
       throw;
     }
   }
@@ -4083,6 +4101,8 @@ class ArraySlot {
   }
 
   void release() {
+    auto releaseState = releaseState_;
+    std::lock_guard<std::recursive_mutex> lock(releaseState->mutex);
     if (array_.release != nullptr) {
       array_.release(&array_);
     }
@@ -4090,6 +4110,7 @@ class ArraySlot {
 
  private:
   ArrowArray array_{};
+  std::shared_ptr<BoltToArrowBridgeHolder::ReusableReleaseState> releaseState_;
 };
 
 struct CachedSchema {
