@@ -35,6 +35,7 @@
 #include "bolt/functions/lib/string/StringImpl.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/FloatingDecimal.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 using namespace bytedance::bolt;
@@ -636,7 +637,7 @@ class Converter {
       }
     } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
-        to.set(DATE()->toString(from, dateToStringOptions_));
+        to.set(util::dateToString(from, dateToStringOptions_));
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
       }
@@ -851,7 +852,7 @@ class Converter {
   const tz::TimeZone* timeZone_ = nullptr;
   bool isFlinkCompatible_ = false;
   bool trimStringToFloatingPointControlChars_ = false;
-  DateToStringOptions dateToStringOptions_;
+  util::DateToStringOptions dateToStringOptions_;
 
   bool canAsInlinedStr_ = false;
 };

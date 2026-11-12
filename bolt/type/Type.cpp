@@ -1088,30 +1088,7 @@ std::string IntervalYearMonthType::valueToString(int32_t value) const {
 }
 
 std::string DateType::toString(int32_t days) const {
-  return toString(days, DateToStringOptions{});
-}
-
-std::string DateType::toString(int32_t days, const DateToStringOptions& options)
-    const {
-  // Find the number of seconds for the days_;
-  // Casting 86400 to int64 to handle overflows gracefully.
-  int64_t daySeconds = days * (int64_t)(86400);
-  std::tm tmValue;
-  BOLT_CHECK(
-      Timestamp::epochToUtc(daySeconds, tmValue),
-      "Can't convert days to dates: {}",
-      days);
-  constexpr int32_t kTmYearBase = 1900;
-  const auto year = tmValue.tm_year + kTmYearBase;
-  if (options.yearOfEra && year <= 0) {
-    tmValue.tm_year = 1 - year - kTmYearBase;
-  }
-  const TimestampToStringOptions formatOptions = {
-      .leadingPositiveSign = options.leadingPositiveSign,
-      .zeroPaddingYear = options.zeroPaddingYear,
-      .mode = TimestampToStringOptions::Mode::kDateOnly,
-  };
-  return Timestamp::tmToString(tmValue, 0, formatOptions);
+  return util::dateToString(days, {});
 }
 
 int32_t DateType::toDays(folly::StringPiece in, bool* nullOutput) const {
