@@ -35,6 +35,57 @@ class MapSumAggTest : public AggregationTestBase {
     decimalType2_ = DECIMAL(22, 11);
   }
 
+  MapVectorPtr makeEncodedMapInput(bool nestedKeys, bool nestedValues) {
+    auto indices = makeIndices({0, 0, 1, 0});
+    auto keys = wrapInDictionary(
+        indices,
+        makeFlatVector<StringView>({"metric_zero_total", "metric_one"}));
+    auto values = wrapInDictionary(indices, makeFlatVector<int64_t>({0, 1}));
+    auto identity = makeIndices({0, 1, 2, 3});
+    if (nestedKeys) {
+      keys = wrapInDictionary(identity, keys);
+    }
+    if (nestedValues) {
+      values = wrapInDictionary(identity, values);
+    }
+
+    // Map row 3 uses child elements 2 and 3. Decoding nested dictionaries
+    // with map row selection {3} leaves child element 2 undecoded.
+    return makeMapVector({0, 1, 2, 2}, keys, values);
+  }
+
+  void testEncodedMapInput(
+      const VectorPtr& maps,
+      const VectorPtr& mask = nullptr) {
+    std::vector<VectorPtr> columns{
+        makeFlatVector<int32_t>(maps->size(), [](auto /*row*/) { return 7; }),
+        maps};
+    if (mask) {
+      columns.push_back(mask);
+    }
+    auto input = makeRowVector(columns);
+    auto expectedMap = makeMapVector<StringView, int64_t>(
+        {{{"metric_one", 1}, {"metric_zero_total", 0}}});
+
+    // The merge companion feeds the encoded input directly to the
+    // intermediate-input APIs, without a partial aggregation flattening it.
+    for (const auto* name : {"aggregate_map_sum", "aggregate_map_sum_merge"}) {
+      SCOPED_TRACE(name);
+      auto aggregate =
+          fmt::format("{}(c1){}", name, mask ? " FILTER (WHERE c2)" : "");
+      // Keep the original encodings instead of round-tripping through files.
+      testAggregations(
+          {input}, {}, {aggregate}, {makeRowVector({expectedMap})}, {}, false);
+      testAggregations(
+          {input},
+          {"c0"},
+          {aggregate},
+          {makeRowVector({makeFlatVector<int32_t>({7}), expectedMap})},
+          {},
+          false);
+    }
+  }
+
   template <bool isDecimal, typename TValue>
   void testGlobal(
       std::vector<std::vector<std::pair<StringView, std::optional<TValue>>>>
@@ -304,6 +355,36 @@ TEST_F(MapSumAggTest, simpleGroupBy) {
   auto key = std::vector<int>{0, 0, 1, 1};
 
   testGroupBy(data, key);
+}
+
+TEST_F(MapSumAggTest, dictionaryEncodedChildren) {
+  for (bool nestedKeys : {false, true}) {
+    for (bool nestedValues : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "nestedKeys={}, nestedValues={}", nestedKeys, nestedValues));
+      auto maps = makeEncodedMapInput(nestedKeys, nestedValues);
+      {
+        SCOPED_TRACE("dictionary map");
+        testEncodedMapInput(wrapInDictionary(makeIndices({3}), maps));
+      }
+      {
+        SCOPED_TRACE("constant map");
+        testEncodedMapInput(BaseVector::wrapInConstant(1, 3, maps));
+      }
+    }
+  }
+}
+
+TEST_F(MapSumAggTest, sparseEncodedChildren) {
+  for (bool nestedKeys : {false, true}) {
+    for (bool nestedValues : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "nestedKeys={}, nestedValues={}", nestedKeys, nestedValues));
+      testEncodedMapInput(
+          makeEncodedMapInput(nestedKeys, nestedValues),
+          makeFlatVector<bool>({false, false, false, true}));
+    }
+  }
 }
 
 TEST_F(MapSumAggTest, global) {
