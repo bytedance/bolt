@@ -16,10 +16,14 @@
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
+#include <bit>
+#include <type_traits>
+#include <unordered_map>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/process/ProcessBase.h"
 #include "bolt/exec/HashTable.h"
+#include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HashTableSimdTestUtil.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -64,7 +68,94 @@ class HashTableSimdJoinTest : public HiveConnectorTestBase {
              [](auto row) { return row % 41 == 0; }),
          makeFlatVector<int64_t>(numRows, [](auto row) { return row + 1; })});
   }
+
+  template <typename T>
+  void testComplexNanPayloadAndSignedZeroKeysWithRehash() {
+    using Bits =
+        std::conditional_t<std::is_same_v<T, float>, uint32_t, uint64_t>;
+    constexpr Bits kNanPayloadA =
+        std::is_same_v<T, float> ? 0x7fc00001ULL : 0x7ff8000000000001ULL;
+    constexpr Bits kNanPayloadB =
+        std::is_same_v<T, float> ? 0x7fc00011ULL : 0x7ff8000000000011ULL;
+    const auto nanA = std::bit_cast<T>(kNanPayloadA);
+    const auto nanB = std::bit_cast<T>(kNanPayloadB);
+    constexpr vector_size_t kFiniteKeys = 4096;
+
+    const auto buildValues = makeFlatVector<T>(kFiniteKeys + 2, [&](auto row) {
+      if (row == 0) {
+        return nanA;
+      }
+      if (row == 1) {
+        return static_cast<T>(0.0);
+      }
+      return static_cast<T>(row - 1);
+    });
+    const auto buildVector = makeRowVector(
+        {"u_k", "u_v"},
+        {makeRowVector({"v"}, {buildValues}),
+         makeFlatVector<int64_t>(
+             kFiniteKeys + 2, [](auto row) { return row; })});
+    const auto probeVector = makeRowVector(
+        {"t_k", "t_v"},
+        {makeRowVector(
+             {"v"}, {makeFlatVector<T>({nanB, static_cast<T>(-0.0)})}),
+         makeFlatVector<int64_t>({10, 20})});
+    const auto idGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    const auto plan =
+        PlanBuilder(idGenerator)
+            .values({probeVector})
+            .hashJoin(
+                {"t_k"},
+                {"u_k"},
+                PlanBuilder(idGenerator).values({buildVector}).planNode(),
+                "",
+                {"t_v", "u_v"},
+                core::JoinType::kInner)
+            .planNode();
+
+    for (const bool simdEnabled : {false, true}) {
+      if (simdEnabled && !process::hasAvx2()) {
+        continue;
+      }
+      SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+      std::shared_ptr<Task> task;
+      const auto result =
+          AssertQueryBuilder(plan)
+              .config(core::QueryConfig::kHashAdaptivityEnabled, "false")
+              .config(core::QueryConfig::kSimdHashTableEnabled, simdEnabled)
+              .maxDrivers(1)
+              .copyResults(pool_.get(), task);
+      const auto stats =
+          toPlanStats(task->taskStats()).at(plan->id()).customStats;
+      ASSERT_GT(stats.at("hashtable.numRehashes").sum, 0);
+      ASSERT_EQ(stats.at("hashtable.hashModeHash").sum, 1);
+
+      ASSERT_EQ(result->size(), 2);
+      const auto* probePayload =
+          result->childAt(0)->asUnchecked<SimpleVector<int64_t>>();
+      const auto* buildPayload =
+          result->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+      std::unordered_map<int64_t, int64_t> matches;
+      for (vector_size_t row = 0; row < result->size(); ++row) {
+        matches.emplace(probePayload->valueAt(row), buildPayload->valueAt(row));
+      }
+      EXPECT_EQ(
+          matches, (std::unordered_map<int64_t, int64_t>{{10, 0}, {20, 1}}));
+    }
+  }
 };
+
+TEST_F(
+    HashTableSimdJoinTest,
+    complexNanPayloadAndSignedZeroKeysWithRehashReal) {
+  testComplexNanPayloadAndSignedZeroKeysWithRehash<float>();
+}
+
+TEST_F(
+    HashTableSimdJoinTest,
+    complexNanPayloadAndSignedZeroKeysWithRehashDouble) {
+  testComplexNanPayloadAndSignedZeroKeysWithRehash<double>();
+}
 
 TEST_F(HashTableSimdJoinTest, inner) {
   if (!process::hasAvx2()) {
