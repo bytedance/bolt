@@ -1968,6 +1968,27 @@ TEST_F(RowContainerTest, extractStringsBatchNullRowsAndVectorReuse) {
       EXPECT_FALSE(result->isNullAt(i)) << "at " << i;
       EXPECT_TRUE(strings->equalValueAt(result.get(), i, i)) << "at " << i;
     }
+
+    // Two-stage extraction into one fresh vector: the first stage is
+    // null-free (no bitmap yet); the second stage writes nulls at an
+    // offset, which allocates the bitmap for the first time. Rows
+    // produced by the first stage must stay valid.
+    auto staged = BaseVector::create(strings->type(), size, pool_.get());
+    container.extractColumn(rows.data(), size / 2, 0, staged);
+    std::vector<char*> secondHalf(size - size / 2, nullptr);
+    for (auto i = 1; i < secondHalf.size(); i += 2) {
+      secondHalf[i] = rows[size / 2 + i];
+    }
+    container.extractColumn(
+        secondHalf.data(), secondHalf.size(), 0, size / 2, staged);
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (i >= size / 2 && (i - size / 2) % 2 == 0) {
+        EXPECT_TRUE(staged->isNullAt(i)) << "at " << i;
+      } else {
+        EXPECT_FALSE(staged->isNullAt(i)) << "at " << i;
+        EXPECT_TRUE(strings->equalValueAt(staged.get(), i, i)) << "at " << i;
+      }
+    }
   }
 }
 

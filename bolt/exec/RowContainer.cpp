@@ -920,12 +920,17 @@ void RowContainer::extractStringsBatch(
   // mayHaveNulls() stays false, matching the per-row extraction semantics.
   auto ensureNulls = [&]() {
     if (rawNulls == nullptr) {
+      const bool freshBitmap = !result->mayHaveNulls();
       auto& nullBuffer = result->mutableNulls(maxRows);
       rawNulls = nullBuffer->asMutable<uint64_t>();
-      // Rows produced before the first null are non-null by construction;
-      // zero the window so they read as valid.
-      for (int32_t j = resultOffset; j < maxRows; ++j) {
-        bits::setNull(rawNulls, j, false);
+      if (freshBitmap) {
+        // mutableNulls() initializes a fresh buffer to all-null. Every row
+        // produced so far -- this batch's prefix included -- is non-null by
+        // construction, so clear the whole range before writing nulls.
+        const auto clearEnd = std::max<vector_size_t>(maxRows, result->size());
+        for (int32_t j = 0; j < clearEnd; ++j) {
+          bits::setNull(rawNulls, j, false);
+        }
       }
     }
   };
@@ -1071,12 +1076,17 @@ void RowContainer::extractContinuousStringsBatch(
   // mayHaveNulls() stays false, matching the per-row extraction semantics.
   auto ensureNulls = [&]() {
     if (rawNulls == nullptr) {
+      const bool freshBitmap = !result->mayHaveNulls();
       auto& nullBuffer = result->mutableNulls(maxRows);
       rawNulls = nullBuffer->asMutable<uint64_t>();
-      // Rows produced before the first null are non-null by construction;
-      // zero the window so they read as valid.
-      for (int32_t j = resultOffset; j < maxRows; ++j) {
-        bits::setNull(rawNulls, j, false);
+      if (freshBitmap) {
+        // mutableNulls() initializes a fresh buffer to all-null. Every row
+        // produced so far -- this batch's prefix included -- is non-null by
+        // construction, so clear the whole range before writing nulls.
+        const auto clearEnd = std::max<vector_size_t>(maxRows, result->size());
+        for (int32_t j = 0; j < clearEnd; ++j) {
+          bits::setNull(rawNulls, j, false);
+        }
       }
     }
   };
