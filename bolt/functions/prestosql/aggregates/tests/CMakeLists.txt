@@ -48,6 +48,7 @@ set(
   GeometricMeanTest.cpp
   HistogramTest.cpp
   MapAccumulatorTest.cpp
+  MapSumAggregateInputTest.cpp
   MapSumAggregateTest.cpp
   MinMaxByAggregationTest.cpp
   MinMaxTest.cpp
