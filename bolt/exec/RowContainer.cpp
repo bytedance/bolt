@@ -907,8 +907,20 @@ void RowContainer::extractStringsBatch(
     bool exactSize) {
   auto* rawValues = result->mutableRawValues();
   auto maxRows = numRows + resultOffset;
-  auto& nullBuffer = result->mutableNulls(maxRows);
-  auto* rawNulls = nullBuffer->asMutable<uint64_t>();
+  const bool useRowNumbers = !rowNumbers.empty();
+  // Allocate the null bitmap only when a null can appear in this batch: the
+  // column has nulls, or row-number extraction maps entries to missing rows.
+  // This keeps mayHaveNulls() false for null-free columns, matching the
+  // per-row extraction semantics.
+  const bool hasMissingRows = useRowNumbers &&
+      std::any_of(rowNumbers.begin(),
+                  rowNumbers.end(),
+                  [](vector_size_t rowNumber) { return rowNumber < 0; });
+  uint64_t* rawNulls = nullptr;
+  if (hasNulls || hasMissingRows) {
+    auto& nullBuffer = result->mutableNulls(maxRows);
+    rawNulls = nullBuffer->asMutable<uint64_t>();
+  }
 
   struct RowMeta {
     const char* data;
@@ -933,7 +945,6 @@ void RowContainer::extractStringsBatch(
   };
 
   size_t totalBytes = 0;
-  bool useRowNumbers = !rowNumbers.empty();
 
   // Phase 1: pre-scan the rows. Inline values are stored directly; for
   // out-of-line ones, record the source pointer and size for the copy below.
@@ -948,10 +959,14 @@ void RowContainer::extractStringsBatch(
     auto resultIndex = resultOffset + i;
 
     if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
+      // Reaching a null implies hasNulls or a missing row number, so the
+      // bitmap was allocated above.
       bits::setNull(rawNulls, resultIndex, true);
       meta[i] = {nullptr, 0, false};
     } else {
-      bits::setNull(rawNulls, resultIndex, false);
+      if (rawNulls != nullptr) {
+        bits::setNull(rawNulls, resultIndex, false);
+      }
       auto value = valueAt<StringView>(row, offset);
 
       if (value.isInline()) {
@@ -1033,8 +1048,20 @@ void RowContainer::extractContinuousStringsBatch(
     bool exactSize) {
   auto* rawValues = result->mutableRawValues();
   auto maxRows = numRows + resultOffset;
-  auto& nullBuffer = result->mutableNulls(maxRows);
-  auto* rawNulls = nullBuffer->asMutable<uint64_t>();
+  const bool useRowNumbers = !rowNumbers.empty();
+  // Allocate the null bitmap only when a null can appear in this batch: the
+  // column has nulls, or row-number extraction maps entries to missing rows.
+  // This keeps mayHaveNulls() false for null-free columns, matching the
+  // per-row extraction semantics.
+  const bool hasMissingRows = useRowNumbers &&
+      std::any_of(rowNumbers.begin(),
+                  rowNumbers.end(),
+                  [](vector_size_t rowNumber) { return rowNumber < 0; });
+  uint64_t* rawNulls = nullptr;
+  if (hasNulls || hasMissingRows) {
+    auto& nullBuffer = result->mutableNulls(maxRows);
+    rawNulls = nullBuffer->asMutable<uint64_t>();
+  }
 
   struct RowMeta {
     const char* data;
@@ -1058,7 +1085,6 @@ void RowContainer::extractContinuousStringsBatch(
   };
 
   size_t totalBytes = 0;
-  bool useRowNumbers = !rowNumbers.empty();
 
   // Phase 1: pre-scan the rows. Inline values are stored directly; for
   // out-of-line ones, record the source pointer and size for the copy below.
@@ -1073,10 +1099,14 @@ void RowContainer::extractContinuousStringsBatch(
     auto resultIndex = resultOffset + i;
 
     if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
+      // Reaching a null implies hasNulls or a missing row number, so the
+      // bitmap was allocated above.
       bits::setNull(rawNulls, resultIndex, true);
       meta[i] = {nullptr, 0};
     } else {
-      bits::setNull(rawNulls, resultIndex, false);
+      if (rawNulls != nullptr) {
+        bits::setNull(rawNulls, resultIndex, false);
+      }
       auto value = valueAt<StringView>(row, offset);
 
       if (value.isInline()) {
