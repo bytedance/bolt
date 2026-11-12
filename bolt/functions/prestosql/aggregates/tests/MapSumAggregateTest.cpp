@@ -37,9 +37,10 @@ class MapSumAggTest : public AggregationTestBase {
 
   MapVectorPtr makeEncodedMapInput(bool nestedKeys, bool nestedValues) {
     auto indices = makeIndices({0, 0, 1, 0});
+    // Use synthetic keys while covering both inline and out-of-line strings.
     auto keys = wrapInDictionary(
         indices,
-        makeFlatVector<StringView>({"metric_zero_total", "metric_one"}));
+        makeFlatVector<StringView>({"long_key_00000000", "short_key1"}));
     auto values = wrapInDictionary(indices, makeFlatVector<int64_t>({0, 1}));
     auto identity = makeIndices({0, 1, 2, 3});
     if (nestedKeys) {
@@ -65,7 +66,7 @@ class MapSumAggTest : public AggregationTestBase {
     }
     auto input = makeRowVector(columns);
     auto expectedMap = makeMapVector<StringView, int64_t>(
-        {{{"metric_one", 1}, {"metric_zero_total", 0}}});
+        {{{"short_key1", 1}, {"long_key_00000000", 0}}});
 
     // The merge companion feeds the encoded input directly to the
     // intermediate-input APIs, without a partial aggregation flattening it.
