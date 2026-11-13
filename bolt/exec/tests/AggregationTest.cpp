@@ -30,10 +30,12 @@
 
 #include <fmt/format.h>
 #include <folly/Math.h>
+#include <folly/ScopeGuard.h>
 #include <re2/re2.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/cudf/tests/CudfResource.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
@@ -1692,6 +1694,566 @@ TEST_P(AggregationTest, partialAggregationMaybeReservationReleaseCheck) {
   EXPECT_GT(kMaxPartialMemoryUsage, task->pool()->currentBytes());
 }
 
+TEST_P(AggregationTest, releasesOutputRangesBeforeDownstreamSort) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support statistics yet\n";
+  }
+
+  constexpr vector_size_t kNumRows = 200000;
+  constexpr int32_t kNumKeys = 8;
+  constexpr int32_t kNumValues = 24;
+  constexpr int32_t kNumColumns = kNumKeys + kNumValues;
+  std::vector<VectorPtr> columns;
+  columns.reserve(kNumColumns);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    columns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row * kNumKeys + column; }));
+  }
+  for (auto column = 0; column < kNumValues; ++column) {
+    columns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row + column; }));
+  }
+  auto data = makeRowVector(std::move(columns));
+
+  std::vector<std::string> groupingKeys;
+  groupingKeys.reserve(kNumKeys);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    groupingKeys.push_back(fmt::format("c{}", column));
+  }
+  std::vector<std::string> aggregates;
+  aggregates.reserve(kNumValues);
+  for (auto column = 0; column < kNumValues; ++column) {
+    aggregates.push_back(fmt::format("sum(c{})", kNumKeys + column));
+  }
+
+  core::PlanNodeId aggregationId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation(groupingKeys, aggregates)
+                  .capturePlanNodeId(aggregationId)
+                  .orderBy({"c0"}, false)
+                  .planNode();
+
+  std::vector<VectorPtr> expectedColumns;
+  expectedColumns.reserve(kNumColumns);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    expectedColumns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row * kNumKeys + column; }));
+  }
+  for (auto column = 0; column < kNumValues; ++column) {
+    expectedColumns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row + column; }));
+  }
+  auto expected = makeRowVector(std::move(expectedColumns));
+
+  for (const int32_t batchRows : {1000, 1024}) {
+    SCOPED_TRACE(batchRows);
+    bool releasedRowsDuringOutput = false;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::GroupingSet::getOutput",
+        std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+          const auto rows = groupingSet->numRows();
+          if (rows > 0 && rows < kNumRows) {
+            releasedRowsDuringOutput = true;
+          }
+        }));
+    auto task = AssertQueryBuilder(plan)
+                    .maxDrivers(1)
+                    .config(QueryConfig::kPreferredOutputBatchRows, batchRows)
+                    .config(QueryConfig::kMaxOutputBatchRows, batchRows)
+                    .assertResults({expected});
+    const auto stats = toPlanStats(task->taskStats());
+    const auto& aggStats = stats.at(aggregationId).customStats;
+    // Capacity is recorded during input, before final output releases lookup.
+    // Compare with the actual page-rounded allocation, not just occupied slots.
+    const auto capacity = aggStats.at("hashtable.capacity").sum;
+    ASSERT_GT(capacity, 0);
+    const auto lookupBytes = memory::AllocationTraits::pageBytes(
+        memory::AllocationTraits::numPages(capacity * sizeof(uint64_t)));
+    ASSERT_GT(aggStats.at("aggOutputReleasedBytes").sum, lookupBytes);
+    if (BOLT_TEST_VALUE_ENABLED()) {
+      EXPECT_TRUE(releasedRowsDuringOutput);
+    }
+  }
+}
+
+DEBUG_ONLY_TEST_P(AggregationTest, reclaimAfterOutputRangeRelease) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU aggregation does not support spilling";
+  }
+  constexpr int32_t kNumRows = 20000;
+  for (const auto& keys : std::vector<VectorPtr>{
+           makeFlatVector<int64_t>(kNumRows, [](auto row) { return row; }),
+           makeFlatVector<std::string>(kNumRows, [](auto row) {
+             return fmt::format("{:020d}-variable-key", row);
+           })}) {
+    SCOPED_TRACE(keys->type()->toString());
+    auto data = makeRowVector({
+        keys,
+        makeFlatVector<int64_t>(kNumRows, [](auto row) { return row * 10; }),
+    });
+    core::PlanNodeId aggregationId;
+    auto plan = PlanBuilder()
+                    .values({data})
+                    .singleAggregation({"c0"}, {"sum(c1)"})
+                    .capturePlanNodeId(aggregationId)
+                    .planNode();
+    for (const bool useMono : {false, true}) {
+      SCOPED_TRACE(useMono);
+      bool rowsReleased = false;
+      bool reclaimed = false;
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::GroupingSet::getOutput",
+          std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+            rowsReleased |=
+                groupingSet->numRows() > 0 && groupingSet->numRows() < kNumRows;
+          }));
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::Driver::runInternal::getOutput",
+          std::function<void(Operator*)>([&](Operator* op) {
+            if (op->operatorType() != "Aggregation" || !rowsReleased ||
+                reclaimed) {
+              return;
+            }
+            reclaimed = true;
+            memory::ScopedMemoryArbitrationContext arbitrationContext(
+                op->pool());
+            SuspendedSection suspended(op->testingOperatorCtx()->driver());
+            memory::MemoryReclaimer::Stats stats;
+            op->testingOperatorCtx()->task()->pool()->reclaim(0, 0, stats);
+            EXPECT_GT(stats.reclaimedBytes, 0);
+          }));
+      auto spillDirectory = TempDirectoryPath::create();
+      auto queryCtx = core::QueryCtx::create(executor_.get());
+      queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
+          queryCtx->queryId(), 1L << 30, memory::MemoryReclaimer::create()));
+      auto task = AssertQueryBuilder(plan)
+                      .maxDrivers(1)
+                      .queryCtx(queryCtx)
+                      .spillDirectory(spillDirectory->path)
+                      .config(QueryConfig::kUseMonoAlloc, useMono)
+                      .config(QueryConfig::kSpillEnabled, true)
+                      .config(QueryConfig::kAggregationSpillEnabled, true)
+                      .config(QueryConfig::kPreferredOutputBatchRows, 128)
+                      .config(QueryConfig::kMaxOutputBatchRows, 128)
+                      .assertResults({data});
+      EXPECT_TRUE(rowsReleased);
+      EXPECT_TRUE(reclaimed);
+      EXPECT_GT(
+          toPlanStats(task->taskStats()).at(aggregationId).spilledBytes, 0);
+      OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+    }
+  }
+}
+
+TEST_P(AggregationTest, releasesExternalStateDuringOutputRangeRelease) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU aggregation does not support external state";
+  }
+  constexpr int32_t kNumRows = 20000;
+  auto data = makeRowVector({
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            return fmt::format("{:020d}-external-state-key", row);
+          }),
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row * 10; }),
+  });
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation({"c0"}, {"sumnonpod(c1)"})
+                  .orderBy({"c0"}, false)
+                  .planNode();
+  for (const bool useMono : {false, true}) {
+    SCOPED_TRACE(useMono);
+    NonPODInt64::clearStats();
+    bool destroyedDuringOutput = false;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::GroupingSet::getOutput",
+        std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+          EXPECT_EQ(kNumRows - NonPODInt64::destructed, groupingSet->numRows());
+          destroyedDuringOutput |=
+              NonPODInt64::destructed > 0 && NonPODInt64::destructed < kNumRows;
+        }));
+    AssertQueryBuilder(plan)
+        .maxDrivers(1)
+        .config(QueryConfig::kUseMonoAlloc, useMono)
+        .config(QueryConfig::kPreferredOutputBatchRows, 128)
+        .config(QueryConfig::kMaxOutputBatchRows, 128)
+        .assertResults({data});
+    EXPECT_EQ(kNumRows, NonPODInt64::constructed);
+    EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
+    if (BOLT_TEST_VALUE_ENABLED()) {
+      EXPECT_TRUE(destroyedDuringOutput);
+    }
+  }
+}
+
+TEST_P(AggregationTest, externalStateRangeReleaseWithCompositeEnabled) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "CPU external-state output lifetime";
+  }
+  constexpr int32_t kRows = 4096;
+  registerSumNonPODAggregate("output_range_sumnonpod", 1);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row * 10; }),
+  });
+  for (const bool useMono : {false, true}) {
+    SCOPED_TRACE(useMono);
+    NonPODInt64::clearStats();
+    CursorParameters params;
+    params.planNode =
+        PlanBuilder()
+            .values({input})
+            .partialAggregation({"c0"}, {"output_range_sumnonpod(c1)"})
+            .planNode();
+    params.serialExecution = true;
+    params.copyResult = false;
+    params.queryConfigs = {
+        {QueryConfig::kUseMonoAlloc, useMono ? "true" : "false"},
+        {QueryConfig::kHashAggregationCompositeOutputEnabled, "true"},
+        {QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio, "1"},
+        {QueryConfig::kAbandonPartialAggregationMinRows, "8192"},
+        {QueryConfig::kMaxPartialAggregationMemory, "67108864"},
+        {QueryConfig::kPreferredOutputBatchRows, "128"},
+        {QueryConfig::kMaxOutputBatchRows, "128"},
+    };
+    auto cursor = TaskCursor::create(params);
+    auto sourceTask = cursor->task();
+    std::vector<RowVectorPtr> output;
+    while (cursor->moveNext()) {
+      auto batch = cursor->current();
+      // Fixed-size external state does not have a self-contained row format.
+      ASSERT_FALSE(RowVector::isComposite(batch));
+      output.push_back(std::move(batch));
+    }
+    cursor.reset();
+    ASSERT_TRUE(waitForTaskDriversToFinish(sourceTask.get()));
+    EXPECT_EQ(kRows, NonPODInt64::constructed);
+    EXPECT_EQ(kRows, NonPODInt64::destructed);
+    auto consumer =
+        PlanBuilder()
+            .values(output)
+            .finalAggregation(
+                {"c0"}, {"output_range_sumnonpod(a0)"}, {{BIGINT()}})
+            .planNode();
+    AssertQueryBuilder(consumer)
+        .maxDrivers(1)
+        .config(QueryConfig::kUseMonoAlloc, useMono)
+        .config(QueryConfig::kHashAggregationCompositeOutputEnabled, true)
+        .config(QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio, 1)
+        .assertResults({input});
+    EXPECT_EQ(2 * kRows, NonPODInt64::constructed);
+    EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
+  }
+}
+
+TEST_P(AggregationTest, releasesVariableRowsBeforeDownstreamSort) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU aggregation does not support these statistics";
+  }
+  constexpr int32_t kNumRows = 20000;
+  auto keys = makeFlatVector<std::string>(kNumRows, [](auto row) {
+    return fmt::format("{:020d}-variable-key", row);
+  });
+  auto data = makeRowVector({
+      keys,
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row * 10; }),
+  });
+  auto expected = makeRowVector({
+      keys,
+      makeArrayVector<int64_t>(
+          kNumRows,
+          [](auto /*row*/) { return 1; },
+          [](auto row) { return row * 10; }),
+  });
+  core::PlanNodeId aggregationId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation({"c0"}, {"array_agg(c1)"})
+                  .capturePlanNodeId(aggregationId)
+                  .orderBy({"c0"}, false)
+                  .planNode();
+  for (const bool useMono : {false, true}) {
+    SCOPED_TRACE(useMono);
+    bool releasedRowsDuringOutput = false;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::GroupingSet::getOutput",
+        std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+          releasedRowsDuringOutput |=
+              groupingSet->numRows() > 0 && groupingSet->numRows() < kNumRows;
+        }));
+    auto task = AssertQueryBuilder(plan)
+                    .maxDrivers(1)
+                    .config(QueryConfig::kUseMonoAlloc, useMono)
+                    .config(QueryConfig::kPreferredOutputBatchRows, 257)
+                    .config(QueryConfig::kMaxOutputBatchRows, 257)
+                    .assertResults({expected});
+    EXPECT_GT(
+        toPlanStats(task->taskStats())
+            .at(aggregationId)
+            .customStats.at("aggOutputReleasedBytes")
+            .sum,
+        0);
+    if (BOLT_TEST_VALUE_ENABLED()) {
+      EXPECT_TRUE(releasedRowsDuringOutput);
+    }
+  }
+}
+
+TEST_P(AggregationTest, outputRangeReleaseWithCompositePartialOutput) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU aggregation does not support composite output";
+  }
+  constexpr int32_t kNumRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            return fmt::format("{:020d}{}", row, std::string(128, 'x'));
+          }),
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row * 10; }),
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            // Exercise inline strings, pooled data and direct pool allocations.
+            const int32_t sizes[] = {
+                0,
+                5,
+                HashStringAllocator::kMaxAlloc - 1,
+                HashStringAllocator::kMaxAlloc,
+                HashStringAllocator::kMaxAlloc + 1,
+                row % 127 == 5 ? 4 * HashStringAllocator::kMaxAlloc : 128};
+            auto value = std::to_string(row);
+            value.resize(sizes[row % 6], 'x');
+            return value;
+          },
+          nullEvery(11)),
+  });
+  core::PlanNodeId partialId;
+  auto plan = PlanBuilder()
+                  .values({input})
+                  .partialAggregation({"c0"}, {"sum(c1)", "max(c2)"})
+                  .capturePlanNodeId(partialId)
+                  .finalAggregation()
+                  .planNode();
+  for (const bool composite : {false, true}) {
+    for (const bool useMono : {false, true}) {
+      SCOPED_TRACE(fmt::format("composite {}, mono {}", composite, useMono));
+      GroupingSet* partialGroupingSet = nullptr;
+      bool releasedRows = false;
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::GroupingSet::getOutput",
+          std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+            if (!partialGroupingSet) {
+              partialGroupingSet = groupingSet;
+            }
+            if (groupingSet != partialGroupingSet) {
+              return;
+            }
+            const auto rows = groupingSet->numRows();
+            releasedRows |= rows > 0 && rows < kNumRows;
+          }));
+      auto task =
+          AssertQueryBuilder(plan)
+              .maxDrivers(1)
+              .config(QueryConfig::kUseMonoAlloc, useMono)
+              .config(
+                  QueryConfig::kHashAggregationCompositeOutputEnabled,
+                  composite)
+              .config(
+                  QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio,
+                  1)
+              .config(
+                  QueryConfig::kAbandonPartialAggregationMinRows, kNumRows * 2)
+              .config(QueryConfig::kMaxPartialAggregationMemory, 64 << 20)
+              .config(QueryConfig::kPreferredOutputBatchRows, 128)
+              .config(QueryConfig::kMaxOutputBatchRows, 128)
+              .assertResults({input});
+      const auto stats =
+          toPlanStats(task->taskStats()).at(partialId).customStats;
+      EXPECT_EQ(composite, stats.at("aggregationOutputCompositeVector").sum);
+      // Also prove row release in optimized builds, where TestValue is off.
+      const auto capacity = stats.at("hashtable.capacity").sum;
+      ASSERT_GT(capacity, 0);
+      const auto lookupBytes = memory::AllocationTraits::pageBytes(
+          memory::AllocationTraits::numPages(capacity * sizeof(uint64_t)));
+      EXPECT_GT(stats.at("aggOutputReleasedBytes").sum, lookupBytes);
+      if (BOLT_TEST_VALUE_ENABLED()) {
+        EXPECT_NE(nullptr, partialGroupingSet);
+        EXPECT_TRUE(releasedRows);
+      }
+    }
+  }
+}
+
+TEST_P(AggregationTest, compositeOutputSurvivesSourceClose) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "CPU composite output lifetime";
+  }
+  constexpr int32_t kNumRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            return fmt::format("{:08d}{}", row, std::string(128, 'k'));
+          }),
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            return fmt::format(
+                "{:08d}{}",
+                row,
+                std::string(HashStringAllocator::kMaxAlloc, 'v'));
+          },
+          nullEvery(11)),
+  });
+  for (const bool useMono : {false, true}) {
+    for (const bool abortEarly : {false, true}) {
+      SCOPED_TRACE(fmt::format("mono {}, abort {}", useMono, abortEarly));
+      CursorParameters params;
+      core::PlanNodeId sourceId;
+      params.planNode =
+          PlanBuilder()
+              .values({input})
+              .partialAggregation({"c0", "c1"}, {"max(c2)", "min(c2)"})
+              .capturePlanNodeId(sourceId)
+              .planNode();
+      params.serialExecution = true;
+      params.copyResult = false;
+      params.queryConfigs = {
+          {QueryConfig::kUseMonoAlloc, useMono ? "true" : "false"},
+          {QueryConfig::kHashAggregationCompositeOutputEnabled, "true"},
+          {QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio, "1"},
+          {QueryConfig::kAbandonPartialAggregationMinRows, "8192"},
+          {QueryConfig::kMaxPartialAggregationMemory, "67108864"},
+          {QueryConfig::kPreferredOutputBatchRows, "128"},
+          {QueryConfig::kMaxOutputBatchRows, "128"},
+      };
+      auto cursor = TaskCursor::create(params);
+      // The task keeps output memory pools alive after the source operators
+      // close. Retained vectors must be destroyed before this task reference.
+      auto sourceTask = cursor->task();
+      auto closeSource = folly::makeGuard([&sourceTask] {
+        if (sourceTask->isRunning()) {
+          sourceTask->requestAbort().wait();
+        }
+      });
+      std::vector<RowVectorPtr> batches;
+      std::vector<vector_size_t> rowNumbers;
+      while (cursor->moveNext()) {
+        auto batch = cursor->current();
+        ASSERT_TRUE(RowVector::isComposite(batch));
+        const auto* keys = batch->childAt(0)->asFlatVector<int64_t>();
+        ASSERT_NE(nullptr, keys);
+        for (vector_size_t row = 0; row < batch->size(); ++row) {
+          const auto key = keys->valueAt(row);
+          ASSERT_GE(key, 0);
+          ASSERT_LT(key, kNumRows);
+          rowNumbers.push_back(key);
+        }
+        batches.push_back(std::move(batch));
+        if (abortEarly && rowNumbers.size() >= kNumRows / 2) {
+          sourceTask->requestAbort().wait();
+          break;
+        }
+      }
+      cursor.reset();
+      ASSERT_TRUE(waitForTaskDriversToFinish(sourceTask.get()));
+      EXPECT_EQ(!abortEarly, sourceTask->isFinished());
+      const auto sourceStats = toPlanStats(sourceTask->taskStats());
+      const auto& metrics = sourceStats.at(sourceId).customStats;
+      EXPECT_EQ(1, metrics.at("aggregationOutputCompositeVector").sum);
+      const auto lookupBytes = memory::AllocationTraits::pageBytes(
+          memory::AllocationTraits::numPages(
+              metrics.at("hashtable.capacity").sum * sizeof(uint64_t)));
+      EXPECT_GT(metrics.at("aggOutputReleasedBytes").sum, lookupBytes);
+      ASSERT_FALSE(batches.empty());
+      if (abortEarly) {
+        EXPECT_GE(rowNumbers.size(), kNumRows / 2);
+        EXPECT_LT(rowNumbers.size(), kNumRows);
+      } else {
+        EXPECT_EQ(kNumRows, rowNumbers.size());
+      }
+
+      auto indices = makeIndices(rowNumbers);
+      std::vector<VectorPtr> expectedColumns;
+      for (auto column : {0, 1, 2, 2}) {
+        expectedColumns.push_back(BaseVector::wrapInDictionary(
+            nullptr, indices, rowNumbers.size(), input->childAt(column)));
+      }
+      auto expected = makeRowVector(expectedColumns);
+      vector_size_t offset = 0;
+      for (const auto& batch : batches) {
+        bytedance::bolt::test::assertEqualVectors(
+            expectedColumns[1]->slice(offset, batch->size()),
+            batch->childAt(1));
+        offset += batch->size();
+      }
+      auto consumer =
+          PlanBuilder()
+              .values(batches)
+              .finalAggregation(
+                  {"c0", "c1"},
+                  {"max(a0)", "min(a1)"},
+                  {{input->childAt(2)->type()}, {input->childAt(2)->type()}})
+              .planNode();
+      AssertQueryBuilder(consumer)
+          .maxDrivers(1)
+          .config(QueryConfig::kUseMonoAlloc, useMono)
+          .config(QueryConfig::kHashAggregationCompositeOutputEnabled, true)
+          .config(
+              QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio, 1)
+          .assertResults({expected});
+    }
+  }
+}
+
+TEST_P(AggregationTest, preservesSortedStateDuringOutputRangeRelease) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU aggregation does not support sorted state";
+  }
+  constexpr int32_t kNumGroups = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(
+          kNumGroups * 2, [](auto row) { return row % kNumGroups; }),
+      makeFlatVector<int64_t>(
+          kNumGroups * 2, [](auto row) { return kNumGroups * 2 - row; }),
+  });
+  auto expected = makeRowVector({
+      makeFlatVector<int64_t>(kNumGroups, [](auto row) { return row; }),
+      makeArrayVector<int64_t>(
+          kNumGroups,
+          [](auto /*row*/) { return 2; },
+          [](auto element) {
+            return (element % 2 == 0 ? kNumGroups : 2 * kNumGroups) -
+                element / 2;
+          }),
+  });
+  auto plan = PlanBuilder()
+                  .values({input})
+                  .singleAggregation({"c0"}, {"array_agg(c1 ORDER BY c1)"})
+                  .orderBy({"c0"}, false)
+                  .planNode();
+  bool checkedRows = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::GroupingSet::getOutput",
+      std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+        checkedRows = true;
+        EXPECT_EQ(kNumGroups, groupingSet->numRows());
+      }));
+  AssertQueryBuilder(plan)
+      .maxDrivers(1)
+      .config(QueryConfig::kPreferredOutputBatchRows, 128)
+      .config(QueryConfig::kMaxOutputBatchRows, 128)
+      .assertResults({expected});
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    EXPECT_TRUE(checkedRows);
+  }
+}
+
 TEST_P(AggregationTest, spillWithMemoryLimit) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not support spilling\n";
@@ -3062,6 +3624,117 @@ TEST_P(AggregationTest, spillingForAggrsWithSorting) {
              .planNode();
   testPlan(
       plan, "SELECT c0 % 7, array_agg(c1 ORDER BY c1) FROM tmp GROUP BY 1");
+}
+
+TEST_P(AggregationTest, vidSplitOutputBatchSizeAfterRangeRelease) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "CPU output batch sizing";
+  }
+  const auto* sum = getAggregateFunctionEntry("sum");
+  ASSERT_NE(nullptr, sum);
+  registerAggregateFunction(
+      "vid_split_review_sum", sum->signatures, sum->factory);
+  constexpr int32_t kRows = 8192;
+  auto input = makeRowVector({
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("{:08d}{}", row, std::string(512, 'x'));
+          }),
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+  });
+  for (bool useMono : {false, true}) {
+    core::PlanNodeId aggId;
+    auto plan = PlanBuilder()
+                    .values({input})
+                    .singleAggregation({"c0"}, {"vid_split_review_sum(c1)"})
+                    .capturePlanNodeId(aggId)
+                    .planNode();
+    auto task = AssertQueryBuilder(plan)
+                    .maxDrivers(1)
+                    .config(QueryConfig::kUseMonoAlloc, useMono)
+                    .config(QueryConfig::kPreferredOutputBatchRows, 128)
+                    .config(QueryConfig::kMaxOutputBatchRows, 128)
+                    .config(QueryConfig::kPreferredOutputBatchBytes, 65536)
+                    .assertResults({input});
+    const auto stats = toPlanStats(task->taskStats());
+    // Normal batches are around 128 rows. Draining a range must not make the
+    // retained arena appear to belong to only the few remaining rows.
+    RecordProperty(
+        fmt::format("outputVectors_mono_{}", useMono),
+        std::to_string(stats.at(aggId).outputVectors));
+    EXPECT_LT(stats.at(aggId).outputVectors, kRows / 64);
+  }
+}
+
+TEST_P(AggregationTest, preGroupedAppendAfterOutputBatch) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "Direct GroupingSet test exercises the CPU implementation";
+  }
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1, 1, 2}),
+      makeFlatVector<int64_t>({10, 20, 30}),
+      makeFlatVector<int64_t>({100, 200, 300}),
+  });
+  auto node = std::dynamic_pointer_cast<const core::AggregationNode>(
+      PlanBuilder()
+          .values({input})
+          .aggregation(
+              {"c0", "c1"},
+              {"c0"},
+              {"sum(c2)"},
+              {},
+              core::AggregationNode::Step::kSingle,
+              false)
+          .planNode());
+  for (int batchSize : {1, 2, 3}) {
+    SCOPED_TRACE(batchSize);
+    core::PlanFragment fragment;
+    fragment.planNode = node;
+    auto task = Task::create(
+        "preGroupedAppend",
+        std::move(fragment),
+        0,
+        core::QueryCtx::create(executor_.get()),
+        Task::ExecutionMode::kParallel);
+    auto driver =
+        Driver::testingCreate(std::make_unique<DriverCtx>(task, 0, 0, 0, 0));
+    OperatorCtx context(driver->driverCtx(), node->id(), 0, "Aggregation");
+    std::shared_ptr<core::ExpressionEvaluator> evaluator;
+    auto aggregates = toAggregateInfo(*node, context, 2, evaluator);
+    tsan_atomic<bool> nonReclaimable{false};
+    GroupingSet groups(
+        asRowType(input->type()),
+        createVectorHashers(asRowType(input->type()), node->groupingKeys()),
+        {0},
+        std::move(aggregates),
+        false,
+        false,
+        true,
+        {},
+        std::nullopt,
+        nullptr,
+        &nonReclaimable,
+        &context);
+    groups.addInput(input, false);
+    ASSERT_EQ(2, groups.numRows());
+    RowContainerIterator iterator;
+    auto first =
+        BaseVector::create<RowVector>(node->outputType(), 0, pool_.get());
+    ASSERT_TRUE(groups.getOutput(batchSize, 1 << 20, iterator, first));
+    ASSERT_EQ(std::min(batchSize, 2), first->size());
+    groups.noMoreInput();
+    std::vector<RowVectorPtr> output{first};
+    for (;;) {
+      auto batch =
+          BaseVector::create<RowVector>(node->outputType(), 0, pool_.get());
+      if (!groups.getOutput(batchSize, 1 << 20, iterator, batch)) {
+        break;
+      }
+      output.push_back(batch);
+    }
+    assertEqualResults({input}, output);
+  }
 }
 
 TEST_P(AggregationTest, preGroupedAggregationWithSpilling) {

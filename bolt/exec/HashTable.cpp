@@ -923,6 +923,22 @@ void HashTable<ignoreNullKeys>::clear() {
 }
 
 template <bool ignoreNullKeys>
+uint64_t HashTable<ignoreNullKeys>::releaseTable() {
+  if (table_ == nullptr) {
+    return 0;
+  }
+  const auto releasedBytes = tableAllocation_.size();
+  rows_->pool()->freeContiguous(tableAllocation_);
+  table_ = nullptr;
+  capacity_ = 0;
+  sizeMask_ = 0;
+  bucketOffsetMask_ = 0;
+  numBuckets_ = 0;
+  numTombstones_ = 0;
+  return releasedBytes;
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::checkSize(
     int32_t numNew,
     bool initNormalizedKeys) {
@@ -2392,6 +2408,16 @@ void HashTable<ignoreNullKeys>::eraseWithHashes(
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::checkConsistency() const {
+  if (table_ == nullptr) {
+    // Final output may retain rows after releasing the lookup allocation.
+    BOLT_CHECK(tableAllocation_.empty());
+    BOLT_CHECK_EQ(capacity_, 0);
+    BOLT_CHECK_EQ(sizeMask_, 0);
+    BOLT_CHECK_EQ(bucketOffsetMask_, 0);
+    BOLT_CHECK_EQ(numBuckets_, 0);
+    BOLT_CHECK_EQ(numTombstones_, 0);
+    return;
+  }
   BOLT_CHECK_GE(capacity_, numDistinct_);
   if (hashMode_ == BaseHashTable::HashMode::kArray) {
     return;
