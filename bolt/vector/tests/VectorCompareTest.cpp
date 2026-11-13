@@ -32,6 +32,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -294,6 +295,38 @@ TEST_F(VectorCompareTest, compareNullAsIndeterminateArray) {
     test("[1, 2, null]", "[1, 3, null]", kOrderingDesc, 1);
     test("[1, 3, null]", "[1, 2, null]", kOrderingAsc, 1);
     test("[1, 3, null]", "[1, 2, null]", kOrderingDesc, -1);
+  }
+}
+
+TEST_F(VectorCompareTest, mapOrderingDialect) {
+  auto maps = makeMapVector<std::string, std::string>({
+      {{"z", "same"}},
+      {{"a", "same"}, {"b", "same"}},
+      {{"b", "a"}, {"a", "z"}},
+      {{"c", "a"}, {"a", "a"}},
+      {{"a", std::nullopt}, {"b", "same"}},
+      {{"a", "a"}, {"c", "same"}},
+      {},
+      {{"a", "z"}, {"b", "a"}},
+  });
+  for (bool ascending : {true, false}) {
+    for (bool nullsFirst : {true, false}) {
+      const CompareFlags flags{
+          .nullsFirst = nullsFirst, .ascending = ascending};
+      auto check =
+          [&](vector_size_t left, vector_size_t right, int spark, int presto) {
+            const auto expected = kSparkCompatible ? spark : presto;
+            const auto result =
+                maps->compare(maps.get(), left, right, flags).value();
+            EXPECT_EQ(
+                (result > 0) - (result < 0), ascending ? expected : -expected);
+          };
+      check(0, 1, -1, 1); // Cardinality precedes keys in Spark.
+      check(2, 3, 1, -1); // First value precedes the second key in Spark.
+      check(4, 5, -1, -1); // Spark's nested nulls always sort first ascending.
+      check(6, 0, -1, -1);
+      check(2, 7, 0, 0); // Insertion order does not affect comparison.
+    }
   }
 }
 
