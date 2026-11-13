@@ -29,11 +29,13 @@
 
 #include <algorithm>
 #include "bolt/functions/InlineFlatten.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/lib/StringUtil.h"
 #include "bolt/functions/lib/string/StringImpl.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/FloatingDecimal.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 using namespace bytedance::bolt;
@@ -311,6 +313,18 @@ class Converter {
     }
 
     const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+    if constexpr (
+        kIsInSpark && std::is_same_v<FromKind, DateKind> &&
+        std::is_same_v<ToKind, StringKind>) {
+      const bool legacyDateFormat =
+          functions::parseTimePolicy(queryConfig.timeParserPolicy()) ==
+          functions::TimePolicy::LEGACY;
+      dateToStringOptions_ = {
+          .leadingPositiveSign = !legacyDateFormat,
+          .zeroPaddingYear = true,
+          .yearOfEra = legacyDateFormat,
+      };
+    }
     auto sessionTzName = queryConfig.sessionTimezone();
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
       timeZone_ = tz::locateZone(sessionTzName);
@@ -623,8 +637,7 @@ class Converter {
       }
     } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
-        auto output = DATE()->toString(from);
-        to.set(output);
+        to.set(util::dateToString(from, dateToStringOptions_));
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
       }
@@ -839,6 +852,7 @@ class Converter {
   const tz::TimeZone* timeZone_ = nullptr;
   bool isFlinkCompatible_ = false;
   bool trimStringToFloatingPointControlChars_ = false;
+  util::DateToStringOptions dateToStringOptions_;
 
   bool canAsInlinedStr_ = false;
 };

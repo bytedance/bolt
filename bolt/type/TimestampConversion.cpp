@@ -661,6 +661,26 @@ int32_t getMaxDayOfMonth(int32_t year, int32_t month) {
   return isLeapYear(year) ? kLeapDays[month] : kNormalDays[month];
 }
 
+std::string dateToString(int32_t days, const DateToStringOptions& options) {
+  const int64_t daySeconds = static_cast<int64_t>(days) * kSecsPerDay;
+  std::tm tmValue;
+  BOLT_CHECK(
+      Timestamp::epochToUtc(daySeconds, tmValue),
+      "Can't convert days to dates: {}",
+      days);
+  constexpr int32_t kTmYearBase = 1900;
+  const auto year = tmValue.tm_year + kTmYearBase;
+  if (options.yearOfEra && year <= 0) {
+    tmValue.tm_year = 1 - year - kTmYearBase;
+  }
+  const TimestampToStringOptions formatOptions = {
+      .leadingPositiveSign = options.leadingPositiveSign,
+      .zeroPaddingYear = options.zeroPaddingYear,
+      .mode = TimestampToStringOptions::Mode::kDateOnly,
+  };
+  return Timestamp::tmToString(tmValue, 0, formatOptions);
+}
+
 int64_t daysBeforeMonthFirstDay(int32_t year, int32_t month) {
   return isLeapYear(year) ? kCumulativeLeapDays[month - 1]
                           : kCumulativeDays[month - 1];
