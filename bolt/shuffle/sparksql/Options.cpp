@@ -58,7 +58,7 @@ std::string CellShuffleOptions::toString() const {
       "cellMemorySpillRatio={} spillMemoryBytes={} reclaimRunFloorBytes={} "
       "cellSpillBytesPerStream={} cellSpillMinBytes={} partitionSealBytes={} "
       "nullMemLimitBytes={} "
-      "enableStringDictionary={} "
+      "enableStringDictionary={} stringDictionaryProbeRowCount={} "
       "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
       cellMemorySpillRatio,
       spillMemoryBytes,
@@ -68,6 +68,7 @@ std::string CellShuffleOptions::toString() const {
       partitionSealBytes,
       nullMemLimitBytes,
       enableStringDictionary,
+      stringDictionaryProbeRowCount,
       streamCompression,
       adaptiveCompression,
       nativeNestedTypes);

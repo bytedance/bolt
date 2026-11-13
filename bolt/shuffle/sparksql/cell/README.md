@@ -68,6 +68,7 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
 | `enableStringDictionary` | `true` | Probe the first batch to enable dictionary form per string column. |
+| `stringDictionaryProbeRowCount` | `64` | Minimum first-batch row count for the dictionary probe. `0` enables every eligible string column without probing, including all-null columns; runtime fallback still applies. Ignored when `enableStringDictionary` is off. |
 | `streamCompression` | `true` | Compress runs through the codec's stream form, from the cells through fixed buffers. Off, each frame is gathered into a spill-pool workspace and compressed at once. Codecs without a stream form are always one-shot. |
 | `adaptiveCompression` | `true` | After a frame that did not shrink, store the next frames of its kind without a codec call and retry one in ten. |
 | `nativeNestedTypes` | `true` | Shred ARRAY, MAP and ROW columns into a nested layout. Off, the type adapter packs them into one binary column. |
@@ -407,8 +408,11 @@ at the rows' positions are probed. A column qualifies when every distinct
 value is at most 63 bytes, they serialize into at most 63 bytes together,
 and the non-null rows are at least four times the distinct values. The
 decision is final because cell bytes are already in wire form. With
-`enableStringDictionary` off, or a first batch below 64 rows - a segment's
-sixteen entries four times each - no column uses it. A table scan sizes its
+`enableStringDictionary` off, or a first batch below `stringDictionaryProbeRowCount` rows
+(64 by default), no column uses it. Setting `stringDictionaryProbeRowCount` to `0` skips
+all first-batch checks and enables every eligible string column, including
+all-null columns; the nested row-position restriction and runtime fallback
+below still apply. A table scan sizes its
 batches by the estimated bytes of the rows it reads, so a scan of a wide
 table can feed a narrow shuffle batches of a few hundred rows. The probe
 logs one line per writer, `CellShuffleWriter dictionary probe`: the columns
