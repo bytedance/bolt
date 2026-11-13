@@ -893,14 +893,18 @@ class SpillState {
   /// for a sorted spill and must hash to 'partition'. It is safe to call this
   /// on multiple threads if all threads specify a different partition. Returns
   /// the size to append to partition.
-  uint64_t appendToPartition(uint32_t partition, const RowVectorPtr& rows);
+  uint64_t appendToPartition(
+      uint32_t partition,
+      const RowVectorPtr& rows,
+      uint64_t targetFileRows = 0);
 
   // append row based data to partition
   uint64_t appendToPartition(
       uint32_t partition,
       const std::vector<char*, memory::SlabAllocator<char*>>& rows,
       RowTypePtr type,
-      const RowFormatInfo& info);
+      const RowFormatInfo& info,
+      uint64_t targetFileRows = 0);
 
   /// Finishes a sorted run for 'partition'. If write is called for 'partition'
   /// again, the data does not have to be sorted relative to the data written so
@@ -961,10 +965,6 @@ class SpillState {
 
   void setImmediateFlush(bool immediateFlush) {
     immediateFlush_ = immediateFlush;
-  }
-
-  uint64_t rowsInCurrentFile(uint32_t partition) {
-    return partitionWriters_[partition]->rowsInCurrentFile();
   }
 
   bool isUringEnabled() {

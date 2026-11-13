@@ -197,12 +197,10 @@ class Spiller {
   void doSkewPartitionSplit(
       SpillPartitionSet& partitionSet,
       uint8_t bitOffset,
-      int32_t partitionNumberMax,
-      int32_t estimatePartitions);
+      int32_t partitionNumber,
+      int32_t estimatedPartitions);
 
   void trySplitSkewPartition(SpillPartitionSet& partitionSet);
-
-  void prepareForRangPartitionIfNeeded();
 
   const SpillState& state() const {
     return state_;
@@ -277,15 +275,6 @@ class Spiller {
 
   bool rangePartitioningApplicable() const {
     return rangePartitioningApplicable_;
-  }
-
-  void setMemoryUsedTriggered(int64_t used) {
-    memoryUsedWhenTriggered_ = used;
-  }
-
-  void setSkewThreshold(int32_t fileSizeThreshold, int32_t rowCountThreshold) {
-    skewFileSizeRatioThreshold_ = fileSizeThreshold;
-    skewRowCountRatioThreshold_ = rowCountThreshold;
   }
 
   void setMaxRowsInMemory(uint64_t rowsInMemory) {
@@ -471,13 +460,6 @@ class Spiller {
 
   bool supportSkewPartition_{false};
   bool rangePartitioningApplicable_{false};
-  std::optional<uint32_t> skewedVictim_;
-  uint32_t maxRowsPerFile_{0};
-  int64_t memoryUsedWhenTriggered_{0};
-  int32_t skewFileSizeRatioThreshold_ = 10;
-  int32_t skewRowCountRatioThreshold_ = 100;
-  static constexpr uint64_t kDefaultSpillRunRows = 12UL << 20;
-  static constexpr int32_t minRangePartitionNumber = 6;
   uint64_t maxRowsInMemory_{0};
   std::optional<uint64_t> totalFillRows_;
 

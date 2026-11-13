@@ -312,6 +312,10 @@ class HashBuild final : public Operator {
   // not.
   bool nonReclaimableState() const;
 
+  // Estimates the restore row budget and configures the spiller before the
+  // first spill writes any files.
+  void prepareForFirstSpill();
+
   template <bool isRepartition>
   bool calculateJoinBits(
       uint8_t maxjoinBits = 12,
@@ -450,7 +454,6 @@ class HashBuild final : public Operator {
   bool isFirstSpill_{true};
 
   std::optional<uint64_t> spillThreshold_;
-  std::optional<uint64_t> memoryUsedForFirstSpill_;
 
   uint32_t useAdaptiveHashBuild_{0};
 
@@ -458,8 +461,6 @@ class HashBuild final : public Operator {
 
   bool restoringRangePartition_{false};
   bool supportRangePartitionSkewed_{false};
-  int32_t skewFileSizeRatioThreshold_{10};
-  int32_t skewRowCountRatioThreshold_{100};
   bool isDREnabled_{false};
   int32_t maxHashTableBucketCount_{std::numeric_limits<int32_t>::max()};
   std::shared_ptr<RowFormatInfo> rowFormatInfo_{nullptr};
