@@ -4,8 +4,22 @@ set -euo pipefail
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 cd "$SCRIPT_DIR"
 
+with_arrow_cache=false
+case ${1:-} in
+  --with-arrow-cache)
+    with_arrow_cache=true
+    export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:compose.arrow-cache.yml:compose.arrow-runners.yml"
+    python3 arrow-cache.py warm --compose
+    ;;
+  "") ;;
+  *)
+    echo "Usage: $0 [--with-arrow-cache]" >&2
+    exit 2
+    ;;
+esac
+
 # shellcheck disable=SC2086
-docker compose build ${BUILD_ARGS}
+docker compose build ${BUILD_ARGS:-}
 docker compose up -d bolt-registry
 
 for attempt in $(seq 1 45); do
@@ -23,5 +37,8 @@ done
 docker compose push ci-image
 docker compose push conan_server
 docker compose up -d --wait --wait-timeout 90 bolt-registry
+if [[ "$with_arrow_cache" == true ]]; then
+  docker compose up -d --wait bolt-source-cache
+fi
 docker compose up -d conan_server runner-medium runner-small
 exec docker compose ps
