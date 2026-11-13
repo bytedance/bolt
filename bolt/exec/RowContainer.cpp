@@ -33,6 +33,12 @@
 #include <utility>
 #include "bolt/common/memory/MemoryResource.h"
 
+#include <folly/ScopeGuard.h>
+
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #include "bolt/exec/RowContainer.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/type/StringView.h"
@@ -886,6 +892,286 @@ void RowContainer::extractString(
       HashStringAllocator::headerOf(value.data()));
   stream->readBytes(rawBuffer, value.size());
   values->setNoCopy(index, StringView(rawBuffer, value.size()));
+}
+
+void RowContainer::extractStringsBatch(
+    const char* const* rows,
+    folly::Range<const vector_size_t*> rowNumbers,
+    int32_t numRows,
+    int32_t offset,
+    int32_t nullByte,
+    uint8_t nullMask,
+    int32_t resultOffset,
+    FlatVector<StringView>* result,
+    bool hasNulls,
+    bool exactSize) {
+  auto* rawValues = result->mutableRawValues();
+  auto maxRows = numRows + resultOffset;
+  const bool useRowNumbers = !rowNumbers.empty();
+  const bool hasMissingRows = useRowNumbers &&
+      std::any_of(rowNumbers.begin(),
+                  rowNumbers.end(),
+                  [](vector_size_t rowNumber) { return rowNumber < 0; });
+  uint64_t* rawNulls = nullptr;
+  // Keep updating a bitmap left over from a previous use of this result
+  // vector so stale NULL bits are cleared for rows this batch overwrites,
+  // and allocate one lazily when the first null is written. A fresh
+  // null-free extraction leaves the vector without a bitmap, so
+  // mayHaveNulls() stays false, matching the per-row extraction semantics.
+  auto ensureNulls = [&]() {
+    if (rawNulls == nullptr) {
+      const bool freshBitmap = !result->mayHaveNulls();
+      auto& nullBuffer = result->mutableNulls(maxRows);
+      rawNulls = nullBuffer->asMutable<uint64_t>();
+      if (freshBitmap) {
+        // mutableNulls() initializes a fresh buffer to all-null. Every row
+        // produced so far -- this batch's prefix included -- is non-null by
+        // construction, so clear the whole range before writing nulls.
+        const auto clearEnd = std::max<vector_size_t>(maxRows, result->size());
+        for (int32_t j = 0; j < clearEnd; ++j) {
+          bits::setNull(rawNulls, j, false);
+        }
+      }
+    }
+  };
+  if (result->mayHaveNulls() || hasNulls || hasMissingRows) {
+    ensureNulls();
+  }
+
+  struct RowMeta {
+    const char* data;
+    uint32_t size;
+    bool isMultiPiece;
+  };
+
+  static constexpr int32_t kStackLimit = 128;
+  RowMeta stackMeta[kStackLimit];
+  RowMeta* heapMeta = nullptr;
+  RowMeta* meta = (numRows <= kStackLimit) ? stackMeta : heapMeta;
+  if (numRows > kStackLimit) {
+    heapMeta = static_cast<RowMeta*>(
+        result->pool()->allocate(sizeof(RowMeta) * numRows));
+    meta = heapMeta;
+  }
+  auto* pool = result->pool();
+  SCOPE_EXIT {
+    if (heapMeta) {
+      pool->free(heapMeta, static_cast<int64_t>(sizeof(RowMeta) * numRows));
+    }
+  };
+
+  size_t totalBytes = 0;
+
+  // Phase 1: pre-scan the rows. Inline values are stored directly; for
+  // out-of-line ones, record the source pointer and size for the copy below.
+  for (int32_t i = 0; i < numRows; ++i) {
+    const char* row;
+    if (useRowNumbers) {
+      auto rowNumber = rowNumbers[i];
+      row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+    } else {
+      row = rows[i];
+    }
+    auto resultIndex = resultOffset + i;
+
+    if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
+      ensureNulls();
+      bits::setNull(rawNulls, resultIndex, true);
+      meta[i] = {nullptr, 0, false};
+    } else {
+      if (rawNulls != nullptr) {
+        bits::setNull(rawNulls, resultIndex, false);
+      }
+      auto value = valueAt<StringView>(row, offset);
+
+      if (value.isInline()) {
+        rawValues[resultIndex] = value;
+        meta[i] = {nullptr, 0, false};
+      } else {
+        auto* header =
+            reinterpret_cast<const HashStringAllocator::Header*>(value.data()) -
+            1;
+        // Multi-piece if the first block is continued or smaller than the
+        // string: the remaining bytes live in later blocks and must be
+        // gathered through prepareRead.
+        bool isMultiPiece =
+            header->isContinued() || header->size() < value.size();
+        meta[i] = {
+            value.data(), static_cast<uint32_t>(value.size()), isMultiPiece};
+        totalBytes += value.size();
+      }
+    }
+  }
+
+  // Phase 2: reserve the string buffer once for all out-of-line strings,
+  // then copy them into it in order.
+  if (totalBytes > 0) {
+    auto* rawBuffer =
+        result->getRawStringBufferWithSpace(totalBytes, exactSize);
+    size_t bufferOffset = 0;
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      if (meta[i].data == nullptr) {
+        continue;
+      }
+      auto resultIndex = resultOffset + i;
+      auto size = meta[i].size;
+      auto* dst = rawBuffer + bufferOffset;
+
+      if (meta[i].isMultiPiece) {
+        auto stream = HashStringAllocator::prepareRead(
+            HashStringAllocator::headerOf(meta[i].data));
+        stream->readBytes(dst, size);
+#if defined(__ARM_NEON)
+      } else if (size <= 16 && bufferOffset + 16 <= totalBytes) {
+        // One 128-bit copy. The write may extend past this string's logical
+        // end into later strings' regions, which are written afterwards and
+        // overwrite it; the offset guard keeps every store within
+        // [0, totalBytes).
+        uint8x16_t chunk =
+            vld1q_u8(reinterpret_cast<const uint8_t*>(meta[i].data));
+        vst1q_u8(reinterpret_cast<uint8_t*>(dst), chunk);
+      } else if (size <= 32 && bufferOffset + 32 <= totalBytes) {
+        // Two 128-bit copies, same guarantees as above.
+        uint8x16_t lo =
+            vld1q_u8(reinterpret_cast<const uint8_t*>(meta[i].data));
+        uint8x16_t hi =
+            vld1q_u8(reinterpret_cast<const uint8_t*>(meta[i].data + 16));
+        vst1q_u8(reinterpret_cast<uint8_t*>(dst), lo);
+        vst1q_u8(reinterpret_cast<uint8_t*>(dst + 16), hi);
+#endif
+      } else {
+        memcpy(dst, meta[i].data, size);
+      }
+
+      rawValues[resultIndex] = StringView(dst, size);
+      bufferOffset += size;
+    }
+  }
+}
+
+void RowContainer::extractContinuousStringsBatch(
+    const char* const* rows,
+    folly::Range<const vector_size_t*> rowNumbers,
+    int32_t numRows,
+    int32_t offset,
+    int32_t nullByte,
+    uint8_t nullMask,
+    int32_t resultOffset,
+    FlatVector<StringView>* result,
+    bool hasNulls,
+    bool exactSize) {
+  auto* rawValues = result->mutableRawValues();
+  auto maxRows = numRows + resultOffset;
+  const bool useRowNumbers = !rowNumbers.empty();
+  const bool hasMissingRows = useRowNumbers &&
+      std::any_of(rowNumbers.begin(),
+                  rowNumbers.end(),
+                  [](vector_size_t rowNumber) { return rowNumber < 0; });
+  uint64_t* rawNulls = nullptr;
+  // Keep updating a bitmap left over from a previous use of this result
+  // vector so stale NULL bits are cleared for rows this batch overwrites,
+  // and allocate one lazily when the first null is written. A fresh
+  // null-free extraction leaves the vector without a bitmap, so
+  // mayHaveNulls() stays false, matching the per-row extraction semantics.
+  auto ensureNulls = [&]() {
+    if (rawNulls == nullptr) {
+      const bool freshBitmap = !result->mayHaveNulls();
+      auto& nullBuffer = result->mutableNulls(maxRows);
+      rawNulls = nullBuffer->asMutable<uint64_t>();
+      if (freshBitmap) {
+        // mutableNulls() initializes a fresh buffer to all-null. Every row
+        // produced so far -- this batch's prefix included -- is non-null by
+        // construction, so clear the whole range before writing nulls.
+        const auto clearEnd = std::max<vector_size_t>(maxRows, result->size());
+        for (int32_t j = 0; j < clearEnd; ++j) {
+          bits::setNull(rawNulls, j, false);
+        }
+      }
+    }
+  };
+  if (result->mayHaveNulls() || hasNulls || hasMissingRows) {
+    ensureNulls();
+  }
+
+  struct RowMeta {
+    const char* data;
+    uint32_t size;
+  };
+
+  static constexpr int32_t kStackLimit = 128;
+  RowMeta stackMeta[kStackLimit];
+  RowMeta* heapMeta = nullptr;
+  RowMeta* meta = (numRows <= kStackLimit) ? stackMeta : heapMeta;
+  if (numRows > kStackLimit) {
+    heapMeta = static_cast<RowMeta*>(
+        result->pool()->allocate(sizeof(RowMeta) * numRows));
+    meta = heapMeta;
+  }
+  auto* pool = result->pool();
+  SCOPE_EXIT {
+    if (heapMeta) {
+      pool->free(heapMeta, static_cast<int64_t>(sizeof(RowMeta) * numRows));
+    }
+  };
+
+  size_t totalBytes = 0;
+
+  // Phase 1: pre-scan the rows. Inline values are stored directly; for
+  // out-of-line ones, record the source pointer and size for the copy below.
+  for (int32_t i = 0; i < numRows; ++i) {
+    const char* row;
+    if (useRowNumbers) {
+      auto rowNumber = rowNumbers[i];
+      row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+    } else {
+      row = rows[i];
+    }
+    auto resultIndex = resultOffset + i;
+
+    if (row == nullptr || (hasNulls && isNullAt(row, nullByte, nullMask))) {
+      ensureNulls();
+      bits::setNull(rawNulls, resultIndex, true);
+      meta[i] = {nullptr, 0};
+    } else {
+      if (rawNulls != nullptr) {
+        bits::setNull(rawNulls, resultIndex, false);
+      }
+      auto value = valueAt<StringView>(row, offset);
+
+      if (value.isInline()) {
+        rawValues[resultIndex] = value;
+        meta[i] = {nullptr, 0};
+      } else {
+        // Contiguous storage is single-piece by construction: no header
+        // inspection or multi-piece gathering is needed.
+        meta[i] = {value.data(), static_cast<uint32_t>(value.size())};
+        totalBytes += value.size();
+      }
+    }
+  }
+
+  // Phase 2: reserve the string buffer once for all out-of-line strings,
+  // then copy them into it in order. simd::memcpy copies at SIMD width
+  // while staying byte-exact for any size.
+  if (totalBytes > 0) {
+    auto* rawBuffer =
+        result->getRawStringBufferWithSpace(totalBytes, exactSize);
+    size_t bufferOffset = 0;
+    for (int32_t i = 0; i < numRows; ++i) {
+      if (meta[i].data == nullptr) {
+        continue;
+      }
+      auto resultIndex = resultOffset + i;
+      auto size = meta[i].size;
+      auto* dst = rawBuffer + bufferOffset;
+
+      simd::memcpy(dst, meta[i].data, size);
+
+      rawValues[resultIndex] = StringView(dst, size);
+      bufferOffset += size;
+    }
+  }
 }
 
 void RowContainer::storeComplexType(
