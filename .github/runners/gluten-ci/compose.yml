@@ -1,0 +1,194 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: bolt-gluten-ci
+
+x-config: &config
+  type: bind
+  source: ${CI_CONFIG:?Run ci.sh prepare first}
+  target: /run/bolt-gluten-ci/config.json
+  read_only: true
+  bind: {create_host_path: false}
+
+x-helpers: &helpers
+  type: bind
+  source: ${CI_HELPERS:?Run ci.sh prepare first}
+  target: ${CI_HELPERS:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-state: &state
+  type: bind
+  source: ${CI_STATE:?Run ci.sh prepare first}
+  target: ${CI_STATE:?Run ci.sh prepare first}
+  bind: {create_host_path: false}
+
+x-reader: &reader
+  type: bind
+  source: ${CI_READER:?Run ci.sh prepare first}
+  target: /run/bolt-gluten-ci/reader
+  read_only: true
+  bind: {create_host_path: false}
+
+x-writer: &writer
+  type: bind
+  source: ${CI_WRITER:?Run ci.sh prepare first}
+  target: /run/bolt-gluten-ci/writer
+  read_only: true
+  bind: {create_host_path: false}
+
+x-arrow-script: &arrow-script
+  type: bind
+  source: ${CI_ARROW_SCRIPT:?Run ci.sh prepare first}
+  target: ${CI_ARROW_SCRIPT:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-jobs: &jobs
+  type: bind
+  source: ${CI_JOBS:?Run ci.sh prepare first}
+  target: ${CI_JOBS:?Run ci.sh prepare first}
+  bind: {create_host_path: false}
+
+x-engine: &engine
+  type: bind
+  source: ${CI_ENGINE:?Run ci.sh prepare first}
+  target: ${CI_ENGINE:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-receipts: &receipts
+  type: bind
+  source: ${CI_RECEIPTS:?Run ci.sh prepare first}
+  target: ${CI_RECEIPTS:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-socket: &socket
+  type: bind
+  source: /var/run/docker.sock
+  target: /var/run/docker.sock
+  read_only: true
+  bind: {create_host_path: false}
+
+x-maven: &maven
+  type: bind
+  source: ${CI_MAVEN:?Run ci.sh prepare first}
+  target: ${CI_MAVEN:?Run ci.sh prepare first}
+  bind: {create_host_path: false}
+
+x-seeds: &seeds
+  type: bind
+  source: ${CI_SEEDS:?Run ci.sh prepare first}
+  target: ${CI_SEEDS:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-ccache: &ccache
+  type: bind
+  source: ${CI_CCACHE:?Run ci.sh prepare first}
+  target: ${CI_CCACHE:?Run ci.sh prepare first}
+  read_only: true
+  bind: {create_host_path: false}
+
+x-base: &base
+  image: ${CI_CONTROL_IMAGE:?Run ci.sh prepare first}
+  pull_policy: never
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:mode=1777
+  environment:
+    BOLT_CI_CONFIG: /run/bolt-gluten-ci/config.json
+    PYTHONDONTWRITEBYTECODE: '1'
+  networks: [control]
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: '3'
+
+x-service: &service
+  <<: *base
+  restart: unless-stopped
+  stop_grace_period: 60s
+
+services:
+  listener:
+    <<: *service
+    command: [listener]
+    volumes: [*config, *helpers, *state, *reader, *arrow-script]
+  runner:
+    <<: *service
+    command: [runner]
+    volumes: [*config, *helpers, *state, *reader, *arrow-script, *jobs, *engine,
+              *receipts, *socket, *maven, *seeds, *ccache]
+  commenter:
+    <<: *service
+    command: [commenter]
+    volumes: [*config, *helpers, *state, *reader, *writer, *arrow-script]
+  status:
+    <<: *base
+    profiles: [operator]
+    command: [status]
+    volumes: [*config, *helpers, *state, *arrow-script]
+  preview:
+    <<: *base
+    profiles: [operator]
+    volumes: [*config, *helpers, *reader, *arrow-script]
+  preflight:
+    <<: *base
+    profiles: [operator]
+    command: [prepare]
+    volumes:
+      - *config
+      - *helpers
+      - *reader
+      - *arrow-script
+      - *engine
+      - *receipts
+      - *socket
+      - *seeds
+      - *ccache
+      - <<: *maven
+        read_only: true
+      - type: bind
+        source: ${CI_DRIVER:?Run ci.sh prepare first}
+        target: ${CI_DRIVER:?Run ci.sh prepare first}
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${CI_JDKS:?Run ci.sh prepare first}
+        target: ${CI_JDKS:?Run ci.sh prepare first}
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${CI_TOOLS:?Run ci.sh prepare first}
+        target: ${CI_TOOLS:?Run ci.sh prepare first}
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${CI_ARROW_SOURCES:?Run ci.sh prepare first}
+        target: ${CI_ARROW_SOURCES:?Run ci.sh prepare first}
+        read_only: true
+        bind: {create_host_path: false}
+
+networks:
+  control:
+    name: bolt-gluten-ci-control
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: bglut-control
