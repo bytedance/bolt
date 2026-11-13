@@ -57,8 +57,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-      - name: Check the pinned Gluten workflow mirror
-        run: python3 .github/scripts/sync_gluten_ci_workflow.py
       - name: Compute CI fingerprint
         id: fingerprint
         run: |

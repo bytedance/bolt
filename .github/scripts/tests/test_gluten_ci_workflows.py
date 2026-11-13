@@ -104,6 +104,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
                     )
                 )
 
+    def test_compile_prerequisite_scripts_exist(self):
+        steps = workflow("build-test.yml")["jobs"]["reuse-check"]["steps"]
+        for step in steps:
+            for path in re.findall(
+                r"python3 (\.github/scripts/[\w.-]+\.py)", step.get("run", "")
+            ):
+                self.assertTrue((ROOT / path).is_file(), path)
+
     def test_nightly_requires_main_and_only_upstream_can_schedule(self):
         nightly = workflow("gluten-backend-nightly.yml")
         self.assertEqual(
