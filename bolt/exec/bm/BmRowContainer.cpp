@@ -37,7 +37,8 @@ BmRowContainer::BmRowContainer(
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
     uint32_t heapBlockSize,
-    std::shared_ptr<memory::MemoryPool> allocationPool)
+    std::shared_ptr<memory::MemoryPool> allocationPool,
+    uint64_t chunkHeapTargetBytes)
     : types_(std::move(types)),
       layout_(types_, nullable, numKeyColumns, rowBlockSize),
       bufferManager_(std::move(bufferManager)),
@@ -50,9 +51,11 @@ BmRowContainer::BmRowContainer(
           &layout_,
           rowBlockSize,
           heapBlockSize,
-          allocationPool_),
+          allocationPool_,
+          chunkHeapTargetBytes),
       blockLoader_(bufferManager_, &layout_, &segments_),
-      rowCopier_(&layout_, &segments_) {
+      rowCopier_(&layout_, &segments_),
+      chunkHeapTargetBytes_(chunkHeapTargetBytes) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
   BOLT_CHECK_NOT_NULL(allocationPool_);
 }

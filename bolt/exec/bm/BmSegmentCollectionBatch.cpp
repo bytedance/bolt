@@ -72,4 +72,57 @@ void BmSegmentCollection::reserveRowsInBatch(
   }
 }
 
+BatchAppendRange BmSegmentCollection::reserveRowsInCurrentChunk(
+    SegmentData& segment,
+    vector_size_t sourceBegin,
+    vector_size_t count,
+    std::vector<char*>* rows) {
+  BOLT_DCHECK(segment.meta.state == SegmentState::kActiveResident);
+  BOLT_DCHECK_GT(count, 0);
+  auto& cursor = segment.writeCursor;
+  if (FOLLY_UNLIKELY(
+          cursor.chunk == nullptr || cursor.nextRow == cursor.rowBlockEnd)) {
+    ensureWritableChunk(segment);
+  }
+
+  BOLT_DCHECK_NOT_NULL(cursor.chunk);
+  auto& chunk = *cursor.chunk;
+  auto& rowBlock = chunk.rowBlock;
+  const auto availableRows = static_cast<vector_size_t>(
+      (cursor.rowBlockEnd - cursor.nextRow) / rowStride_);
+  BOLT_DCHECK_GT(availableRows, 0);
+  const auto rowsToAppend = std::min(count, availableRows);
+  auto* const rowBegin = cursor.nextRow;
+  layout().initializeNullsRange(rowBegin, rowsToAppend, rowStride_);
+
+  if (rows != nullptr) {
+    auto* row = rowBegin;
+    for (vector_size_t i = 0; i < rowsToAppend; ++i) {
+      rows->push_back(row);
+      row += rowStride_;
+    }
+  }
+
+  const auto bytes = static_cast<uint32_t>(rowsToAppend * rowStride_);
+  cursor.nextRow += bytes;
+  rowBlock.used += bytes;
+  BOLT_DCHECK_LE(rowBlock.used, rowBlock.size);
+  chunk.meta.rowCount += rowsToAppend;
+  segment.nextRowNumber += rowsToAppend;
+  segment.meta.numRows += rowsToAppend;
+  nextGlobalRow_ += rowsToAppend;
+  return BatchAppendRange{&chunk, rowBegin, sourceBegin, rowsToAppend};
+}
+
+void BmSegmentCollection::sealChunkAtBatchBoundary(SegmentData& segment) {
+  auto& cursor = segment.writeCursor;
+  if (cursor.chunk != nullptr && cursor.chunk->sealRequested &&
+      cursor.nextRow != cursor.rowBlockEnd) {
+    // Retain the current chunk pointer and defer successor allocation until the
+    // next prefix. This boundary is reached only after every column writer has
+    // published its heap cursor.
+    cursor.nextRow = cursor.rowBlockEnd;
+  }
+}
+
 } // namespace bytedance::bolt::exec::bm

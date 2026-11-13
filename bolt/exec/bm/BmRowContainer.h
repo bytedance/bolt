@@ -53,7 +53,8 @@ class BmRowContainer {
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t heapBlockSize = static_cast<uint32_t>(
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
-      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr);
+      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr,
+      uint64_t chunkHeapTargetBytes = 0);
 
   // Allocates one row in the active segment for partition. The caller must fill
   // columns with store() before treating the row as complete.
@@ -327,6 +328,7 @@ class BmRowContainer {
   BmSegmentCollection segments_;
   BmRowBlockLoader blockLoader_;
   BmRowCopier rowCopier_;
+  uint64_t chunkHeapTargetBytes_{0};
 };
 
 } // namespace bytedance::bolt::exec::bm

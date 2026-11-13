@@ -64,7 +64,8 @@ class BmSegmentCollection {
       const BmRowLayout* layout,
       uint32_t rowBlockSize,
       uint32_t heapBlockSize,
-      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr);
+      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr,
+      uint64_t chunkHeapTargetBytes = 0);
 
   // Segment lifecycle and partition ownership.
   SegmentId spillActiveSegment();
@@ -107,6 +108,15 @@ class BmSegmentCollection {
       vector_size_t count,
       std::vector<BatchAppendRange>& ranges,
       std::vector<char*>* rows);
+  // Reserves at most count rows in the current writable chunk and returns one
+  // actual contiguous range. It never crosses a chunk boundary; choosing the
+  // requested append segment belongs to BmRowContainer::appendBatch().
+  BatchAppendRange reserveRowsInCurrentChunk(
+      SegmentData& segment,
+      vector_size_t sourceBegin,
+      vector_size_t count,
+      std::vector<char*>* rows);
+  void sealChunkAtBatchBoundary(SegmentData& segment);
   void recordHeapForChunk(
       ChunkData& chunk,
       const BlockRef& heap,
@@ -140,6 +150,14 @@ class BmSegmentCollection {
  private:
   BlockRef addBlock(uint32_t blockSize);
   ChunkData& ensureWritableChunk(SegmentData& segment);
+  FOLLY_ALWAYS_INLINE size_t
+  chunkIndexForRow(const SegmentData& segment, RowNumber rowNumber) const {
+    if (FOLLY_LIKELY(segment.chunkRowDirectory.empty())) {
+      return rowNumber / rowsPerChunk_;
+    }
+    return segment.chunkRowDirectory.chunkIndex(
+        rowNumber, segment.currentChunk);
+  }
   FOLLY_ALWAYS_INLINE ChunkData& chunkForRowUnchecked(
       SegmentData& segment,
       RowNumber rowNumber) const {
@@ -149,12 +167,13 @@ class BmSegmentCollection {
   FOLLY_ALWAYS_INLINE const ChunkData& chunkForRowUnchecked(
       const SegmentData& segment,
       RowNumber rowNumber) const {
-    const auto chunkIndex = rowNumber / rowsPerChunk_;
+    const auto chunkIndex = chunkIndexForRow(segment, rowNumber);
     BOLT_DCHECK_LT(chunkIndex, segment.chunks.size());
     const auto& chunk = *segment.chunks[chunkIndex];
-    BOLT_DCHECK(
-        rowNumber >= chunk.meta.firstRowNumber &&
-        rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount);
+    const auto chunkBegin = static_cast<uint64_t>(chunk.meta.firstRowNumber);
+    const auto chunkEnd = chunkBegin + chunk.meta.rowCount;
+    const auto row = static_cast<uint64_t>(rowNumber);
+    BOLT_DCHECK(row >= chunkBegin && row < chunkEnd);
     return chunk;
   }
   BlockRef& ensureHeapBlockSlow(ChunkData& chunk, uint32_t minBytes);
@@ -172,6 +191,7 @@ class BmSegmentCollection {
   uint32_t heapBlockSize_;
   uint32_t rowStride_{0};
   uint32_t rowsPerChunk_{0};
+  uint64_t chunkHeapTargetBytes_{0};
   SegmentId nextSegmentId_{1};
   BlockId nextBlockId_{1};
   uint64_t nextGlobalRow_{0};
