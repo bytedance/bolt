@@ -961,32 +961,106 @@ TEST_F(CellWriterTest, dictionaryVocabularies) {
   }
 }
 
-TEST_F(CellWriterTest, dictionaryProbeTakesAFirstBatchOf64Rows) {
-  // A table scan of wide rows can start a shuffle with small batches. The
-  // first batch decides the dictionary form, and 64 rows are enough to
-  // judge: two words take dictionary form after a first batch of 64 rows,
-  // and not after one of 63, which leaves the writer without it for good.
-  // Every row reads back either way.
+TEST_F(CellWriterTest, dictionaryProbeUsesFirstBatchThreshold) {
+  // The first batch decides the dictionary form. A later large batch must
+  // not enable it if the first one fell below the configured threshold.
+  EXPECT_EQ(CellShuffleOptions{}.stringDictionaryProbeRowCount, 64);
   constexpr int32_t kPartitions = 2;
-  for (const vector_size_t firstRows : {64, 63}) {
-    SCOPED_TRACE(firstRows);
-    ShuffleInput input;
-    for (const vector_size_t rows : {firstRows, 1000}) {
-      input.data.push_back(
-          makeRowVector({makeFlatVector<StringView>(rows, [](auto row) {
-            return StringView(row % 2 == 0 ? "even" : "odd");
-          })}));
-      input.pids.push_back(roundRobinPids(rows, kPartitions));
+  for (const vector_size_t threshold : {64, 16, 128}) {
+    for (const vector_size_t firstRows : {threshold, threshold - 1}) {
+      SCOPED_TRACE(
+          fmt::format("threshold {}, firstRows {}", threshold, firstRows));
+      ShuffleInput input;
+      for (const vector_size_t rows : {firstRows, 1000}) {
+        input.data.push_back(
+            makeRowVector({makeFlatVector<StringView>(rows, [](auto row) {
+              return StringView(row % 2 == 0 ? "even" : "odd");
+            })}));
+        input.pids.push_back(roundRobinPids(rows, kPartitions));
+      }
+      auto options = writerOptions(kPartitions);
+      options.cellOptions.stringDictionaryProbeRowCount = threshold;
+      const auto written = test::writeShuffle(options, input, pool());
+      if (firstRows >= threshold) {
+        EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
+      } else {
+        EXPECT_EQ(written.metrics.dictionaryMatchedRows, 0);
+      }
+      test::expectReadsBack(
+          input, written, arrow::Compression::LZ4_FRAME, pool());
     }
-    const auto written =
-        test::writeShuffle(writerOptions(kPartitions), input, pool());
-    if (firstRows >= 64) {
-      EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
-    } else {
-      EXPECT_EQ(written.metrics.dictionaryMatchedRows, 0);
+  }
+}
+
+TEST_F(CellWriterTest, zeroDictionaryProbeAdmitsSmallAndAllNullFirstBatches) {
+  // Neither a small first batch nor an all-null one disables a column when
+  // probing is off. The dictionary switch still takes precedence.
+  constexpr int32_t kPartitions = 2;
+  for (const bool firstAllNull : {false, true}) {
+    const auto first = firstAllNull
+        ? BaseVector::createNullConstant(VARCHAR(), 2, pool())
+        : makeConstant<StringView>(StringView("x"), 2);
+    const auto input = test::roundRobin(
+        {makeRowVector({first}),
+         makeRowVector({makeConstant<StringView>(StringView("x"), 8)})},
+        kPartitions);
+    for (const bool enabled : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "firstAllNull {}, enableStringDictionary {}", firstAllNull, enabled));
+      auto options = writerOptions(kPartitions);
+      options.cellOptions.stringDictionaryProbeRowCount = 0;
+      options.cellOptions.enableStringDictionary = enabled;
+      const auto written = test::writeShuffle(options, input, pool());
+      EXPECT_EQ(
+          written.metrics.dictionaryMatchedRows,
+          enabled ? (firstAllNull ? 8 : 10) : 0);
+      EXPECT_EQ(written.metrics.dictionaryFallbackRows, 0);
+      test::expectReadsBack(
+          input, written, arrow::Compression::LZ4_FRAME, pool());
     }
-    test::expectReadsBack(
-        input, written, arrow::Compression::LZ4_FRAME, pool());
+  }
+}
+
+TEST_F(CellWriterTest, zeroDictionaryProbeKeepsRuntimeFallback) {
+  // These first batches fail the usual vocabulary probe. With probing off,
+  // distinct values fill a segment and then fall back; a 63-byte value
+  // cannot fit an entry beside its length byte and falls back immediately.
+  // A positive threshold still judges the whole first batch's vocabulary.
+  constexpr vector_size_t kRows = 64;
+  for (const bool highCardinality : {false, true}) {
+    SCOPED_TRACE(highCardinality);
+    const auto input = test::roundRobin(
+        {makeRowVector({makeFlatVector<std::string>(
+            kRows,
+            [&](auto row) {
+              return highCardinality ? std::to_string(row)
+                                     : std::string(63, 'x');
+            })})},
+        1);
+    for (const uint32_t stringDictionaryProbeRowCount : {0, 1}) {
+      SCOPED_TRACE(stringDictionaryProbeRowCount);
+      auto options = writerOptions(1);
+      options.cellOptions.stringDictionaryProbeRowCount =
+          stringDictionaryProbeRowCount;
+      const auto written = test::writeShuffle(options, input, pool());
+      const auto& metrics = written.metrics;
+      if (stringDictionaryProbeRowCount == 0) {
+        if (highCardinality) {
+          EXPECT_GT(metrics.dictionaryMatchedRows, 0);
+        } else {
+          EXPECT_EQ(metrics.dictionaryMatchedRows, 0);
+        }
+        EXPECT_GT(metrics.dictionaryFallbackRows, 0);
+        EXPECT_EQ(
+            metrics.dictionaryMatchedRows + metrics.dictionaryFallbackRows,
+            kRows);
+      } else {
+        EXPECT_EQ(metrics.dictionaryMatchedRows, 0);
+        EXPECT_EQ(metrics.dictionaryFallbackRows, 0);
+      }
+      test::expectReadsBack(
+          input, written, arrow::Compression::LZ4_FRAME, pool());
+    }
   }
 }
 

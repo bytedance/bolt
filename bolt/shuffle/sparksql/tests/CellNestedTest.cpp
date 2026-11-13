@@ -1008,6 +1008,25 @@ TEST_F(CellNestedTest, dictionaryProbeTakesTheRowsStrings) {
         },
         {{4096, 1 << 20}});
   }
+
+  // Skipping the probe enables the structs' strings even in a small batch,
+  // while strings in array elements still stay outside the dictionary.
+  constexpr vector_size_t kSmallRows = 8;
+  const auto small = std::static_pointer_cast<RowVector>(
+      batches[1].first->slice(0, kSmallRows));
+  roundTrip(
+      test::roundRobin({small}, 5),
+      5,
+      [](CellShuffleOptions& options, bool) {
+        options.stringDictionaryProbeRowCount = 0;
+      },
+      [&](const test::WrittenShuffle& written, bool) {
+        EXPECT_EQ(
+            written.metrics.dictionaryMatchedRows,
+            2 * (kSmallRows - (kSmallRows + 6) / 7));
+        EXPECT_EQ(written.metrics.dictionaryFallbackRows, 0);
+      },
+      {{4096, 1 << 20}});
 }
 
 TEST_F(CellNestedTest, hugeContainersSpreadOverPayloads) {

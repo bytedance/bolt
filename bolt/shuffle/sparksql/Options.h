@@ -149,6 +149,11 @@ struct CellShuffleOptions {
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
+  // Minimum first-batch row count for the dictionary probe. 0 skips the
+  // probe and enables every eligible string column, including all-null
+  // columns; runtime dictionary fallback still applies. Ignored when
+  // enableStringDictionary is false.
+  uint32_t stringDictionaryProbeRowCount = 64;
   // Compress runs through the codec's stream form, straight from the cells
   // with fixed buffers; off, each frame is gathered into a spill-pool
   // workspace
