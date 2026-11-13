@@ -897,23 +897,10 @@ class MinMaxByNAggregate : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediates_.base());
 
-    const SelectivityVector* baseRows = &rows;
-    SelectivityVector innerRows;
-    if (!decodedIntermediates_.isIdentityMapping()) {
-      innerRows.resizeFill(baseRowVector->size(), false);
-      if (rows.hasSelections()) {
-        translateToInnerRows(
-            rows,
-            decodedIntermediates_.indices(),
-            decodedIntermediates_.nulls(&rows),
-            innerRows);
-      }
-      baseRows = &innerRows;
-    }
-
-    decodedN_.decode(*baseRowVector->childAt(0), *baseRows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), *baseRows);
-    decodedValue_.decode(*baseRowVector->childAt(2), *baseRows);
+    // Fields are accessed using base row indices, not input row indices.
+    decodedN_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
+    decodedValue_.decode(*baseRowVector->childAt(2));
 
     IntermediateResult result{};
     result.valueArray = decodedValue_.base()->template as<ArrayVector>();

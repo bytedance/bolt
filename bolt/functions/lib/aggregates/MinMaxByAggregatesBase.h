@@ -370,22 +370,9 @@ class MinMaxByAggregateBase : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
 
-    const SelectivityVector* baseRows = &rows;
-    SelectivityVector innerRows;
-    if (!decodedIntermediateResult_.isIdentityMapping()) {
-      innerRows.resizeFill(baseRowVector->size(), false);
-      if (rows.hasSelections()) {
-        bolt::translateToInnerRows(
-            rows,
-            decodedIntermediateResult_.indices(),
-            decodedIntermediateResult_.nulls(&rows),
-            innerRows);
-      }
-      baseRows = &innerRows;
-    }
-
-    decodedValue_.decode(*baseRowVector->childAt(0), *baseRows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), *baseRows);
+    // Fields are accessed using base row indices, not input row indices.
+    decodedValue_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
   }
 
   template <typename MayUpdate>
