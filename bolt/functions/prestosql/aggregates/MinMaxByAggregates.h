@@ -872,9 +872,11 @@ class MinMaxByNAggregate : public exec::Aggregate {
     const auto* comparisonArray = result.comparisonArray;
     const auto* comparisons = result.comparisons;
 
-    const auto numValues = valueArray->sizeAt(decodedIndex);
-    const auto valueOffset = valueArray->offsetAt(decodedIndex);
-    const auto comparisonOffset = comparisonArray->offsetAt(decodedIndex);
+    const auto valueIndex = decodedValue_.index(decodedIndex);
+    const auto comparisonIndex = decodedComparison_.index(decodedIndex);
+    const auto numValues = valueArray->sizeAt(valueIndex);
+    const auto valueOffset = valueArray->offsetAt(valueIndex);
+    const auto comparisonOffset = comparisonArray->offsetAt(comparisonIndex);
     for (auto i = 0; i < numValues; ++i) {
       const auto comparison = comparisons->valueAt(comparisonOffset + i);
       if constexpr (std::is_same_v<V, ComplexType>) {
@@ -895,9 +897,23 @@ class MinMaxByNAggregate : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediates_.base());
 
-    decodedN_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
-    decodedValue_.decode(*baseRowVector->childAt(2), rows);
+    const SelectivityVector* baseRows = &rows;
+    SelectivityVector innerRows;
+    if (!decodedIntermediates_.isIdentityMapping()) {
+      innerRows.resizeFill(baseRowVector->size(), false);
+      if (rows.hasSelections()) {
+        translateToInnerRows(
+            rows,
+            decodedIntermediates_.indices(),
+            decodedIntermediates_.nulls(&rows),
+            innerRows);
+      }
+      baseRows = &innerRows;
+    }
+
+    decodedN_.decode(*baseRowVector->childAt(0), *baseRows);
+    decodedComparison_.decode(*baseRowVector->childAt(1), *baseRows);
+    decodedValue_.decode(*baseRowVector->childAt(2), *baseRows);
 
     IntermediateResult result{};
     result.valueArray = decodedValue_.base()->template as<ArrayVector>();

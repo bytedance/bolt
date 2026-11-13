@@ -188,9 +188,23 @@ class FirstLastAggregateBase
         rowVector->childrenSize(),
         2,
         "intermediate results must have 2 children");
-    this->decodedValue_.decode(*rowVector->childAt(0), rows);
+    const SelectivityVector* baseRows = &rows;
+    SelectivityVector innerRows;
+    if (!this->decodedIntermediates_.isIdentityMapping()) {
+      innerRows.resizeFill(rowVector->size(), false);
+      if (rows.hasSelections()) {
+        bolt::translateToInnerRows(
+            rows,
+            this->decodedIntermediates_.indices(),
+            this->decodedIntermediates_.nulls(&rows),
+            innerRows);
+      }
+      baseRows = &innerRows;
+    }
+
+    this->decodedValue_.decode(*rowVector->childAt(0), *baseRows);
     if constexpr (decodeIgnoreNullVector) {
-      this->decodedIgnoreNull_.decode(*rowVector->childAt(1), rows);
+      this->decodedIgnoreNull_.decode(*rowVector->childAt(1), *baseRows);
     }
   }
 

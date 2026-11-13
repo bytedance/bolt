@@ -925,8 +925,9 @@ class MinMaxNAggregateBase : public exec::Aggregate {
     const auto* values = result.flatValues;
     auto* rawValues = values->rawValues();
 
-    const auto numValues = valueArray->sizeAt(decodedIndex);
-    const auto valueOffset = valueArray->offsetAt(decodedIndex);
+    const auto valueIndex = decodedValue_.index(decodedIndex);
+    const auto numValues = valueArray->sizeAt(valueIndex);
+    const auto valueOffset = valueArray->offsetAt(valueIndex);
 
     auto tracker = trackRowSize(group);
     for (auto i = 0; i < numValues; ++i) {
@@ -943,8 +944,22 @@ class MinMaxNAggregateBase : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediates_.base());
 
-    decodedN_.decode(*baseRowVector->childAt(0), rows);
-    decodedValue_.decode(*baseRowVector->childAt(1), rows);
+    const SelectivityVector* baseRows = &rows;
+    SelectivityVector innerRows;
+    if (!decodedIntermediates_.isIdentityMapping()) {
+      innerRows.resizeFill(baseRowVector->size(), false);
+      if (rows.hasSelections()) {
+        translateToInnerRows(
+            rows,
+            decodedIntermediates_.indices(),
+            decodedIntermediates_.nulls(&rows),
+            innerRows);
+      }
+      baseRows = &innerRows;
+    }
+
+    decodedN_.decode(*baseRowVector->childAt(0), *baseRows);
+    decodedValue_.decode(*baseRowVector->childAt(1), *baseRows);
 
     IntermediateResult result{};
     result.valueArray = decodedValue_.base()->template as<ArrayVector>();
