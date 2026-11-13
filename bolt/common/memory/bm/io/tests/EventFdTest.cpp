@@ -14,9 +14,16 @@
  * limitations under the License.
  */
 
+// Model a downstream consumer that does not inherit CMake definitions.
+#ifdef OS_MACOSX
+#undef OS_MACOSX
+#endif
 #include "bolt/common/memory/bm/io/EventFd.h"
 
 #include <poll.h>
+#if defined(__APPLE__)
+#include <sys/ioctl.h>
+#endif
 #include <unistd.h>
 #include <cstdint>
 #include <limits>
@@ -24,6 +31,13 @@
 #include <gtest/gtest.h>
 
 using namespace bytedance::bolt::memory::bm;
+
+// A macOS consumer must reserve both pipe descriptors; Linux keeps its ABI.
+#if defined(__APPLE__)
+static_assert(sizeof(EventFd) == 2 * sizeof(ScopedFd));
+#else
+static_assert(sizeof(EventFd) == sizeof(ScopedFd));
+#endif
 
 namespace {
 
@@ -61,6 +75,7 @@ TEST(EventFdTest, moveAssignmentClosesPreviousFdAndTransfersEvent) {
   EXPECT_TRUE(isReadable(target.fd()));
 }
 
+#if !defined(__APPLE__)
 TEST(EventFdTest, notifyReturnsWhenCounterIsAlreadySaturated) {
   EventFd event;
   const uint64_t saturated = std::numeric_limits<uint64_t>::max() - 1;
@@ -76,3 +91,40 @@ TEST(EventFdTest, notifyReturnsWhenCounterIsAlreadySaturated) {
   event.drainNonBlocking();
   EXPECT_FALSE(isReadable(event.fd()));
 }
+#else
+TEST(EventFdTest, notifyReturnsWhenPipeIsAlreadySaturated) {
+  EventFd event;
+  int pendingBytes = 0;
+  bool saturated = false;
+  // Bound the loop, but observe actual pipe occupancy rather than assuming a
+  // platform-specific capacity. notify() writes one uint64_t or gets EAGAIN.
+  for (size_t i = 0; i < 1024 * 1024; ++i) {
+    event.notify();
+    int bytes = 0;
+    ASSERT_EQ(0, ::ioctl(event.fd(), FIONREAD, &bytes));
+    if (bytes == pendingBytes) {
+      saturated = true;
+      break;
+    }
+    ASSERT_EQ(pendingBytes + sizeof(uint64_t), bytes);
+    pendingBytes = bytes;
+  }
+  ASSERT_TRUE(saturated);
+  ASSERT_GT(pendingBytes, 0);
+  EXPECT_TRUE(isReadable(event.fd()));
+
+  event.notify();
+  int bytes = 0;
+  ASSERT_EQ(0, ::ioctl(event.fd(), FIONREAD, &bytes));
+  EXPECT_EQ(pendingBytes, bytes);
+  event.drainNonBlocking();
+  EXPECT_FALSE(isReadable(event.fd()));
+  ASSERT_EQ(0, ::ioctl(event.fd(), FIONREAD, &bytes));
+  EXPECT_EQ(0, bytes);
+
+  event.notify();
+  EXPECT_TRUE(isReadable(event.fd()));
+  event.drainNonBlocking();
+  EXPECT_FALSE(isReadable(event.fd()));
+}
+#endif

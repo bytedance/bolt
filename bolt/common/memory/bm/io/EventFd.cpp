@@ -18,7 +18,11 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#if defined(__APPLE__)
+#include <fcntl.h>
+#else
 #include <sys/eventfd.h>
+#endif
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -26,8 +30,27 @@
 namespace bytedance::bolt::memory::bm {
 
 EventFd::EventFd() {
+#if defined(__APPLE__)
+  int pipeFds[2];
+  BOLT_CHECK_EQ(::pipe(pipeFds), 0, "pipe failed: {}", std::strerror(errno));
+  fd_.reset(pipeFds[0]);
+  notifyFd_.reset(pipeFds[1]);
+  for (const int pipeFd : pipeFds) {
+    BOLT_CHECK_GE(
+        ::fcntl(pipeFd, F_SETFL, ::fcntl(pipeFd, F_GETFL) | O_NONBLOCK),
+        0,
+        "fcntl O_NONBLOCK failed: {}",
+        std::strerror(errno));
+    BOLT_CHECK_GE(
+        ::fcntl(pipeFd, F_SETFD, ::fcntl(pipeFd, F_GETFD) | FD_CLOEXEC),
+        0,
+        "fcntl FD_CLOEXEC failed: {}",
+        std::strerror(errno));
+  }
+#else
   fd_.reset(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
   BOLT_CHECK_GE(fd_.get(), 0, "eventfd failed: {}", std::strerror(errno));
+#endif
 }
 
 int EventFd::fd() const {
@@ -37,7 +60,11 @@ int EventFd::fd() const {
 void EventFd::notify() const {
   uint64_t value = 1;
   while (true) {
+#if defined(__APPLE__)
+    const auto written = ::write(notifyFd_.get(), &value, sizeof(value));
+#else
     const auto written = ::write(fd_.get(), &value, sizeof(value));
+#endif
     if (written == sizeof(value)) {
       return;
     }

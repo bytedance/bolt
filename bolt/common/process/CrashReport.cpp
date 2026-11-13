@@ -19,14 +19,19 @@
 #include <backtrace.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#if defined(OS_MACOSX)
+#include <mach-o/dyld.h>
+#include "bolt/common/process/MachOImage-inl.h"
+#else
 #include <link.h>
+#endif
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <libunwind.h>
 #endif
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <time.h>
-#include <ucontext.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -41,7 +46,12 @@ namespace {
 constexpr size_t kSafeStrlenMax = 40960;
 constexpr size_t kAlternateStackSize = 64 * 1024;
 constexpr size_t kMaxStackFrames = 100;
+#if defined(OS_MACOSX)
+constexpr size_t kMaxLoadedObjects = 1024;
+constexpr size_t kMaxLoadedSegments = 4096;
+#else
 constexpr size_t kMaxLoadedObjects = 256;
+#endif
 constexpr size_t kMaxObjectPathSize = 1024;
 constexpr const char* kJsigLibSymbol = "JVM_get_signal_action";
 
@@ -53,8 +63,13 @@ struct FatalSignalState {
 };
 
 struct LoadedObject {
+#if defined(OS_MACOSX)
+  size_t firstSegment;
+  size_t segmentCount;
+#else
   uintptr_t begin;
   uintptr_t end;
+#endif
   uintptr_t loadBias;
   char path[kMaxObjectPathSize];
 };
@@ -89,6 +104,11 @@ volatile sig_atomic_t kSelectedEngine{
 volatile sig_atomic_t kOfflineDemangle{0};
 struct backtrace_state* kBacktraceState{nullptr};
 LoadedObject kLoadedObjects[kMaxLoadedObjects]{};
+#if defined(OS_MACOSX)
+// Paths are stored once per image, not once per executable segment.
+detail::MachOSegment kLoadedSegments[kMaxLoadedSegments]{};
+size_t kLoadedSegmentCount{0};
+#endif
 volatile sig_atomic_t kLoadedObjectCount{0};
 char kExecutablePath[kMaxObjectPathSize]{};
 
@@ -223,6 +243,54 @@ const char* engineName(StackTraceEngine engine) {
   return "unknown";
 }
 
+#if defined(OS_MACOSX)
+void cacheLoadedObject(
+    const mach_header* header,
+    intptr_t slide,
+    const char* path) {
+  const size_t objectIndex = static_cast<size_t>(kLoadedObjectCount);
+  if (objectIndex >= kMaxLoadedObjects) {
+    return;
+  }
+
+  if (header == nullptr) {
+    return;
+  }
+  const size_t headerSize = detail::machOHeaderSize(header->magic);
+  if (headerSize == 0 || header->sizeofcmds > SIZE_MAX - headerSize) {
+    return;
+  }
+  // dyld owns the mapped header and command region; validate every command
+  // against that region before reading its fields.
+  size_t segmentCount = 0;
+  if (!detail::collectMachOExecutableSegments(
+          header,
+          headerSize + header->sizeofcmds,
+          slide,
+          kLoadedSegments + kLoadedSegmentCount,
+          kMaxLoadedSegments - kLoadedSegmentCount,
+          segmentCount)) {
+    writeToStderr(
+        "[CrashReporter] Warning: Skipping image with invalid Mach-O commands "
+        "or a full executable-segment cache.\n");
+    return;
+  }
+  if (segmentCount == 0) {
+    return;
+  }
+
+  auto& object = kLoadedObjects[objectIndex];
+  object.firstSegment = kLoadedSegmentCount;
+  object.segmentCount = segmentCount;
+  kLoadedSegmentCount += segmentCount;
+  object.loadBias = static_cast<uintptr_t>(slide);
+  copyString(
+      object.path,
+      sizeof(object.path),
+      path == nullptr || path[0] == '\0' ? "<main-executable>" : path);
+  kLoadedObjectCount = static_cast<sig_atomic_t>(objectIndex + 1);
+}
+#else
 int32_t cacheLoadedObject(
     struct dl_phdr_info* info,
     size_t /* size */,
@@ -267,25 +335,44 @@ int32_t cacheLoadedObject(
   kLoadedObjectCount = static_cast<sig_atomic_t>(objectIndex + 1);
   return 0;
 }
+#endif
 
 void cacheLoadedObjects() {
 #if defined(__linux__)
   const ssize_t pathLength =
       readlink("/proc/self/exe", kExecutablePath, sizeof(kExecutablePath) - 1);
-#elif defined(__FreeBSD__)
-  const ssize_t pathLength = readlink(
-      "/proc/curproc/file", kExecutablePath, sizeof(kExecutablePath) - 1);
-#else
-  const ssize_t pathLength = -1;
-#endif
   if (pathLength > 0) {
     kExecutablePath[pathLength] = '\0';
   } else {
     kExecutablePath[0] = '\0';
   }
+#elif defined(__FreeBSD__)
+  const ssize_t pathLength = readlink(
+      "/proc/curproc/file", kExecutablePath, sizeof(kExecutablePath) - 1);
+  if (pathLength > 0) {
+    kExecutablePath[pathLength] = '\0';
+  } else {
+    kExecutablePath[0] = '\0';
+  }
+#else
+  kExecutablePath[0] = '\0';
+#endif
 
   kLoadedObjectCount = 0;
+#if defined(OS_MACOSX)
+  kLoadedSegmentCount = 0;
+  const uint32_t imageCount = _dyld_image_count();
+  for (uint32_t index = 0; index < imageCount &&
+       static_cast<size_t>(kLoadedObjectCount) < kMaxLoadedObjects;
+       ++index) {
+    cacheLoadedObject(
+        _dyld_get_image_header(index),
+        _dyld_get_image_vmaddr_slide(index),
+        _dyld_get_image_name(index));
+  }
+#else
   (void)dl_iterate_phdr(cacheLoadedObject, nullptr);
+#endif
   if (static_cast<size_t>(kLoadedObjectCount) == kMaxLoadedObjects) {
     writeToStderr(
         "[CrashReporter] Warning: Loaded-object cache is full; addresses in "
@@ -297,9 +384,20 @@ const LoadedObject* findLoadedObject(uintptr_t address) {
   const size_t objectCount = static_cast<size_t>(kLoadedObjectCount);
   for (size_t index = 0; index < objectCount; ++index) {
     const auto& object = kLoadedObjects[index];
+#if defined(OS_MACOSX)
+    for (size_t segmentIndex = object.firstSegment;
+         segmentIndex < object.firstSegment + object.segmentCount;
+         ++segmentIndex) {
+      const auto& segment = kLoadedSegments[segmentIndex];
+      if (segment.contains(address)) {
+        return &object;
+      }
+    }
+#else
     if (address >= object.begin && address < object.end) {
       return &object;
     }
+#endif
   }
   return nullptr;
 }
@@ -523,7 +621,10 @@ uintptr_t getInstructionPointer(void* ucontext) {
     return 0;
   }
 
-#if defined(__x86_64__) && defined(REG_RIP)
+#if defined(OS_MACOSX) && defined(__aarch64__)
+  const auto* context = static_cast<const ucontext_t*>(ucontext);
+  return static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#elif defined(__x86_64__) && defined(REG_RIP)
   const auto* context = static_cast<const ucontext_t*>(ucontext);
   return static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__aarch64__)
