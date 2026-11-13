@@ -19,7 +19,6 @@
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/flinksql/Arithmetic.h"
-#include "bolt/functions/flinksql/Comparisons.h"
 #include "bolt/functions/flinksql/DateTimeDiff.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/HashCodeFunction.h"
@@ -248,14 +247,20 @@ void registerSpecialFormFunctions(const std::string& prefix) {
 } // namespace
 
 static void registerComparisonFunctions(const std::string& prefix) {
-  registerFunction<RowEqualFunction, bool, Generic<T1>, Generic<T1>>(
-      {prefix + "flink_complex_equal"});
-  registerFunction<RowNotEqualFunction, bool, Generic<T1>, Generic<T1>>(
-      {prefix + "flink_complex_not_equal"});
   BOLT_REGISTER_VECTOR_FUNCTION(
-      flink_map_equal, prefix + "flink_complex_equal");
+      flink_complex_equal_generic, prefix + "flink_complex_equal");
   BOLT_REGISTER_VECTOR_FUNCTION(
-      flink_map_not_equal, prefix + "flink_complex_not_equal");
+      flink_complex_not_equal_generic, prefix + "flink_complex_not_equal");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      flink_complex_equal_generic, prefix + "flink_complex_equal_generic");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      flink_complex_not_equal_generic,
+      prefix + "flink_complex_not_equal_generic");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      flink_complex_equal_binary, prefix + "flink_complex_equal_binary");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      flink_complex_not_equal_binary,
+      prefix + "flink_complex_not_equal_binary");
 }
 
 void registerFunctions(const std::string& prefix) {

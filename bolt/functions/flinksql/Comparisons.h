@@ -13,15 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Flink ROW equality functions and complex equality type checks.
+ * Flink complex equality type checks.
  */
 
 #pragma once
 
 #include <string_view>
 
-#include "bolt/core/QueryConfig.h"
-#include "bolt/functions/prestosql/Comparisons.h"
+#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::functions::flinksql {
 namespace detail {
@@ -89,41 +88,5 @@ inline bool supportsMapEquality(const Type& type) {
 }
 
 } // namespace detail
-
-/// Flink compares null ROW fields as values.
-template <typename T, bool negate = false>
-struct RowEqualFunction
-    : EqFunction<T, CompareFlags::NullHandlingMode::kNullAsValue> {
-  BOLT_DEFINE_FUNCTION_TYPES(T);
-
-  bool call(
-      bool& result,
-      const arg_type<Generic<T1>>& left,
-      const arg_type<Generic<T1>>& right) {
-    const auto valid =
-        EqFunction<T, CompareFlags::NullHandlingMode::kNullAsValue>::call(
-            result, left, right);
-    if constexpr (negate) {
-      if (valid) {
-        result = !result;
-      }
-    }
-    return valid;
-  }
-
-  void initialize(
-      const std::vector<TypePtr>& inputTypes,
-      const core::QueryConfig&,
-      const arg_type<Generic<T1>>*,
-      const arg_type<Generic<T1>>*) {
-    BOLT_USER_CHECK(
-        inputTypes[0]->isRow() && detail::supportsRowEquality(*inputTypes[0]),
-        "Unsupported Flink ROW equality type: {}",
-        inputTypes[0]->toString());
-  }
-};
-
-template <typename T>
-using RowNotEqualFunction = RowEqualFunction<T, true>;
 
 } // namespace bytedance::bolt::functions::flinksql

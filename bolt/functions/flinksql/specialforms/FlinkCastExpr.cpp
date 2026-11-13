@@ -17,13 +17,79 @@
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 
 #include <array>
+#include <limits>
+#include <string_view>
 
 #include "bolt/expression/EvalCtx.h"
 #include "bolt/type/DecimalUtil.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::functions::flinksql {
 namespace {
+
+// Matches Flink SqlDateTimeUtils.dateStringToUnixDate. The zero-date
+// replacement precedes suffix removal and trimming.
+std::optional<int32_t>
+parseDate(std::string_view value, bool compatibleWithMysql, bool& overflow) {
+  if (compatibleWithMysql && value == "0000-00-00") {
+    value = "0001-01-01";
+  }
+  std::array<int32_t, 3> parts{0, 1, 1};
+  auto* pos = value.data();
+  const auto* end = pos + value.size();
+  const bool startsWithSpace = !value.empty() && value.front() == ' ';
+  const auto skipWhitespace = [&]() {
+    // Java String.trim() removes characters up to U+0020.
+    while (pos != end && static_cast<unsigned char>(*pos) <= 0x20) {
+      // A space terminates the date unless the original string starts with one.
+      if (*pos == ' ' && !startsWithSpace) {
+        end = pos;
+        break;
+      }
+      ++pos;
+    }
+  };
+  for (size_t i = 0; i < parts.size(); ++i) {
+    skipWhitespace();
+    if (pos == end || *pos < '0' || *pos > '9') {
+      return std::nullopt;
+    }
+    int64_t part = 0;
+    do {
+      part = part * 10 + (*pos - '0');
+      ++pos;
+      if (part > std::numeric_limits<int32_t>::max()) {
+        while (pos != end && *pos >= '0' && *pos <= '9') {
+          ++pos;
+        }
+        break;
+      }
+    } while (pos != end && *pos >= '0' && *pos <= '9');
+    skipWhitespace();
+    // Validate the whole component before reporting integer overflow.
+    if (pos != end && (i == parts.size() - 1 || *pos != '-')) {
+      return std::nullopt;
+    }
+    if (part > std::numeric_limits<int32_t>::max()) {
+      overflow = true;
+      return std::nullopt;
+    }
+    parts[i] = part;
+    if (pos == end) {
+      break;
+    }
+    ++pos;
+  }
+
+  if (parts[0] > 9999) {
+    return std::nullopt;
+  }
+  bool valid;
+  const auto days =
+      util::daysSinceEpochFromDate(parts[0], parts[1], parts[2], &valid);
+  return valid ? std::optional<int32_t>(days) : std::nullopt;
+}
 
 template <typename T>
 void setPlainDecimalString(
@@ -51,7 +117,8 @@ void FlinkCastExpr::evalSpecialForm(
     exec::EvalCtx& context,
     VectorPtr& result) {
   const auto fromType = inputs_[0]->type();
-  if (!(fromType->isDecimal() && type_->isVarchar())) {
+  const bool stringToDate = fromType->isVarchar() && type_->isDate();
+  if (!stringToDate && !(fromType->isDecimal() && type_->isVarchar())) {
     exec::CastExpr::evalSpecialForm(rows, context, result);
     return;
   }
@@ -75,22 +142,42 @@ void FlinkCastExpr::evalSpecialForm(
         BaseVector::createNullConstant(type_, rows.end(), context.pool());
   } else {
     context.ensureWritable(*remainingRows, type_, localResult);
-    auto* flatResult = localResult->asFlatVector<StringView>();
-    BOLT_CHECK_NOT_NULL(flatResult);
-
-    int32_t precision;
-    int32_t scale;
-    if (fromType->isShortDecimal()) {
-      precision = fromType->asShortDecimal().precision();
-      scale = fromType->asShortDecimal().scale();
+    if (stringToDate) {
+      auto* flatResult = localResult->asFlatVector<int32_t>();
+      flatResult->clearNulls(*remainingRows);
+      auto* rawResult = flatResult->mutableRawValues();
+      const bool compatibleWithMysql =
+          context.execCtx()->queryCtx()->queryConfig().get<bool>(
+              "table.exec.compatible-with-mysql", false);
+      context.applyToSelectedNoThrow(*remainingRows, [&](vector_size_t row) {
+        const auto value = decoded->valueAt<StringView>(row);
+        bool overflow = false;
+        const auto date = parseDate(
+            std::string_view(value.data(), value.size()),
+            compatibleWithMysql,
+            overflow);
+        BOLT_USER_CHECK(
+            !overflow || nullOnFailure_,
+            "Flink DATE component exceeds the 32-bit integer range");
+        if (date.has_value()) {
+          rawResult[row] = date.value();
+        } else {
+          flatResult->setNull(row, true);
+        }
+      });
+    } else if (fromType->isShortDecimal()) {
+      auto* flatResult = localResult->asFlatVector<StringView>();
+      const auto precision = fromType->asShortDecimal().precision();
+      const auto scale = fromType->asShortDecimal().scale();
       const auto maxSize = DecimalUtil::stringSize(precision, scale);
       remainingRows->applyToSelected([&](vector_size_t row) {
         setPlainDecimalString(
             flatResult, row, decoded->valueAt<int64_t>(row), scale, maxSize);
       });
     } else {
-      precision = fromType->asLongDecimal().precision();
-      scale = fromType->asLongDecimal().scale();
+      auto* flatResult = localResult->asFlatVector<StringView>();
+      const auto precision = fromType->asLongDecimal().precision();
+      const auto scale = fromType->asLongDecimal().scale();
       const auto maxSize = DecimalUtil::stringSize(precision, scale);
       remainingRows->applyToSelected([&](vector_size_t row) {
         setPlainDecimalString(
@@ -99,6 +186,7 @@ void FlinkCastExpr::evalSpecialForm(
     }
   }
 
+  context.deselectErrors(*remainingRows);
   context.moveOrCopyResult(localResult, *remainingRows, result);
   context.releaseVector(localResult);
   localResult.reset();
