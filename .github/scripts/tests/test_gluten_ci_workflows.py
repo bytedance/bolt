@@ -71,7 +71,7 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         self.assertEqual(set(build["on"]), {"pull_request", "merge_group"})
         jobs = build["jobs"]
         compile_job = jobs["gluten-backend-compile"]
-        self.assert_pinned_caller(compile_job, "compile")
+        self.assert_pinned_caller(compile_job, "native")
         self.assertEqual(compile_job["needs"], "reuse-check")
         source = jobs["source-result"]
         self.assertIn("gluten-backend-compile", source["needs"])

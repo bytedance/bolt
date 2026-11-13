@@ -16,8 +16,8 @@ limitations under the License.
 
 # External Gluten CI
 
-Bolt PRs and merge queue candidates compile the Gluten Bolt backend on Bolt's
-GitHub Actions runners. The external `bolt-gluten-ci` Compose project compiles
+Bolt PRs and merge queue candidates compile the Gluten Bolt backend and run its
+native UT on Bolt's GitHub Actions runners. The external `bolt-gluten-ci` Compose project compiles
 the backend for relevant PRs in `WATCH_REPOSITORY` using a pinned Bolt commit.
 Both PR paths build the native libraries and verify consumption of the selected
 Bolt package. The external controller reports compilation in one PR comment and

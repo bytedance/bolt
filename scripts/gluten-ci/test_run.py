@@ -593,7 +593,9 @@ with ZipFile(target / "gluten-bolt-bundle-fixture.jar", "w") as jar:
 """,
         )
 
-    def fake_native_build(self, *, empty_backend=False, package_mismatch=False):
+    def fake_native_build(
+        self, *, empty_backend=False, package_mismatch=False, ctest_report=None
+    ):
         bundle = self.root / "helpers/scripts/gluten-ci"
         shutil.copytree(HERE, bundle, ignore=shutil.ignore_patterns("__pycache__"))
         shutil.rmtree(self.paths["artifacts"])
@@ -604,7 +606,15 @@ with ZipFile(target / "gluten-bolt-bundle-fixture.jar", "w") as jar:
         self.executable(bin_dir / "ldd", "#!/bin/bash\nexit 0\n")
         self.executable(
             bin_dir / "ctest",
-            '#!/bin/bash\ntouch "$GLUTEN_REPORTS_DIR/ctest-invoked.txt"\n',
+            f"""#!{sys.executable}
+import os
+from pathlib import Path
+reports = Path(os.environ["GLUTEN_REPORTS_DIR"])
+(reports / "ctest-invoked.txt").touch()
+report = {ctest_report!r}
+if report is not None:
+    (reports / "TEST-native.xml").write_text(report)
+""",
         )
         self.env.update(
             PATH=f"{bin_dir}:{self.env['PATH']}", CONAN_HOME=str(self.root / "conan")
@@ -638,6 +648,66 @@ PYTHON
 """,
         )
         return bundle / "run.py"
+
+    def test_native_only_requires_ut_and_verifies_the_compiled_package(self):
+        script = self.fake_native_build(
+            ctest_report='<testsuite><testcase name="native"/></testsuite>'
+        )
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertTrue((self.paths["reports"] / "ctest-invoked.txt").exists())
+        self.assertEqual(result["mode"], "native")
+        self.assertEqual(result["tests"], dict(total=1, passed=1, failed=0, skipped=0))
+        self.assertIn("compile-verification.json", result["evidence"])
+        manifest = json.loads(
+            (self.paths["artifacts"] / "native-manifest.json").read_text()
+        )
+        self.assertEqual(manifest["mode"], "native")
+        identity = json.loads((self.paths["reports"] / "sources.json").read_text())
+        with self.assertRaisesRegex(ValueError, "native-only"):
+            run.restore_native(self.paths["artifacts"], self.paths["source"], identity)
+
+    def test_native_only_rejects_an_empty_test_suite(self):
+        script = self.fake_native_build(ctest_report="<testsuite/>")
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+        self.assertEqual(result["tests"]["total"], 0)
+        self.assertFalse((self.paths["artifacts"] / "native-manifest.json").exists())
+
+    def test_native_only_rejects_all_skipped_tests(self):
+        script = self.fake_native_build(
+            ctest_report='<testsuite><testcase name="native"><skipped/></testcase></testsuite>'
+        )
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+        self.assertEqual(result["tests"]["skipped"], 1)
+        self.assertFalse((self.paths["artifacts"] / "native-manifest.json").exists())
+
+    def test_native_only_fails_without_test_evidence(self):
+        script = self.fake_native_build()
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+        self.assertEqual(result["status"], "failure")
+        self.assertFalse((self.paths["artifacts"] / "native-manifest.json").exists())
+
+    def test_native_only_fails_on_a_reported_failure_even_if_ctest_exits_zero(self):
+        script = self.fake_native_build(
+            ctest_report='<testsuite><testcase name="native"><failure/></testcase></testsuite>'
+        )
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+        self.assertEqual(result["tests"]["failed"], 1)
+        self.assertFalse((self.paths["artifacts"] / "native-manifest.json").exists())
+
+    def test_native_only_fails_on_package_mismatch_despite_passing_ut(self):
+        script = self.fake_native_build(
+            package_mismatch=True,
+            ctest_report='<testsuite><testcase name="native"/></testsuite>',
+        )
+        process, result = self.invoke("native", ["--native-only"], script)
+        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+        self.assertIn("Bolt package mismatch", process.stderr)
+        self.assertFalse((self.paths["artifacts"] / "native-manifest.json").exists())
 
     def test_compile_only_publishes_verified_artifact_without_invoking_ctest(self):
         script = self.fake_native_build()

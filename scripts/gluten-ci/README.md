@@ -3,8 +3,10 @@
 Bolt owns this workflow implementation and its deployment. Apache Gluten supplies
 backend source and native/Spark test compatibility fixes, not CI helper scripts.
 
-The PR tier compiles native libraries and verifies the selected Bolt package,
-linkage, archive identity and nonempty backend output. It executes no UT.
+The Bolt PR tier compiles native libraries, runs the native CTest suite and
+verifies the selected Bolt package, linkage, archive identity and nonempty backend
+output. Failed or missing test evidence fails the gate. It does not run benchmarks
+or Spark/JVM tasks. The external ECS controller retains its compile-only tier.
 The nightly tier runs 39 tasks: one native CTest task, 12 package configurations
 and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 
@@ -30,7 +32,9 @@ There is no fork fallback and no runtime source patching.
 
 Each task uses separate writable caches and report directories. Native artifacts
 are checked before downstream reuse. Test mode requires nonzero passing evidence;
-compile mode explicitly records zero tests and cannot substitute for test mode.
+compile mode explicitly records zero tests. PR artifacts cannot substitute for
+full nightly artifacts. Use `--native-only` for the native PR tier and
+`--compile-only` for compilation without UT.
 
 ## Validation
 

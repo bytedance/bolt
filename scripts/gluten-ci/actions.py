@@ -29,8 +29,8 @@ from run import HERE, NATIVE_ARCHIVE, NATIVE_MANIFEST, load_matrix, open_regular
 
 def prepare():
     mode = os.environ["CI_MODE"]
-    if mode not in ("compile", "full"):
-        raise ValueError("Expected compile or full mode")
+    if mode not in ("compile", "native", "full"):
+        raise ValueError("Expected compile, native or full mode")
     for name in ("BOLT", "GLUTEN", "HELPER", "DRIVER"):
         if not re.fullmatch(
             r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ[f"{name}_REPOSITORY"]

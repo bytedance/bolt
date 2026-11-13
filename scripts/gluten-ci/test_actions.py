@@ -194,6 +194,15 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(json.loads(values["matrix"]), {"include": []})
 
+    def test_native_has_no_spark_tasks_and_a_distinct_fingerprint(self):
+        process, values = self.prepare("native")
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(json.loads(values["matrix"]), {"include": []})
+        for mode in ("compile", "full"):
+            self.assertNotEqual(
+                values["config_sha256"], self.prepare(mode)[1]["config_sha256"]
+            )
+
     def test_full_schedules_every_non_native_task_and_fingerprints_mode(self):
         process, values = self.prepare("full")
         self.assertEqual(process.returncode, 0, process.stderr)

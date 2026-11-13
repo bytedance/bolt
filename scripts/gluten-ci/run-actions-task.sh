@@ -56,6 +56,8 @@ if [[ "$CI_TASK" == native ]]; then
   fi
   if [[ "$CI_MODE" == compile ]]; then
     options+=(--compile-only)
+  elif [[ "$CI_MODE" == native ]]; then
+    options+=(--native-only)
   fi
 fi
 

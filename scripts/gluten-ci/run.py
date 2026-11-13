@@ -182,7 +182,10 @@ def open_regular(root, path, maximum=None):
         os.close(directory)
 
 
-def create_native_archive(artifacts, source, runtime, identity, *, compile_only=False):
+def create_native_archive(
+    artifacts, source, runtime, identity, *, compile_only=False, native_only=False
+):
+    mode = "compile" if compile_only else "native" if native_only else None
     safe_parents(source, NATIVE_PACKAGE.parts)
     safe_parents(source, UDF_EXAMPLES.parts)
     if runtime.is_symlink():
@@ -215,7 +218,7 @@ def create_native_archive(artifacts, source, runtime, identity, *, compile_only=
             {
                 "schema": 1,
                 **identity,
-                **({"mode": "compile"} if compile_only else {}),
+                **({"mode": mode} if mode else {}),
                 "archive_sha256": digest,
             },
         )
@@ -279,7 +282,7 @@ def restore_native(artifacts, source, identity):
     ):
         raise ValueError("Native artifact identity mismatch")
     if "mode" in manifest:
-        raise ValueError("A compile-only native artifact cannot supply full tests")
+        raise ValueError("A compile-only/native-only artifact cannot supply full tests")
 
     with archive_path.open("rb") as compressed:
         digest = hashlib.file_digest(compressed, "sha256").hexdigest()
@@ -515,8 +518,9 @@ def execute(args, task):
         "tests": ZERO_COUNTS.copy(),
         "evidence": [],
     }
-    if args.compile_only:
-        result["mode"] = "compile"
+    mode = "compile" if args.compile_only else "native" if args.native_only else "full"
+    if mode != "full":
+        result["mode"] = mode
     try:
         if any(args.reports.iterdir()):
             raise ValueError("The per-task reports directory must be empty")
@@ -554,7 +558,7 @@ def execute(args, task):
                 str(args.driver),
                 str(args.reports),
                 directory,
-                "compile" if args.compile_only else "full",
+                mode,
             ]
             status = subprocess.run(command, cwd=args.source).returncode
             result["exit_code"] = 128 - status if status < 0 else status
@@ -563,7 +567,7 @@ def execute(args, task):
                 if not valid and not result["exit_code"]:
                     result["exit_code"] = 1
             if not result["exit_code"] and task["kind"] == "native":
-                if args.compile_only:
+                if args.compile_only or args.native_only:
                     compile_result = verify_compile(
                         args.source, args.reports, identity["bolt_sha"]
                     )
@@ -573,8 +577,9 @@ def execute(args, task):
                     Path(directory) / "runtime",
                     identity,
                     compile_only=args.compile_only,
+                    native_only=args.native_only,
                 )
-                if args.compile_only:
+                if args.compile_only or args.native_only:
                     write_json(
                         args.reports / COMPILE_VERIFICATION,
                         {**compile_result, "archive_sha256": archive_sha},
@@ -606,10 +611,16 @@ def main():
     tasks = load_matrix()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", choices=tasks, required=True)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--compile-only",
         action="store_true",
         help="Build native libraries without running tests",
+    )
+    modes.add_argument(
+        "--native-only",
+        action="store_true",
+        help="Build native libraries and run native UT without Spark/JVM tasks",
     )
     for name in ("source", "bolt", "driver", "reports", "artifacts"):
         parser.add_argument(
@@ -618,6 +629,8 @@ def main():
     args = parser.parse_args()
     if args.compile_only and args.task != "native":
         parser.error("--compile-only requires --task native")
+    if args.native_only and args.task != "native":
+        parser.error("--native-only requires --task native")
     return execute(args, tasks[args.task])
 
 

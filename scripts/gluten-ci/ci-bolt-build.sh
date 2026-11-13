@@ -24,8 +24,8 @@ export CC=${CC:-clang-22}
 export CXX=${CXX:-clang++-22}
 BUILD_THREADS=${CI_NUM_THREADS:-$(nproc)}
 MODE=${4:-full}
-if [[ "$MODE" != compile && "$MODE" != full ]]; then
-  echo "Expected compile or full native build mode" >&2
+if [[ "$MODE" != compile && "$MODE" != native && "$MODE" != full ]]; then
+  echo "Expected compile, native or full native build mode" >&2
   exit 2
 fi
 REPORTS="${3:-$GLUTEN_ROOT/bolt-ci-reports/native}"
@@ -98,10 +98,15 @@ conan export-pkg . --name=bolt "--version=$BOLT_BUILD_VERSION" \
   --format=json > "$REPORTS/bolt-export.json"
 
 cd "$GLUTEN_ROOT/cpp"
+# PR native checks build all UT targets and their data, without benchmark binaries.
+BUILD_BENCHMARKS=True
+if [[ "$MODE" == native ]]; then
+  BUILD_BENCHMARKS=False
+fi
 conan install . --name=gluten --version=ci-build \
   "${HOST_PROFILE[@]}" "${BUILD_PROFILE[@]}" -s build_type=Release "${BOLT_OPTIONS[@]}" \
   -o 'gluten/*:shared=True' -o 'gluten/*:build_tests=True' \
-  -o 'gluten/*:build_examples=True' -o 'gluten/*:build_benchmarks=True' \
+  -o 'gluten/*:build_examples=True' -o "gluten/*:build_benchmarks=$BUILD_BENCHMARKS" \
   -o 'gluten/*:enable_hdfs=True' -o 'gluten/*:enable_s3=True' \
   -o 'gluten/*:enable_asan=False' -c tools.build:skip_test=True \
   -c 'bolt/*:tools.build:skip_test=False' \

@@ -247,12 +247,12 @@ jobs:
             -s "$GITHUB_WORKSPACE/bolt/python/tests/integration" -p 'test_*.py' -v
 
   gluten-backend-compile:
-    name: Compile Gluten Bolt backend
+    name: Compile and test Gluten Bolt backend
     needs: reuse-check
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
     uses: ./.github/workflows/bolt_backend_x86.yml
     with:
-      mode: compile
+      mode: native
       bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
       gluten_repository: apache/gluten

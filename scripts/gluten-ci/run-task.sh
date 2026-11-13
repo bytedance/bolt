@@ -72,7 +72,7 @@ run_native() {
       cp -L "$lib" "$task_dir/runtime/"
     fi
   done < <(awk '$2 == "=>" {print $3}' "$linkage" | sort -u)
-  if [[ "$mode" == full ]]; then
+  if [[ "$mode" != compile ]]; then
     ctest --test-dir cpp/build/Release --no-tests=error --output-on-failure \
       --output-junit "$GLUTEN_REPORTS_DIR/TEST-native.xml" -j "$CI_NUM_THREADS"
   fi

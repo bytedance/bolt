@@ -19,7 +19,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: compile for native libraries, or full for the complete test matrix
+        description: compile for libraries, native for libraries and native UT, full for all tests
         required: true
         type: string
       bolt_repository:
@@ -69,10 +69,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: compile for native libraries, or full for the complete test matrix
+        description: compile for libraries, native for libraries and native UT, full for all tests
         required: true
         type: choice
-        options: [compile, full]
+        options: [compile, native, full]
       bolt_repository:
         description: Repository containing the Bolt engine candidate
         required: true
