@@ -33,6 +33,7 @@
 #include "bolt/dwio/common/FormatData.h"
 #include "bolt/dwio/common/SelectiveColumnReader.h"
 #include "bolt/type/Subfield.h"
+#include "bolt/type/filter/FilterUtil.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <gtest/gtest.h>
@@ -381,6 +382,50 @@ TEST_F(ReaderTest, prepareOutputNullsClearsReturnedReaderNulls) {
   EXPECT_FALSE(reader.returnReaderNullsForTest());
   EXPECT_EQ(nullptr, reader.storedResultNullsForTest().get());
   EXPECT_EQ(nullptr, reader.rawResultNullsForTest());
+}
+
+TEST_F(ReaderTest, bigintToVarcharReaderCastFilters) {
+  ColumnReaderStatistics stats;
+  TestFormatParams params(*pool(), stats);
+  auto fileTypeWithId = TypeWithId::create(BIGINT());
+
+  for (auto filter : {TestFilterKind::kIsNull, TestFilterKind::kIsNotNull}) {
+    common::ScanSpec scanSpec("c0");
+    scanSpec.setFilter(makeTestFilter(filter));
+    EXPECT_NO_THROW(
+        TestSelectiveColumnReader(VARCHAR(), fileTypeWithId, params, scanSpec));
+  }
+
+  // Reject a value filter pushed down before reader construction.
+  common::ScanSpec pushedDownSpec("c0");
+  pushedDownSpec.setProjectOut(true);
+  pushedDownSpec.setFilter(
+      common::createBytesRange("11", true, "11", true, false));
+  BOLT_ASSERT_THROW(
+      TestSelectiveColumnReader(
+          VARCHAR(), fileTypeWithId, params, pushedDownSpec),
+      "Cannot apply VARCHAR filter to physical BIGINT column c0");
+
+  // Extracted filters use the same ScanSpec filter path.
+  common::ScanSpec extractedSpec("c0");
+  extractedSpec.setExtractValues(true);
+  extractedSpec.setFilter(
+      common::createBytesRange("11", true, "11", true, false));
+  BOLT_ASSERT_THROW(
+      TestSelectiveColumnReader(
+          VARCHAR(), fileTypeWithId, params, extractedSpec),
+      "Cannot apply VARCHAR filter to physical BIGINT column c0");
+
+  // Runtime filters can be installed after construction. Validate these when
+  // the reader is notified to reset its filter caches.
+  common::ScanSpec runtimeSpec("c0");
+  TestSelectiveColumnReader reader(
+      VARCHAR(), fileTypeWithId, params, runtimeSpec);
+  runtimeSpec.setFilter(
+      common::createBytesRange("11", true, "11", true, false));
+  BOLT_ASSERT_THROW(
+      reader.resetFilterCaches(),
+      "Cannot apply VARCHAR filter to physical BIGINT column c0");
 }
 
 TEST_F(ReaderTest, projectColumnsFilterStruct) {
