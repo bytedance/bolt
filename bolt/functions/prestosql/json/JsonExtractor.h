@@ -71,7 +71,8 @@ folly::Optional<std::string_view> jsonExtractScalar(
     const bool throwExceptionWhenEncounterBadJson = false,
     const bool useDOMParserInGetJsonObject = false,
     const bool getJsonObjectEscapeEmoji = true,
-    const bool useSonicJson = true);
+    const bool parsePath = true,
+    const bool useSonicJson = false);
 
 // For json size function
 folly::Optional<size_t> jsonExtractSize(
