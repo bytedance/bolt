@@ -224,3 +224,12 @@ target_link_libraries(
     bolt_testutils
     ${FOLLY_BENCHMARK}
 )
+
+add_executable(bolt_dynamic_final_spill_benchmark DynamicFinalSpillBenchmark.cpp)
+
+target_link_libraries(
+  bolt_dynamic_final_spill_benchmark
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+)

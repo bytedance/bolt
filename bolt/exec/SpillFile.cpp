@@ -627,6 +627,12 @@ uint64_t SpillWriter::writeAndFlush(
 uint64_t SpillWriter::write(
     const std::vector<char*, memory::SlabAllocator<char*>>& rows,
     const RowFormatInfo& info) {
+  return write(folly::Range<char* const*>(rows.data(), rows.size()), info);
+}
+
+uint64_t SpillWriter::write(
+    folly::Range<char* const*> rows,
+    const RowFormatInfo& info) {
   checkNotFinished();
   static constexpr size_t kBufferSize =
       (1ULL << 20) - AlignedBuffer::kPaddedSize; // 1MB
@@ -716,8 +722,8 @@ uint64_t SpillWriter::write(
 
   {
     MicrosecondTimer timer(&timeUs);
-    vector_size_t rowIndex = 0;
-    vector_size_t needWriteRowCount = 0;
+    size_t rowIndex = 0;
+    size_t needWriteRowCount = 0;
     while (rowIndex < rows.size()) {
       char* row = rows[rowIndex];
       int32_t rowSize = 0;
@@ -1012,12 +1018,7 @@ uint32_t RowBasedSpillReadFile::nextBatch(std::vector<char*>& rows) {
     ContainerRow2RowSerde::deserialize(current, info_);
   }
   BOLT_CHECK_EQ(current - bufferEnd, 0);
-  /// when bypassh hash table in hash agg, the last row in the sorted stream
-  /// shouldn't set nextEqual flag
-  if (input_->atEnd() && info_.nextEqualOffset > 0 &&
-      bits::isBitSet(rows.back(), info_.nextEqualOffset)) {
-    bits::setBit(rows.back(), info_.nextEqualOffset, false);
-  }
+  finishBatch(rows);
   return bufferSize;
 }
 
@@ -1027,6 +1028,7 @@ bool RowBasedSpillReadFile::nextBatch(
   rows.clear();
   rowLengths.clear();
   if (input_->atEnd()) {
+    spillReadIOTimeUs_ = inputSpillReadIOTimeUs();
     return false;
   }
   uint32_t bufferSize = input_->read<uint32_t>();
@@ -1055,6 +1057,15 @@ bool RowBasedSpillReadFile::nextBatch(
     rowLengths.push_back(ContainerRow2RowSerde::deserialize(current, info_));
   }
   BOLT_CHECK_EQ(current - bufferEnd, 0);
+  finishBatch(rows);
   return true;
+}
+
+void RowBasedSpillReadFile::finishBatch(std::vector<char*>& rows) {
+  // The next-equal bit cannot refer to a row past this stream's EOF, even
+  // when another file contains the same key.
+  if (input_->atEnd() && info_.nextEqualOffset > 0 && !rows.empty()) {
+    bits::setBit(rows.back(), info_.nextEqualOffset, false);
+  }
 }
 } // namespace bytedance::bolt::exec
