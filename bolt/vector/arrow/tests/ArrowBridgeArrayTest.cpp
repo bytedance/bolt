@@ -36,6 +36,9 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <thread>
 #include "bolt/common/base/Nulls.h"
 #include "bolt/common/base/tests/ArrowTestUtils.h"
@@ -1072,6 +1075,77 @@ TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolConcurrentRelease) {
       consumer.join();
     }
   }
+}
+
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolReleaseLockInversion) {
+  auto vector =
+      vectorMaker_.rowVector({vectorMaker_.flatVector<int64_t>({1, 2, 3})});
+  ReusableArrowBatchPool batchPool(1);
+  ArrowSchema schema{};
+  ArrowArray array{};
+  ASSERT_TRUE(
+      batchPool.exportToArrow(vector, pool_.get(), options_, &schema, &array));
+  const auto* slotBuffers = array.buffers;
+
+  struct ReleaseContext {
+    void (*release)(ArrowArray*);
+    void* privateData;
+    std::timed_mutex consumerMutex{};
+    std::promise<void> entered{};
+    bool timedOut{false};
+  } context{array.children[0]->release, array.children[0]->private_data};
+  auto entered = context.entered.get_future();
+  auto* child = array.children[0];
+  child->private_data = &context;
+  child->release = [](ArrowArray* child) {
+    auto* context = static_cast<ReleaseContext*>(child->private_data);
+    context->entered.set_value();
+    // Parent release holds the slot lock. The exporter holds the consumer
+    // lock, so waiting for the slot lock would deadlock. Bound the wait so
+    // the blocking implementation fails rather than hanging the test.
+    std::unique_lock<std::timed_mutex> lock(
+        context->consumerMutex, std::defer_lock);
+    context->timedOut = !lock.try_lock_for(std::chrono::seconds(5));
+    child->release = context->release;
+    child->private_data = context->privateData;
+    child->release(child);
+  };
+
+  std::unique_lock<std::timed_mutex> consumerLock(context.consumerMutex);
+  std::thread consumer([&] { array.release(&array); });
+  const auto status = entered.wait_for(std::chrono::seconds(5));
+  if (status != std::future_status::ready) {
+    consumerLock.unlock();
+    consumer.join();
+    schema.release(&schema);
+    FAIL() << "the child release callback did not run";
+  }
+
+  ArrowSchema fallbackSchema{};
+  ArrowArray fallbackArray{};
+  EXPECT_FALSE(batchPool.exportToArrow(
+      vector, pool_.get(), options_, &fallbackSchema, &fallbackArray));
+  EXPECT_NE(slotBuffers, fallbackArray.buffers)
+      << "a slot locked by release must be skipped without blocking";
+  consumerLock.unlock();
+  consumer.join();
+  EXPECT_FALSE(context.timedOut)
+      << "export must finish before the release callback can acquire the "
+         "consumer lock";
+  schema.release(&schema);
+  validateArray<int64_t>({1, 2, 3}, *fallbackArray.children[0]);
+
+  ArrowSchema reusedSchema{};
+  ArrowArray reusedArray{};
+  EXPECT_FALSE(batchPool.exportToArrow(
+      vector, pool_.get(), options_, &reusedSchema, &reusedArray));
+  EXPECT_EQ(slotBuffers, reusedArray.buffers)
+      << "the slot must become reusable after release completes";
+  validateArray<int64_t>({1, 2, 3}, *reusedArray.children[0]);
+  reusedArray.release(&reusedArray);
+  reusedSchema.release(&reusedSchema);
+  fallbackArray.release(&fallbackArray);
+  fallbackSchema.release(&fallbackSchema);
 }
 
 TEST_F(

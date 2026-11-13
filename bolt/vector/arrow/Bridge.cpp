@@ -4075,7 +4075,13 @@ class ArraySlot {
       memory::MemoryPool* pool,
       const ArrowOptions& options) {
     auto releaseState = releaseState_;
-    std::lock_guard<std::recursive_mutex> lock(releaseState->mutex);
+    // Release callbacks may acquire consumer locks held by the exporter.
+    // Skip busy slots instead of waiting and risking lock inversion.
+    std::unique_lock<std::recursive_mutex> lock(
+        releaseState->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      return false;
+    }
     // The consumer's array release callback returns this lease. The source
     // ArrowArray may already look released after ownership is moved.
     auto* holder = static_cast<BoltToArrowBridgeHolder*>(array_.private_data);
