@@ -54,12 +54,6 @@ constexpr int64_t kMinReclaimRunBytes = 2 * kChunkBytes;
 constexpr int64_t kRemoteSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
-/// The fewest rows the dictionary probe judges: the sixteen entries of a
-/// dictionary segment, kDictMinRepeatRatio times each. A table scan sizes
-/// its batches by the estimated bytes of the rows it reads, so a scan of a
-/// wide table can start a narrow shuffle with batches of a few hundred
-/// rows.
-constexpr uint32_t kDictMinProbeRows = 64;
 constexpr uint32_t kDictMinRepeatRatio = 4;
 /// A pressure spill writes the largest partitions until this share of the
 /// cell data is covered, and keeps the rest resident for the merge to write
@@ -531,9 +525,10 @@ void CellShuffleWriter::probeDictionary(
     skipped("enableStringDictionary is off");
     return;
   }
-  if (numRows < kDictMinProbeRows) {
+  if (numRows < cellOpts.stringDictionaryProbeRowCount) {
     skipped(fmt::format(
-        "a first batch below {} rows, the probe minimum", kDictMinProbeRows));
+        "a first batch below {} rows, the probe minimum",
+        cellOpts.stringDictionaryProbeRowCount));
     return;
   }
   // Per-column decisions, logged together after the loop.
@@ -548,6 +543,12 @@ void CellShuffleWriter::probeDictionary(
     }
     if (shredder_ != nullptr && !shredder_->inRowSpace(col)) {
       ++nestedStrings;
+      continue;
+    }
+    if (cellOpts.stringDictionaryProbeRowCount == 0) {
+      splitter_->enableDictionary(col);
+      enabled +=
+          fmt::format("{}col {} (forced)", enabled.empty() ? "" : ", ", col);
       continue;
     }
     if (nullClass[col] == NullClass::kAllNull) {
