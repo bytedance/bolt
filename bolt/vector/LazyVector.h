@@ -283,6 +283,13 @@ class LazyVector : public BaseVector {
 
   void validate(const VectorValidateOptions& options) const override;
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override {
+    BaseVector::transferOrCopyTo(pool);
+    if (vector_) {
+      vector_->transferOrCopyTo(pool);
+    }
+  }
+
  private:
   static void ensureLoadedRowsImpl(
       const VectorPtr& vector,
