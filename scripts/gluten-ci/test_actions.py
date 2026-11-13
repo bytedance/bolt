@@ -47,6 +47,28 @@ class WorkflowTest(unittest.TestCase):
             workflow["jobs"]["downstream"]["strategy"]["fail-fast"], "false"
         )
 
+    def test_gluten_ref_is_resolved_once_for_every_worker(self):
+        workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+        jobs = workflow["jobs"]
+        prepare = jobs["prepare"]
+        checkout = next(s for s in prepare["steps"] if s.get("id") == "gluten-source")
+        self.assertEqual(
+            checkout["with"]["repository"], "${{ inputs.gluten_repository }}"
+        )
+        self.assertEqual(checkout["with"]["ref"], "${{ inputs.gluten_sha }}")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(
+            prepare["outputs"]["gluten_sha"], "${{ steps.matrix.outputs.gluten_sha }}"
+        )
+        script = prepare["steps"][-1]["run"]
+        self.assertIn('GLUTEN_SHA="$(git -C gluten-source rev-parse HEAD)"', script)
+        self.assertIn('echo "gluten_sha=$GLUTEN_SHA" >> "$GITHUB_OUTPUT"', script)
+        for name in ("native", "downstream"):
+            self.assertEqual(
+                jobs[name]["env"]["GLUTEN_SHA"],
+                "${{ needs.prepare.outputs.gluten_sha }}",
+            )
+
     def test_conan_read_locks_have_service_only_write_access(self):
         workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
         native = workflow["jobs"]["native"]

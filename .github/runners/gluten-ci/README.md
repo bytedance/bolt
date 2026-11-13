@@ -25,7 +25,7 @@ keeps raw logs and reports private. Publishing a required check on Apache Gluten
 needs upstream permission and branch protection configuration.
 
 Bolt's nightly workflow runs the full 39-task Gluten x86 matrix on Bolt `main`
-with a pinned Gluten revision. It runs native tests, 12 packaging tasks and 26
+with Apache Gluten `main` resolved to one commit per run. It runs native tests, 12 packaging tasks and 26
 Spark tasks, including JVM, connector and local TPC checks. The schedule is
 02:00 Asia/Shanghai (18:00 UTC). GitHub may delay scheduled runs. Manual dispatch
 runs from the `main` branch.

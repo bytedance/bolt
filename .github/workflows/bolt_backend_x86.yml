@@ -35,7 +35,7 @@ on:
         required: true
         type: string
       gluten_sha:
-        description: Exact Gluten source commit
+        description: Gluten source ref, resolved once to an exact commit
         required: true
         type: string
       helper_repository:
@@ -86,7 +86,7 @@ on:
         required: true
         type: string
       gluten_sha:
-        description: Exact Gluten source commit
+        description: Gluten source ref, resolved once to an exact commit
         required: true
         type: string
       helper_repository:
@@ -144,6 +144,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      gluten_sha: ${{ steps.matrix.outputs.gluten_sha }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       native_jdk: ${{ steps.matrix.outputs.native_jdk }}
       runner_labels: ${{ steps.matrix.outputs.runner_labels }}
@@ -155,9 +156,19 @@ jobs:
           ref: ${{ inputs.helper_sha }}
           path: bolt-ci-helpers
           persist-credentials: false
+      - id: gluten-source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.gluten_repository }}
+          ref: ${{ inputs.gluten_sha }}
+          path: gluten-source
+          persist-credentials: false
       - id: matrix
         run: |
           test "$(git -C bolt-ci-helpers rev-parse HEAD)" = "$HELPER_SHA"
+          GLUTEN_SHA="$(git -C gluten-source rev-parse HEAD)"
+          export GLUTEN_SHA
+          echo "gluten_sha=$GLUTEN_SHA" >> "$GITHUB_OUTPUT"
           python3 bolt-ci-helpers/scripts/gluten-ci/actions.py prepare
 
   native:
@@ -181,6 +192,7 @@ jobs:
     outputs:
       native_artifact: ${{ steps.task.outputs.native_artifact }}
     env:
+      GLUTEN_SHA: ${{ needs.prepare.outputs.gluten_sha }}
       GLUTEN_CI_CONFIG_SHA256: ${{ needs.prepare.outputs.config_sha256 }}
     steps:
       - uses: actions/checkout@v6
@@ -211,6 +223,7 @@ jobs:
       image: ${{ inputs.runner_image }}
       options: --user root --init
     env:
+      GLUTEN_SHA: ${{ needs.prepare.outputs.gluten_sha }}
       GLUTEN_CI_CONFIG_SHA256: ${{ needs.prepare.outputs.config_sha256 }}
     steps:
       - uses: actions/checkout@v6

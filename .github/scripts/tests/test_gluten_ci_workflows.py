@@ -28,7 +28,7 @@ from merge_queue_ci import make_fingerprint  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github/workflows"
-GLUTEN = "APACHE_GLUTEN_COMMIT_REQUIRED"
+GLUTEN = "main"
 DRIVER = "72f74589df524b2f4a7695b4f10c5b13a95812e8"
 MIRROR = "bolt_backend_x86.yml"
 

@@ -258,8 +258,8 @@ jobs:
       bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
       gluten_repository: apache/gluten
-      # Pin Apache source after the required native/test changes land on its main branch.
-      gluten_sha: APACHE_GLUTEN_COMMIT_REQUIRED
+      # Resolve Apache main once; all jobs in this run use the same commit.
+      gluten_sha: main
       helper_repository: ${{ github.repository }}
       helper_sha: ${{ github.sha }}
       driver_repository: bytedance/bolt
