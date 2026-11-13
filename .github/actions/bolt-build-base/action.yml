@@ -16,9 +16,9 @@ runs:
           --libcxx libstdc++11 \
           --linker mold \
           --lto none  && \
-        echo "core.download:parallel=1" >> ~/.conan2/global.conf
+        echo "core.download:parallel=1" >> "${CONAN_HOME:-${HOME}/.conan2}/global.conf"
 
     - name: Add CI conan remote
       shell: bash
       run: |
-        conan remote add ci http://conanserver:9300
+        conan remote add ci http://conanserver:9300 --force
