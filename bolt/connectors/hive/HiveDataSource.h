@@ -113,13 +113,13 @@ class HiveDataSource : public DataSource {
       const std::shared_ptr<HiveConnectorSplit>& split,
       const bool isPartOfPaimonSplit);
 
-  void close() override {
-    if (splitReader_) {
-      splitReader_.reset();
-    }
-  }
+  void close() override;
+
+  void releaseFinalSplitResources() override;
 
  protected:
+  void releaseSplitReader();
+
   // Creates a split reader, which reads the split given as param
   virtual std::unique_ptr<SplitReader> createSplitReader(
       const std::shared_ptr<HiveConnectorSplit>& split,
@@ -149,6 +149,7 @@ class HiveDataSource : public DataSource {
   };
   std::shared_ptr<ReusableOutputPool> reusableOutputPool_;
   std::unique_ptr<HiveSplitReaderBase> splitReader_;
+  std::shared_ptr<dwio::common::LazyLoadToken> lazyLoadToken_;
 
   // Output type from file reader.  This is different from outputType_ that it
   // contains column names before assignment, and columns that only used in
@@ -167,6 +168,8 @@ class HiveDataSource : public DataSource {
   std::shared_ptr<io::IoStatistics> ioStats_;
 
  private:
+  void clearCachedOutput();
+
   std::shared_ptr<ReusableOutputLease> prepareReaderOutputForNextRead();
   template <typename T>
   std::shared_ptr<T> retainReusableOutputLease(
