@@ -33,6 +33,7 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <optional>
 
 #include "bolt/type/Variant.h"
@@ -42,6 +43,23 @@
 #include "bolt/vector/tests/VectorTestUtils.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 namespace bytedance::bolt::test {
+namespace {
+const vector_size_t* consecutiveIndicesAtExit = nullptr;
+const vector_size_t* zeroIndicesAtExit = nullptr;
+
+void checkSharedIndexTablesAtExit() {
+  // This callback is registered before the function-local tables are first
+  // initialized. Under ASAN, the old destructible tables fail when accessed.
+  if ((consecutiveIndicesAtExit && consecutiveIndicesAtExit[9'999] != 9'999) ||
+      (zeroIndicesAtExit && zeroIndicesAtExit[9'999] != 0)) {
+    std::abort();
+  }
+}
+
+const bool indexTableExitCheckRegistered = [] {
+  return std::atexit(checkSharedIndexTablesAtExit) == 0;
+}();
+} // namespace
 
 class DecodedVectorTest : public testing::Test, public VectorTestBase {
  protected:
@@ -477,6 +495,22 @@ void DecodedVectorTest::testConstant<StringView>(const StringView& value) {
     DecodedVector decoded(*constantVector);
     check(decoded);
   }
+}
+
+TEST_F(DecodedVectorTest, sharedIndexTablesSurviveProcessShutdown) {
+  ASSERT_TRUE(indexTableExitCheckRegistered);
+
+  auto flat =
+      makeFlatVector<int32_t>(10'000, [](vector_size_t row) { return row; });
+  DecodedVector identityDecoded(*flat);
+  consecutiveIndicesAtExit = identityDecoded.indices();
+  EXPECT_EQ(consecutiveIndicesAtExit[9'999], 9'999);
+
+  auto constant =
+      BaseVector::wrapInConstant(10'000, 0, makeFlatVector<int32_t>({42}));
+  DecodedVector constantDecoded(*constant);
+  zeroIndicesAtExit = constantDecoded.indices();
+  EXPECT_EQ(zeroIndicesAtExit[9'999], 0);
 }
 
 TEST_F(DecodedVectorTest, flat) {
