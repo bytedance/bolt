@@ -44,6 +44,8 @@ void registerCompareFunctions(const std::string& prefix) {
   registerSparkCompareFunctions(prefix);
   exec::registerStatefulVectorFunction(
       prefix + "equalto", comparisonSignatures(), makeEqualTo);
+  registerFunction<EqualToFunction, bool, Generic<T1>, Generic<T1>>(
+      {prefix + "equalto"});
   exec::registerStatefulVectorFunction(
       prefix + "lessthan", comparisonSignatures(), makeLessThan);
   exec::registerStatefulVectorFunction(
@@ -57,12 +59,13 @@ void registerCompareFunctions(const std::string& prefix) {
   // Compare nullsafe functions.
   exec::registerStatefulVectorFunction(
       prefix + "equalnullsafe", equalSignatures(), makeEqualToNullSafe);
+  registerFunction<EqualNullSafeFunction, bool, Generic<T1>, Generic<T1>>(
+      {prefix + "equalnullsafe"});
 
   exec::registerStatefulVectorFunction(
       prefix + "least", leastSignatures(), makeLeast);
   exec::registerStatefulVectorFunction(
       prefix + "greatest", greatestSignatures(), makeGreatest);
-
   registerFunction<BetweenFunction, bool, int8_t, int8_t, int8_t>(
       {prefix + "between"});
   registerFunction<BetweenFunction, bool, int16_t, int16_t, int16_t>(
