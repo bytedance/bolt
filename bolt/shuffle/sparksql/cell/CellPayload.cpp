@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <string_view>
+#include <type_traits>
 
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
@@ -129,6 +130,20 @@ inline void scatterRows(
       });
 }
 
+inline void materializeString(
+    StringView& out,
+    const char* source,
+    int32_t size,
+    char*& chars) {
+  if (size > static_cast<int32_t>(StringView::kInlineSize)) {
+    ::memcpy(chars, source, size);
+    out.set(chars, size);
+    chars += size;
+  } else {
+    out.set(source, size);
+  }
+}
+
 /// Writes a bitmap front to back, 64 bits at a time. Each word is stored
 /// whole: the last one written may cover up to 7 bytes past the bitmap,
 /// which must be writable.
@@ -215,6 +230,65 @@ uint32_t decodedRowBytes(TypeKind kind) {
 }
 
 } // namespace
+
+/// Places successive dense groups without revisiting the null bitmap between
+/// groups. A mixed word is cleared only before its first value is written.
+class CellPayloadDecoder::StringRows {
+ public:
+  StringRows(
+      StringView* out,
+      const uint8_t* bitmap,
+      uint64_t bitmapBytes,
+      uint32_t begin,
+      uint32_t numRows)
+      : out_(out),
+        bitmap_(bitmap),
+        bitmapBytes_(bitmapBytes),
+        begin_(begin),
+        numRows_(numRows) {}
+
+  template <typename Count, typename Write>
+  void place(Count count, const Write& write) {
+    if (bitmap_ == nullptr) {
+      for (uint32_t i = 0; i < count; ++i) {
+        write(out_[next_++], i);
+      }
+      return;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      while (word_ == 0) {
+        base_ = next_;
+        const uint32_t n = std::min<uint32_t>(64, numRows_ - base_);
+        word_ = loadBitWord(bitmap_, bitmapBytes_, begin_ + base_) & lowBits(n);
+        if (word_ != lowBits(n)) {
+          std::fill_n(out_ + base_, n, StringView());
+        }
+        next_ += n;
+      }
+      const uint32_t row =
+          base_ + static_cast<uint32_t>(__builtin_ctzll(word_));
+      word_ &= word_ - 1;
+      write(out_[row], i);
+    }
+  }
+
+  void finish() {
+    // No more dense values: words not visited yet contain only nulls.
+    if (bitmap_ != nullptr) {
+      std::fill_n(out_ + next_, numRows_ - next_, StringView());
+    }
+  }
+
+ private:
+  StringView* const out_;
+  const uint8_t* const bitmap_;
+  const uint64_t bitmapBytes_;
+  const uint32_t begin_;
+  const uint32_t numRows_;
+  uint32_t next_{0};
+  uint32_t base_{0};
+  uint64_t word_{0};
+};
 
 CellPayloadDecoder::CellPayloadDecoder(
     CellLayout layout,
@@ -1305,44 +1379,118 @@ bool CellPayloadDecoder::appendString(
     uint32_t dense,
     std::string& error) {
   auto& cursor = cursors_[col];
-  // Resolved values, in dense (non-null row) order, viewing payload bytes.
-  stringViews_.resize(dense);
-  const auto take = [&](uint32_t count, uint32_t at, const char* what) {
-    lengthScratch_.resize(count);
-    if (!cursor.lengthsOrNanos.next(count, lengthScratch_.data())) {
-      return fail(error, what);
-    }
+  auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
+  if (dense == 0) {
+    std::fill_n(out, numRows, StringView());
+    return true;
+  }
+  StringRows rows(
+      out,
+      dense == numRows ? nullptr : bitmaps_[col],
+      bitmapBytes_,
+      rowsRead_,
+      numRows);
+  const bool ok = cursor.isDictionary
+      ? appendStringDictionary(col, dense, rows, error)
+      : appendStringFlat(col, dense, rows, error);
+  if (ok) {
+    rows.finish();
+  }
+  return ok;
+}
+
+FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
+    uint32_t col,
+    uint32_t dense,
+    StringRows& rows,
+    std::string& error) {
+  auto& cursor = cursors_[col];
+  constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
+  static_assert(kLengthsPerBlock == 8);
+  using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
+
+  // Validate and materialize one natural length block before decoding the
+  // next. A complete block has a compile-time trip count of eight; a staged
+  // remainder or the stream's tail uses its actual count.
+  const auto take = [&](auto count, const int64_t* lengths) {
+    uint64_t dataBytes = 0;
+    uint64_t heapChars = 0;
     for (uint32_t i = 0; i < count; ++i) {
-      const int64_t length = lengthScratch_[i];
-      if (length < 0 || length > std::numeric_limits<int32_t>::max()) {
+      const uint64_t length = static_cast<uint64_t>(lengths[i]);
+      if (length > std::numeric_limits<int32_t>::max()) {
         return fail(
             error,
             cursor.isDictionary ? "fallback length out of range"
                                 : "string length out of range");
       }
-      // The values must fit the data stream.
-      if (static_cast<uint64_t>(length) >
-          cursor.data.size() - cursor.dataOffset) {
-        return fail(
-            error,
-            cursor.isDictionary ? "fallback data length mismatch"
-                                : "string data length mismatch");
+      dataBytes += length;
+      if (length > StringView::kInlineSize) {
+        heapChars += length;
       }
-      stringViews_[at + i] = cursor.data.substr(cursor.dataOffset, length);
-      cursor.dataOffset += length;
     }
+    // At most eight validated int32 lengths: neither sum can overflow.
+    if (dataBytes > cursor.data.size() - cursor.dataOffset) {
+      return fail(
+          error,
+          cursor.isDictionary ? "fallback data length mismatch"
+                              : "string data length mismatch");
+    }
+    char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
+    const char* source = cursor.data.data();
+    if (cursor.dataOffset != 0) {
+      source += cursor.dataOffset;
+    }
+    rows.place(count, [&](StringView& value, uint32_t i) {
+      const auto size = static_cast<int32_t>(lengths[i]);
+      materializeString(value, source, size, chars);
+      if (size != 0) {
+        source += size;
+      }
+    });
+    cursor.dataOffset += dataBytes;
     return true;
   };
-  if (!cursor.isDictionary) {
-    if (dense > 0 && !take(dense, 0, "malformed string length stream")) {
+
+  uint32_t remaining = dense;
+  while (remaining > 0) {
+    const int64_t* lengths = nullptr;
+    const uint32_t count = cursor.lengthsOrNanos.nextBlock(remaining, lengths);
+    if (count == 0) {
+      return fail(
+          error,
+          cursor.isDictionary ? "malformed fallback length stream"
+                              : "malformed string length stream");
+    }
+    if (!(count == kLengthsPerBlock ? take(FullBlock{}, lengths)
+                                    : take(count, lengths))) {
       return false;
     }
-  } else {
-    // Matched rows precede the fallback rows; matched rows resolve against
-    // their dictionary.
-    const auto hits = static_cast<uint32_t>(
-        std::min<uint64_t>(dense, cursor.matchedRows - cursor.matchedRead));
-    for (uint32_t i = 0; i < hits; ++i) {
+    remaining -= count;
+  }
+  return true;
+}
+
+FOLLY_NOINLINE bool CellPayloadDecoder::appendStringDictionary(
+    uint32_t col,
+    uint32_t dense,
+    StringRows& rows,
+    std::string& error) {
+  auto& cursor = cursors_[col];
+  constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
+  static_assert(kLengthsPerBlock == 8);
+  using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
+
+  uint32_t remaining = dense;
+  // Matched rows precede the fallback rows; matched rows resolve against
+  // their dictionary. They have no encoded lengths, but use the same small
+  // groups and output row cursor as the fallback blocks.
+  auto hits = static_cast<uint32_t>(
+      std::min<uint64_t>(dense, cursor.matchedRows - cursor.matchedRead));
+  remaining -= hits;
+  std::string_view values[kLengthsPerBlock];
+  const auto takeMatched = [&](auto count) {
+    uint64_t heapChars = 0;
+    for (uint32_t i = 0; i < count; ++i) {
       while (cursor.currentMatchedLeft == 0) {
         cursor.currentDictionary = cursor.nextDictionary++;
         cursor.currentMatchedLeft =
@@ -1354,56 +1502,31 @@ bool CellPayloadDecoder::appendString(
       if (index >= dictionary.numEntries) {
         return fail(error, "dictionary index out of range");
       }
-      stringViews_[i] = cursor.entries[dictionary.firstEntry + index];
+      values[i] = cursor.entries[dictionary.firstEntry + index];
+      if (values[i].size() > StringView::kInlineSize) {
+        heapChars += values[i].size();
+      }
     }
-    if (dense > hits &&
-        !take(dense - hits, hits, "malformed fallback length stream")) {
+    char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
+    rows.place(count, [&](StringView& value, uint32_t i) {
+      materializeString(
+          value,
+          values[i].data(),
+          static_cast<int32_t>(values[i].size()),
+          chars);
+    });
+    return true;
+  };
+  while (hits >= kLengthsPerBlock) {
+    if (!takeMatched(FullBlock{})) {
       return false;
     }
+    hits -= kLengthsPerBlock;
   }
-
-  // Materialize: values longer than the inline size share string space.
-  uint64_t heapChars = 0;
-  for (const auto& value : stringViews_) {
-    if (value.size() > StringView::kInlineSize) {
-      heapChars += value.size();
-    }
+  if (hits > 0 && !takeMatched(hits)) {
+    return false;
   }
-  char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
-  auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
-  uint32_t next = 0;
-  const auto place = [&](uint32_t row) {
-    const auto value = stringViews_[next++];
-    const auto size = static_cast<int32_t>(value.size());
-    if (value.size() > StringView::kInlineSize) {
-      ::memcpy(chars, value.data(), value.size());
-      out[row] = StringView(chars, size);
-      chars += value.size();
-    } else {
-      out[row] = StringView(value.data(), size);
-    }
-  };
-  if (dense == numRows) {
-    for (uint32_t i = 0; i < numRows; ++i) {
-      place(i);
-    }
-    return true;
-  }
-  const uint8_t* bitmap = bitmaps_[col];
-  if (bitmap == nullptr) {
-    std::fill_n(out, numRows, StringView());
-    return true;
-  }
-  scatterRows(
-      bitmap,
-      bitmapBytes_,
-      rowsRead_,
-      numRows,
-      [&](uint32_t base, uint32_t n) {
-        std::fill_n(out + base, n, StringView());
-      },
-      place);
-  return true;
+  return remaining == 0 || appendStringFlat(col, remaining, rows, error);
 }
 
 char* CellPayloadDecoder::stringSpace(uint32_t col, uint64_t bytes) {
