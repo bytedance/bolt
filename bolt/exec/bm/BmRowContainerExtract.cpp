@@ -32,14 +32,15 @@ FOLLY_ALWAYS_INLINE void writeExtractedValue(
     MutableRange<T>& values,
     vector_size_t resultRow,
     const char* row,
-    uint32_t offset) {
+    uint32_t offset,
+    bool exactSize) {
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     const auto value = *reinterpret_cast<const StringView*>(row + offset);
     if (value.isInline()) {
       BOLT_DCHECK(!result->stringStats().has_value());
       values[resultRow] = value;
     } else {
-      result->set(resultRow, value);
+      result->setStringViewValue(resultRow, value, exactSize);
     }
   } else if constexpr (Kind == TypeKind::HUGEINT) {
     values[resultRow] = HugeInt::deserialize(row + offset);
@@ -161,7 +162,7 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
     const ColumnLayout& column,
     vector_size_t resultOffset,
     const VectorPtr& result,
-    bool /*exactSize*/) const {
+    bool exactSize) const {
   if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       (!TypeTraits<Kind>::isFixedWidth && Kind != TypeKind::VARCHAR &&
@@ -189,7 +190,7 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
         }
         const auto* row = rows[rowNumber];
         writeExtractedValue<Kind>(
-            flatResult, values, resultRow, row, column.offset);
+            flatResult, values, resultRow, row, column.offset, exactSize);
       }
       return;
     }
@@ -211,7 +212,8 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
             values,
             resultOffset + i,
             rows[rowNumber],
-            column.offset);
+            column.offset,
+            exactSize);
       }
     }
     for (; i < numRows; ++i) {
@@ -229,7 +231,7 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
       }
       bits::setNull(nulls, resultRow, false);
       writeExtractedValue<Kind>(
-          flatResult, values, resultRow, row, column.offset);
+          flatResult, values, resultRow, row, column.offset, exactSize);
     }
   }
 }
@@ -241,7 +243,7 @@ void BmRowContainer::extractColumnTyped(
     const ColumnLayout& column,
     vector_size_t resultOffset,
     const VectorPtr& result,
-    bool /*exactSize*/) const {
+    bool exactSize) const {
   if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       (!TypeTraits<Kind>::isFixedWidth && Kind != TypeKind::VARCHAR &&
@@ -262,7 +264,7 @@ void BmRowContainer::extractColumnTyped(
       for (vector_size_t i = 0; i < numRows; ++i) {
         const auto resultRow = resultOffset + i;
         writeExtractedValue<Kind>(
-            flatResult, values, resultRow, rows[i], column.offset);
+            flatResult, values, resultRow, rows[i], column.offset, exactSize);
       }
       return;
     }
@@ -279,7 +281,12 @@ void BmRowContainer::extractColumnTyped(
           break;
         }
         writeExtractedValue<Kind>(
-            flatResult, values, resultOffset + i, row, column.offset);
+            flatResult,
+            values,
+            resultOffset + i,
+            row,
+            column.offset,
+            exactSize);
       }
     }
     for (; i < numRows; ++i) {
@@ -291,7 +298,7 @@ void BmRowContainer::extractColumnTyped(
       }
       bits::setNull(nulls, resultRow, false);
       writeExtractedValue<Kind>(
-          flatResult, values, resultRow, row, column.offset);
+          flatResult, values, resultRow, row, column.offset, exactSize);
     }
   }
 }
