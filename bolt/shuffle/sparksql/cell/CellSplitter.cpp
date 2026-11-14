@@ -137,6 +137,69 @@ void CellSplitter::flushRaw(
   cur[pid] = 0;
 }
 
+FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
+    uint32_t stream,
+    uint32_t pid,
+    const char* data,
+    uint32_t bytes,
+    uint8_t* cur) {
+  char* line = cacheLine(stream, pid);
+  while (cur[pid] != 0 && bytes != 0) {
+    const uint32_t take = std::min<uint32_t>(bytes, kCacheLineBytes - cur[pid]);
+    ::memcpy(line + cur[pid], data, take);
+    cur[pid] += take;
+    data += take;
+    bytes -= take;
+    if (cur[pid] != kCacheLineBytes) {
+      return;
+    }
+
+    // Dictionary framing can leave a fallback tail unaligned. Complete
+    // that destination line first, retaining the rest of the staged bytes.
+    // Re-read the actual tail: a spill can replace it between input rows.
+    uint32_t flush = kCacheLineBytes;
+    if (const char* dst = cells_.tryReserve(pid, stream, 1)) {
+      flush -= reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
+    }
+    cells_.appendStreaming(pid, stream, line, flush);
+    bumpPartitionBytes(pid, flush);
+    cur[pid] -= flush;
+    if (cur[pid] != 0) {
+      ::memmove(line, line + flush, cur[pid]);
+    }
+  }
+
+  if (bytes >= kCacheLineBytes) {
+    // Long values bypass staging once the destination is aligned. Only
+    // complete lines go directly to cells; the final fragment stays hot.
+    if (const char* dst = cells_.tryReserve(pid, stream, 1)) {
+      const uint32_t prefix =
+          -reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
+      if (prefix != 0) {
+        cells_.append(pid, stream, data, prefix);
+        bumpPartitionBytes(pid, prefix);
+        data += prefix;
+        bytes -= prefix;
+      }
+    }
+    // Preserve bounded allocations and the opportunity to spill between
+    // pieces of a very large value.
+    constexpr uint32_t kDirectAppendPiece = 256 << 10;
+    while (bytes >= kCacheLineBytes) {
+      const uint32_t take = std::min<uint32_t>(
+          bytes & ~(kCacheLineBytes - 1), kDirectAppendPiece);
+      cells_.appendStreaming(pid, stream, data, take);
+      bumpPartitionBytes(pid, take);
+      data += take;
+      bytes -= take;
+    }
+  }
+  if (bytes != 0) {
+    ::memcpy(line, data, bytes);
+    cur[pid] = static_cast<uint8_t>(bytes);
+  }
+}
+
 template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
@@ -289,36 +352,9 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       }
     }
 
-    // Data stream: raw bytes, staged through the cache line for locality;
-    // long values bypass it after a flush keeps the byte order.
     const uint32_t size = view.size();
     variableBytes_[pid] += size;
-    if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
-      if (dataCur[pid] > 0) {
-        flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-      }
-      // Raw stream bytes may split anywhere across Runs, so a huge
-      // value is appended in bounded pieces: each append then pre-holds at
-      // most a couple of cells and a spill can reclaim between pieces,
-      // keeping the memory cap meaningful.
-      constexpr uint32_t kDirectAppendPiece = 256 << 10;
-      const char* src = view.data();
-      uint32_t left = size;
-      while (left > 0) {
-        const uint32_t piece =
-            left < kDirectAppendPiece ? left : kDirectAppendPiece;
-        cells_.append(pid, dataStream, src, piece);
-        src += piece;
-        left -= piece;
-      }
-      bumpPartitionBytes(pid, size);
-      continue;
-    }
-    if (dataCur[pid] + size > kCacheLineBytes) {
-      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-    }
-    ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
-    dataCur[pid] += static_cast<uint8_t>(size);
+    appendStringData(dataStream, pid, view.data(), size, dataCur);
   }
 }
 
@@ -1044,7 +1080,10 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     ++st.matched;
     cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
     if (FOLLY_UNLIKELY(++lengthCur[pid] == kCacheLineBytes)) {
-      flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
+      cells_.appendStreaming(
+          pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);
+      bumpPartitionBytes(pid, kCacheLineBytes);
+      lengthCur[pid] = 0;
     }
     return true;
   }
@@ -1080,29 +1119,7 @@ FOLLY_NOINLINE void CellSplitter::appendStringFallback(
           lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
     }
   }
-  const uint32_t size = view.size();
-  if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
-    if (dataCur[pid] > 0) {
-      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-    }
-    constexpr uint32_t kDirectAppendPiece = 256 << 10;
-    const char* src = view.data();
-    uint32_t left = size;
-    while (left > 0) {
-      const uint32_t piece =
-          left < kDirectAppendPiece ? left : kDirectAppendPiece;
-      cells_.append(pid, dataStream, src, piece);
-      src += piece;
-      left -= piece;
-    }
-    bumpPartitionBytes(pid, size);
-    return;
-  }
-  if (dataCur[pid] + size > kCacheLineBytes) {
-    flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-  }
-  ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
-  dataCur[pid] += static_cast<uint8_t>(size);
+  appendStringData(dataStream, pid, view.data(), view.size(), dataCur);
 }
 
 template <bool kHasNulls, CellSplitter::InputMapping kMapping>

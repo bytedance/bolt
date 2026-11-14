@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <span>
@@ -25,6 +26,10 @@
 
 #include <folly/CPortability.h>
 #include <folly/Likely.h>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -243,6 +248,24 @@ class DataCells {
     appendSlow(pid, stream, data, bytes);
   }
 
+  /// Experimental string-data append: only complete, aligned cache lines
+  /// use streaming stores. Other appends retain their ordinary hot path.
+  void appendStreaming(
+      uint32_t pid,
+      uint32_t stream,
+      const void* data,
+      uint32_t bytes) {
+    auto& info = infos_[chainIndex(pid, stream)];
+    if (FOLLY_LIKELY(bytes - 1 < info.tailLeft)) {
+      copyStreaming(info.tail, data, bytes);
+      info.tail += bytes;
+      info.tailLeft -= bytes;
+      totalBytes_ += bytes;
+      return;
+    }
+    appendSlow(pid, stream, data, bytes, /*streaming=*/true);
+  }
+
   /// Contiguous scratch inside the current tail cell, or nullptr when the
   /// tail cannot hold maxBytes. Allocates nothing, so no spill can fire
   /// between a reserve and its commit; the caller writes up to maxBytes and
@@ -273,6 +296,7 @@ class DataCells {
   /// Visits the chain in byte order: fn(const char* data, uint32_t bytes).
   template <typename F>
   void scan(uint32_t pid, uint32_t stream, F&& fn) const {
+    completeStreamingWrites();
     const auto& info = infos_[chainIndex(pid, stream)];
     if (info.numCells == 0) {
       return;
@@ -321,8 +345,57 @@ class DataCells {
         info.tailLeft;
   }
 
-  void
-  appendSlow(uint32_t pid, uint32_t stream, const void* data, uint32_t bytes);
+  void appendSlow(
+      uint32_t pid,
+      uint32_t stream,
+      const void* data,
+      uint32_t bytes,
+      bool streaming = false);
+
+  FOLLY_ALWAYS_INLINE void
+  copyStreaming(char* dst, const void* data, uint32_t bytes) {
+    const auto* src = static_cast<const char*>(data);
+#if defined(__AVX2__)
+    if (streamingStoresEnabled_ && bytes >= kCacheLineBytes) {
+      const uint32_t prefix =
+          -reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
+      if (bytes >= prefix + kCacheLineBytes) {
+        if (prefix != 0) {
+          ::memcpy(dst, src, prefix);
+          dst += prefix;
+          src += prefix;
+          bytes -= prefix;
+        }
+        pendingStreamingWrites_ = true;
+        do {
+          const auto first =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+          const auto second =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 32));
+          _mm256_stream_si256(reinterpret_cast<__m256i*>(dst), first);
+          _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + 32), second);
+          dst += kCacheLineBytes;
+          src += kCacheLineBytes;
+          bytes -= kCacheLineBytes;
+        } while (bytes >= kCacheLineBytes);
+      }
+    }
+#endif
+    if (bytes != 0) {
+      ::memcpy(dst, src, bytes);
+    }
+  }
+
+  void completeStreamingWrites() const {
+#if defined(__AVX2__)
+    if (pendingStreamingWrites_) {
+      // Order NT writes before publication or reuse. A same-thread consumer
+      // reads these exact WB-memory locations; SFENCE is not a load barrier.
+      _mm_sfence();
+      pendingStreamingWrites_ = false;
+    }
+#endif
+  }
 
   /// Stream-major: one column's chains are contiguous, matching the cache
   /// layer's per-column flush pattern.
@@ -337,6 +410,8 @@ class DataCells {
   ChunkAllocator* const allocator_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
+  const bool streamingStoresEnabled_;
+  mutable bool pendingStreamingWrites_{false};
 
   /// numStreams * numPartitions chain infos; pool-backed.
   ChainInfo* infos_{nullptr};

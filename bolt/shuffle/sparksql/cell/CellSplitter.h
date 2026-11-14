@@ -230,6 +230,13 @@ class CellSplitter {
   /// Flushes a raw stream's staged cache line `line` bytes as they are.
   void flushRaw(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
 
+  void appendStringData(
+      uint32_t stream,
+      uint32_t pid,
+      const char* data,
+      uint32_t bytes,
+      uint8_t* cur);
+
   void bumpPartitionBytes(uint32_t pid, uint64_t bytes) {
     partitionBytes_[pid] += bytes;
     if (partitionBytes_[pid] > maxPartitionBytes_) {
