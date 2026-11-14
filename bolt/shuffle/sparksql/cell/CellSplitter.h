@@ -259,6 +259,9 @@ class CellSplitter {
     uint64_t fallbackRows{0}; // rows written through the fallback tail
   };
 
+  FOLLY_NOINLINE void
+  appendStringFallback(uint32_t col, uint32_t pid, const StringView& view);
+
   template <bool kHasNulls, InputMapping kMapping>
   void dispatchStringDict(uint32_t col, const SplitBatch& batch);
 
