@@ -1059,8 +1059,73 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
   return false;
 }
 
+FOLLY_NOINLINE void CellSplitter::appendStringFallback(
+    uint32_t col,
+    uint32_t pid,
+    const StringView& view) {
+  const uint32_t lengthStream = layout_.firstStream(col);
+  const uint32_t dataStream = lengthStream + 1;
+  uint8_t* lengthCur = cursors(lengthStream);
+  uint8_t* dataCur = cursors(dataStream);
+  // The fallback tail of a demoted partition: byte-identical to the raw
+  // string path of splitString.
+  ++dictStats_[col].fallbackRows;
+  {
+    char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
+    const int64_t length = view.size();
+    folly::storeUnaligned<int64_t>(slot, length);
+    lengthCur[pid] += sizeof(int64_t);
+    if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
+      flushEncoded<int64_t>(
+          lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
+    }
+  }
+  const uint32_t size = view.size();
+  if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
+    if (dataCur[pid] > 0) {
+      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
+    }
+    constexpr uint32_t kDirectAppendPiece = 256 << 10;
+    const char* src = view.data();
+    uint32_t left = size;
+    while (left > 0) {
+      const uint32_t piece =
+          left < kDirectAppendPiece ? left : kDirectAppendPiece;
+      cells_.append(pid, dataStream, src, piece);
+      src += piece;
+      left -= piece;
+    }
+    bumpPartitionBytes(pid, size);
+    return;
+  }
+  if (dataCur[pid] + size > kCacheLineBytes) {
+    flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
+  }
+  ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
+  dataCur[pid] += static_cast<uint8_t>(size);
+}
+
 template <bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
+  // Only partitions present in this batch matter: an unused partition may
+  // still have its initial dictionary state after every active one demoted.
+  const auto* states = dictStates_[col].data();
+  bool hasDictionary = false;
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    if (batch.partition2RowCount[pid] != 0 &&
+        states[pid].mode == DictState::kModeDict) {
+      hasDictionary = true;
+      break;
+    }
+  }
+  if (!hasDictionary) {
+    const auto* nulls = kHasNulls ? batch.decoded[col].nulls() : nullptr;
+    dictStats_[col].fallbackRows += nulls == nullptr
+        ? batch.numRows()
+        : bits::countNonNulls(nulls, 0, batch.numRows());
+    splitString<kHasNulls, kMapping>(col, batch);
+    return;
+  }
   if constexpr (kMapping == InputMapping::kDictionary) {
     // Small input vocabularies are reused frequently. Avoid a second index
     // load and a prefetch per row when their views occupy at most 4 KiB.
@@ -1142,42 +1207,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       continue;
     }
 
-    // The fallback tail of a demoted partition: byte-identical to the raw
-    // string path of splitString.
-    ++dictStats_[col].fallbackRows;
-    {
-      char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
-      const int64_t length = view.size();
-      folly::storeUnaligned<int64_t>(slot, length);
-      lengthCur[pid] += sizeof(int64_t);
-      if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
-        flushEncoded<int64_t>(
-            lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
-      }
-    }
-    const uint32_t size = view.size();
-    if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
-      if (dataCur[pid] > 0) {
-        flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-      }
-      constexpr uint32_t kDirectAppendPiece = 256 << 10;
-      const char* src = view.data();
-      uint32_t left = size;
-      while (left > 0) {
-        const uint32_t piece =
-            left < kDirectAppendPiece ? left : kDirectAppendPiece;
-        cells_.append(pid, dataStream, src, piece);
-        src += piece;
-        left -= piece;
-      }
-      bumpPartitionBytes(pid, size);
-      continue;
-    }
-    if (dataCur[pid] + size > kCacheLineBytes) {
-      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
-    }
-    ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
-    dataCur[pid] += static_cast<uint8_t>(size);
+    appendStringFallback(col, pid, view);
   }
 }
 
