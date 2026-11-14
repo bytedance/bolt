@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <folly/Portability.h>
 #include <folly/lang/Bits.h>
 #include <algorithm>
 #include <cstdint>
@@ -112,7 +113,7 @@ inline void storeLowBytes(uint8_t* out, uint64_t value, uint32_t bytes) {
 /// its kWidth-byte base at most 63 - kWidth, its last store ending by
 /// out + 72; kConstNarrow's by out + 9.
 template <typename T, typename Count>
-BOLT_CELL_KERNEL inline uint32_t
+BOLT_CELL_KERNEL FOLLY_ALWAYS_INLINE uint32_t
 encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   static_assert(
       kMaxBlockBytes >= 1 + kCacheLineBytes + sizeof(uint64_t),
@@ -491,9 +492,10 @@ inline uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
 /// encodeBlock for a full block, a kCacheLineBytes line: the count is a
 /// compile-time constant (8/16/32), so the scan and pack loops fully unroll.
 /// The split hot path only ever flushes full blocks; tails appear at window
-/// close.
+/// close. Keep full-block encoding inlined as the split kernels specialize
+/// on more input mappings.
 template <typename T>
-inline uint32_t encodeBlockFull(const T* values, uint8_t* out) {
+FOLLY_ALWAYS_INLINE uint32_t encodeBlockFull(const T* values, uint8_t* out) {
   return detail::encodeBlockImpl(
       static_cast<const T*>(__builtin_assume_aligned(values, kCacheLineBytes)),
       std::integral_constant<uint32_t, kCacheLineBytes / sizeof(T)>{},

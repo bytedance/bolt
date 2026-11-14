@@ -137,7 +137,7 @@ void CellSplitter::flushRaw(
   cur[pid] = 0;
 }
 
-template <typename T, bool kHasNulls, bool kIndexed>
+template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -154,6 +154,12 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   // call - which the compiler declines to inline here - for identity and
   // dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  const vector_size_t* __restrict indices = nullptr;
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    indices = decoded.indices();
+  } else if constexpr (kMapping == InputMapping::kConstant) {
+    vals += decoded.index(0);
+  }
 
   const uint32_t numRows = batch.numRows(); // stores may alias the batch
   for (uint32_t row = 0; row < numRows; ++row) {
@@ -164,7 +170,10 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
         continue;
       }
     }
-    const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    const auto index = kMapping == InputMapping::kDictionary ? indices[row]
+        : kMapping == InputMapping::kConstant                ? 0
+                                                             : row;
+    const T value = vals[index];
     // Aligned for T: lines are 64-byte aligned and the cursor steps by
     // sizeof(T), so the line holds a T array, as flush*() reads it. The
     // cursor goes through a register rather than being re-read after the
@@ -181,7 +190,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <typename T, bool kHasNulls, bool kIndexed>
+template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -198,6 +207,12 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   // call - which the compiler declines to inline here - for identity and
   // dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  const vector_size_t* __restrict indices = nullptr;
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    indices = decoded.indices();
+  } else if constexpr (kMapping == InputMapping::kConstant) {
+    vals += decoded.index(0);
+  }
 
   const uint32_t numRows = batch.numRows(); // stores may alias the batch
   for (uint32_t row = 0; row < numRows; ++row) {
@@ -208,7 +223,10 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
         continue;
       }
     }
-    const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    const auto index = kMapping == InputMapping::kDictionary ? indices[row]
+        : kMapping == InputMapping::kConstant                ? 0
+                                                             : row;
+    const T value = vals[index];
     // Aligned for T: lines are 64-byte aligned and the cursor steps by
     // sizeof(T), so the line holds a T array, as flush*() reads it. The
     // cursor goes through a register rather than being re-read after the
@@ -225,7 +243,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <bool kHasNulls, bool kIndexed>
+template <bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -238,6 +256,12 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
   const uint32_t* __restrict positions = positionBase(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  const vector_size_t* __restrict indices = nullptr;
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    indices = decoded.indices();
+  } else if constexpr (kMapping == InputMapping::kConstant) {
+    views += decoded.index(0);
+  }
 
   const uint32_t numRows = batch.numRows(); // stores may alias the batch
   for (uint32_t row = 0; row < numRows; ++row) {
@@ -248,7 +272,10 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
         continue;
       }
     }
-    const StringView view = kIndexed ? views[decoded.index(row)] : views[row];
+    const auto index = kMapping == InputMapping::kDictionary ? indices[row]
+        : kMapping == InputMapping::kConstant                ? 0
+                                                             : row;
+    const StringView view = views[index];
 
     // Length stream: an int64 value in an 8-byte cache slot.
     {
@@ -295,20 +322,28 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   }
 }
 
+template <typename Split>
+void CellSplitter::dispatchInputMapping(
+    const DecodedVector& decoded,
+    Split&& split) {
+  if (decoded.isIdentityMapping()) {
+    split.template operator()<InputMapping::kIdentity>();
+  } else if (decoded.isConstantMapping()) {
+    split.template operator()<InputMapping::kConstant>();
+  } else {
+    split.template operator()<InputMapping::kDictionary>();
+  }
+}
+
 template <typename T>
 void CellSplitter::dispatchEncoded(
     uint32_t col,
     const SplitBatch& batch,
     bool hasNulls) {
-  const auto& decoded = batch.decoded[col];
-  const bool indexed = !decoded.isIdentityMapping();
-  if (hasNulls) {
-    indexed ? splitFixed<T, true, true>(col, batch)
-            : splitFixed<T, true, false>(col, batch);
-  } else {
-    indexed ? splitFixed<T, false, true>(col, batch)
-            : splitFixed<T, false, false>(col, batch);
-  }
+  dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+    hasNulls ? splitFixed<T, true, kMapping>(col, batch)
+             : splitFixed<T, false, kMapping>(col, batch);
+  });
 }
 
 template <typename T>
@@ -316,15 +351,10 @@ void CellSplitter::dispatchRaw(
     uint32_t col,
     const SplitBatch& batch,
     bool hasNulls) {
-  const auto& decoded = batch.decoded[col];
-  const bool indexed = !decoded.isIdentityMapping();
-  if (hasNulls) {
-    indexed ? splitRawFixed<T, true, true>(col, batch)
-            : splitRawFixed<T, true, false>(col, batch);
-  } else {
-    indexed ? splitRawFixed<T, false, true>(col, batch)
-            : splitRawFixed<T, false, false>(col, batch);
-  }
+  dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+    hasNulls ? splitRawFixed<T, true, kMapping>(col, batch)
+             : splitRawFixed<T, false, kMapping>(col, batch);
+  });
 }
 
 template <bool kHasNulls>
@@ -354,7 +384,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <bool kHasNulls, bool kIndexed>
+template <bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -371,6 +401,12 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
   const uint32_t* __restrict positions = positionBase(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  const vector_size_t* __restrict indices = nullptr;
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    indices = decoded.indices();
+  } else if constexpr (kMapping == InputMapping::kConstant) {
+    vals += decoded.index(0);
+  }
 
   const uint32_t numRows = batch.numRows(); // stores may alias the batch
   for (uint32_t row = 0; row < numRows; ++row) {
@@ -381,7 +417,10 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
         continue;
       }
     }
-    const Timestamp& value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    const auto index = kMapping == InputMapping::kDictionary ? indices[row]
+        : kMapping == InputMapping::kConstant                ? 0
+                                                             : row;
+    const Timestamp& value = vals[index];
     const int64_t seconds = value.getSeconds();
     const int64_t nanos = static_cast<int64_t>(value.getNanos());
     // Both streams hold one 8-byte value per row, so the two cursors are
@@ -444,17 +483,12 @@ void CellSplitter::split(const SplitBatch& batch) {
         hasNulls ? splitBoolean<true>(col, batch)
                  : splitBoolean<false>(col, batch);
         break;
-      case TypeKind::TIMESTAMP: {
-        const bool indexed = !batch.decoded[col].isIdentityMapping();
-        if (hasNulls) {
-          indexed ? splitTimestamp<true, true>(col, batch)
-                  : splitTimestamp<true, false>(col, batch);
-        } else {
-          indexed ? splitTimestamp<false, true>(col, batch)
-                  : splitTimestamp<false, false>(col, batch);
-        }
+      case TypeKind::TIMESTAMP:
+        dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+          hasNulls ? splitTimestamp<true, kMapping>(col, batch)
+                   : splitTimestamp<false, kMapping>(col, batch);
+        });
         break;
-      }
       case TypeKind::HUGEINT:
         dispatchRaw<int128_t>(col, batch, hasNulls);
         break;
@@ -468,25 +502,17 @@ void CellSplitter::split(const SplitBatch& batch) {
         dispatchRaw<double>(col, batch, hasNulls);
         break;
       case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY: {
-        const bool indexed = !batch.decoded[col].isIdentityMapping();
-        if (dictEnabled_[col] != 0) {
-          if (hasNulls) {
-            indexed ? splitStringDict<true, true>(col, batch)
-                    : splitStringDict<true, false>(col, batch);
+      case TypeKind::VARBINARY:
+        dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+          if (dictEnabled_[col] != 0) {
+            hasNulls ? dispatchStringDict<true, kMapping>(col, batch)
+                     : dispatchStringDict<false, kMapping>(col, batch);
           } else {
-            indexed ? splitStringDict<false, true>(col, batch)
-                    : splitStringDict<false, false>(col, batch);
+            hasNulls ? splitString<true, kMapping>(col, batch)
+                     : splitString<false, kMapping>(col, batch);
           }
-        } else if (hasNulls) {
-          indexed ? splitString<true, true>(col, batch)
-                  : splitString<true, false>(col, batch);
-        } else {
-          indexed ? splitString<false, true>(col, batch)
-                  : splitString<false, false>(col, batch);
-        }
+        });
         break;
-      }
       default:
         BOLT_UNREACHABLE();
     }
@@ -696,9 +722,9 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
     metrics.dictionaryMatchedRows += static_cast<int64_t>(stats.matchedRows);
     metrics.dictionaryFallbackRows += static_cast<int64_t>(stats.fallbackRows);
     const uint64_t rows = stats.matchedRows + stats.fallbackRows;
-    VLOG(1) << "CellShuffleWriter dictionary column " << col << ": matched "
-            << stats.matchedRows << " of " << rows << " rows ("
-            << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
+    LOG(INFO) << "CellShuffleWriter dictionary column " << col << ": matched "
+              << stats.matchedRows << " of " << rows << " rows ("
+              << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
   }
   cells_.releaseAll();
   resetWindow();
@@ -1033,7 +1059,25 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
   return false;
 }
 
-template <bool kHasNulls, bool kIndexed>
+template <bool kHasNulls, CellSplitter::InputMapping kMapping>
+void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    // Small input vocabularies are reused frequently. Avoid a second index
+    // load and a prefetch per row when their views occupy at most 4 KiB.
+    constexpr vector_size_t kSmallInputViews = 4096 / sizeof(StringView);
+    const auto* base = batch.decoded[col].base();
+    if (!base->isConstantEncoding() && base->size() > kSmallInputViews) {
+      splitStringDict<kHasNulls, kMapping, true>(col, batch);
+      return;
+    }
+  }
+  splitStringDict<kHasNulls, kMapping, false>(col, batch);
+}
+
+template <
+    bool kHasNulls,
+    CellSplitter::InputMapping kMapping,
+    bool kPrefetchInput>
 void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col]; // nulls() may materialize lazily
@@ -1050,6 +1094,12 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   // (materialized once per batch): one bit test replaces the isNullAt
   // call for identity and dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  const vector_size_t* __restrict indices = nullptr;
+  if constexpr (kMapping == InputMapping::kDictionary) {
+    indices = decoded.indices();
+  } else if constexpr (kMapping == InputMapping::kConstant) {
+    views += decoded.index(0);
+  }
   char* __restrict dictLineBase = cacheBase_ +
       ((static_cast<size_t>(dataStream) * numPartitions_) << kLineShift);
 
@@ -1063,13 +1113,27 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       __builtin_prefetch(
           dictLineBase + (static_cast<size_t>(row2pid[row + 8]) << kLineShift));
     }
+    if constexpr (kPrefetchInput) {
+      // Resolve the input indirection ahead of the size/character loads.
+      // Null rows may carry invalid indices, even for a prefetch.
+      constexpr uint32_t kInputPrefetchDistance = 8;
+      const uint32_t ahead = row + kInputPrefetchDistance;
+      if (ahead < numRows &&
+          (!kHasNulls || rawNulls == nullptr ||
+           !bits::isBitNull(rawNulls, ahead))) {
+        __builtin_prefetch(views + indices[ahead]);
+      }
+    }
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_.setNull(pid, nullColumn, positions[pid] + rowIndexInPid[row]);
         continue;
       }
     }
-    const StringView& view = kIndexed ? views[decoded.index(row)] : views[row];
+    const auto index = kMapping == InputMapping::kDictionary ? indices[row]
+        : kMapping == InputMapping::kConstant                ? 0
+                                                             : row;
+    const StringView& view = views[index];
     variableBytes_[pid] += view.size();
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&

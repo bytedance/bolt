@@ -961,6 +961,92 @@ TEST_F(CellWriterTest, dictionaryVocabularies) {
   }
 }
 
+TEST_F(CellWriterTest, inputMappings) {
+  // Cover the encoded numeric, raw numeric, timestamp and both string paths
+  // with permutations, compact dictionaries and constants from a nonzero
+  // base index. Null rows need not have valid indices, including lookahead.
+  // At 257 rows the nullable StringView base exceeds the 4 KiB prefetch cutoff.
+  constexpr int32_t kPartitions = 3;
+  const std::vector<std::string> words{
+      "", "red", "twelve-bytes", "out-of-line-string"};
+  const auto fallbackVocabulary =
+      makeFlatVector<std::string>({std::string(64, 'x'), "a", "b", "c"});
+  for (const vector_size_t rows : {1, 7, 8, 9, 31, 32, 33, 257}) {
+    SCOPED_TRACE(rows);
+    std::vector<VectorPtr> columns;
+    const auto addMappings = [&](const auto& values) {
+      using T = typename std::decay_t<decltype(values)>::value_type;
+      const auto vocabulary = makeFlatVector<T>(values);
+      const auto expanded = makeFlatVector<T>(
+          rows, [&](auto row) { return values[row % values.size()]; });
+      columns.push_back(BaseVector::wrapInDictionary(
+          nullptr, makeIndicesInReverse(rows), rows, expanded));
+      columns.push_back(BaseVector::wrapInDictionary(
+          nullptr,
+          makeIndices(rows, [](auto row) { return (3 * row + 1) % 4; }),
+          rows,
+          vocabulary));
+      const auto constant =
+          BaseVector::wrapInConstant(rows, 3, vocabulary, false);
+      columns.push_back(constant);
+      columns.push_back(BaseVector::wrapInDictionary(
+          makeNulls(rows, nullEvery(5)),
+          makeIndices(rows, [](auto row) { return row; }),
+          rows,
+          constant));
+      columns.push_back(BaseVector::wrapInDictionary(
+          makeNulls(rows, nullEvery(5)),
+          makeIndices(
+              rows,
+              [rows](auto row) {
+                return row % 5 == 0 ? std::numeric_limits<vector_size_t>::max()
+                                    : (3 * row + 2) % rows;
+              }),
+          rows,
+          expanded));
+    };
+    addMappings(words);
+    addMappings(std::vector<int64_t>{-123, 0, 42, int64_t{1} << 50});
+    addMappings(std::vector<double>{-0.5, 0.0, 1.5, 1.0e100});
+    addMappings(std::vector<Timestamp>{
+        Timestamp(-1, 1),
+        Timestamp(0, 999'999'999),
+        Timestamp(1'700'000'000, 123),
+        Timestamp(42, 987'654'321)});
+    columns.push_back(BaseVector::wrapInDictionary(
+        nullptr,
+        makeIndices(rows, [](auto row) { return row % 4; }),
+        rows,
+        fallbackVocabulary));
+    const auto input = test::roundRobin({makeRowVector(columns)}, kPartitions);
+    for (const bool dictionary : {false, true}) {
+      SCOPED_TRACE(dictionary);
+      roundTrip(
+          input,
+          kPartitions,
+          {{false, arrow::Compression::LZ4_FRAME}},
+          [&](CellShuffleOptions& options, bool) {
+            options.enableStringDictionary = dictionary;
+            options.stringDictionaryProbeRowCount = 0;
+          },
+          [&](const test::WrittenShuffle& written, bool) {
+            const auto& metrics = written.metrics;
+            if (dictionary) {
+              EXPECT_GT(metrics.dictionaryMatchedRows, 0);
+              EXPECT_GT(metrics.dictionaryFallbackRows, 0);
+              EXPECT_EQ(
+                  metrics.dictionaryMatchedRows +
+                      metrics.dictionaryFallbackRows,
+                  6 * rows - 2 * ((rows + 4) / 5));
+            } else {
+              EXPECT_EQ(metrics.dictionaryMatchedRows, 0);
+              EXPECT_EQ(metrics.dictionaryFallbackRows, 0);
+            }
+          });
+    }
+  }
+}
+
 TEST_F(CellWriterTest, dictionaryProbeUsesFirstBatchThreshold) {
   // The first batch decides the dictionary form. A later large batch must
   // not enable it if the first one fell below the configured threshold.
