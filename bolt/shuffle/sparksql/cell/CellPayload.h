@@ -33,6 +33,7 @@
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/type/StringView.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -229,6 +230,7 @@ class CellPayloadDecoder {
     size_t firstEntry;
     size_t numEntries;
     uint32_t matchedRows;
+    bool allInline;
   };
 
   /// Read position of one column in the current payload.
@@ -246,7 +248,8 @@ class CellPayloadDecoder {
     std::string_view data;
     uint64_t dataOffset{0};
     bool isDictionary{false};
-    std::vector<std::string_view> entries;
+    // Inline entries own their bytes; long entries still view the payload.
+    std::vector<StringView> entries;
     std::vector<Dictionary> dictionaries;
     const uint8_t* indexes{nullptr};
     uint64_t matchedRows{0};
@@ -265,7 +268,7 @@ class CellPayloadDecoder {
     size_t charsLeft{0};
   };
 
-  bool fail(std::string& error, const char* what) const {
+  FOLLY_NOINLINE bool fail(std::string& error, const char* what) const {
     error = what;
     return false;
   }
@@ -369,7 +372,7 @@ class CellPayloadDecoder {
       std::string& error);
 
   /// `bytes` of string space in the column's batch buffers.
-  char* stringSpace(uint32_t col, uint64_t bytes);
+  FOLLY_NOINLINE char* stringSpace(uint32_t col, uint64_t bytes);
 
   template <typename T>
   VectorPtr makeFlat(uint32_t col, const TypePtr& type);

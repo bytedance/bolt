@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
+#include <folly/lang/Assume.h>
 #include <folly/lang/Bits.h>
 #include <algorithm>
 #include <chrono>
@@ -135,6 +136,8 @@ inline void materializeString(
     const char* source,
     int32_t size,
     char*& chars) {
+  // Both flat lengths and dictionary entries are validated before use.
+  folly::assume(size >= 0);
   if (size > static_cast<int32_t>(StringView::kInlineSize)) {
     ::memcpy(chars, source, size);
     out.set(chars, size);
@@ -250,8 +253,10 @@ class CellPayloadDecoder::StringRows {
   template <typename Count, typename Write>
   void place(Count count, const Write& write) {
     if (bitmap_ == nullptr) {
+      auto* out = out_ + next_;
+      next_ += count;
       for (uint32_t i = 0; i < count; ++i) {
-        write(out_[next_++], i);
+        write(out[i], i);
       }
       return;
     }
@@ -887,6 +892,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     }
     const size_t firstEntry = cursor.entries.size();
     uint32_t serialized = 0;
+    bool allInline = true;
     uint8_t marker;
     while (true) {
       if (pos >= dataSize) {
@@ -915,6 +921,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
       }
       cursor.entries.emplace_back(
           reinterpret_cast<const char*>(data) + pos + 1, length);
+      allInline &= length <= StringView::kInlineSize;
       pos += 1 + length;
     }
     if (dataSize - pos < 4) {
@@ -923,7 +930,10 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     const uint32_t matchedRows = folly::loadUnaligned<uint32_t>(data + pos);
     pos += 4;
     cursor.dictionaries.push_back(
-        {firstEntry, cursor.entries.size() - firstEntry, matchedRows});
+        {firstEntry,
+         cursor.entries.size() - firstEntry,
+         matchedRows,
+         allInline});
     if (addOverflows(matchedSum, matchedRows, matchedSum)) {
       return fail(error, "matched counts overflow");
     }
@@ -1399,7 +1409,9 @@ bool CellPayloadDecoder::appendString(
   return ok;
 }
 
-FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
+// Flatten only the decoding/materialization kernels: allocation, error
+// reporting and length decoding keep explicit noinline boundaries.
+[[gnu::flatten]] FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
     uint32_t col,
     uint32_t dense,
     StringRows& rows,
@@ -1415,17 +1427,40 @@ FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
   const auto take = [&](auto count, const int64_t* lengths) {
     uint64_t dataBytes = 0;
     uint64_t heapChars = 0;
-    for (uint32_t i = 0; i < count; ++i) {
-      const uint64_t length = static_cast<uint64_t>(lengths[i]);
-      if (length > std::numeric_limits<int32_t>::max()) {
+    if constexpr (std::is_same_v<decltype(count), FullBlock>) {
+      uint64_t lengthBits = 0;
+      // Preserve the reduction loop until vectorization instead of early
+      // scalar unrolling after this lambda is inlined.
+#pragma GCC unroll 1
+      for (uint32_t i = 0; i < kLengthsPerBlock; ++i) {
+        const int64_t length = lengths[i];
+        const auto value = static_cast<uint64_t>(length);
+        lengthBits |= value;
+        dataBytes += value;
+        heapChars +=
+            length > static_cast<int64_t>(StringView::kInlineSize) ? value : 0;
+      }
+      // Any negative or oversized length has a bit above the int32 range.
+      // Unsigned sums of malformed lengths are discarded before use.
+      if (lengthBits > std::numeric_limits<int32_t>::max()) {
         return fail(
             error,
             cursor.isDictionary ? "fallback length out of range"
                                 : "string length out of range");
       }
-      dataBytes += length;
-      if (length > StringView::kInlineSize) {
-        heapChars += length;
+    } else {
+      for (uint32_t i = 0; i < count; ++i) {
+        const auto length = static_cast<uint64_t>(lengths[i]);
+        if (length > std::numeric_limits<int32_t>::max()) {
+          return fail(
+              error,
+              cursor.isDictionary ? "fallback length out of range"
+                                  : "string length out of range");
+        }
+        dataBytes += length;
+        if (length > StringView::kInlineSize) {
+          heapChars += length;
+        }
       }
     }
     // At most eight validated int32 lengths: neither sum can overflow.
@@ -1435,11 +1470,11 @@ FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
           cursor.isDictionary ? "fallback data length mismatch"
                               : "string data length mismatch");
     }
-    char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
     const char* source = cursor.data.data();
     if (cursor.dataOffset != 0) {
       source += cursor.dataOffset;
     }
+    char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
     rows.place(count, [&](StringView& value, uint32_t i) {
       const auto size = static_cast<int32_t>(lengths[i]);
       materializeString(value, source, size, chars);
@@ -1470,7 +1505,7 @@ FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
   return true;
 }
 
-FOLLY_NOINLINE bool CellPayloadDecoder::appendStringDictionary(
+[[gnu::flatten]] FOLLY_NOINLINE bool CellPayloadDecoder::appendStringDictionary(
     uint32_t col,
     uint32_t dense,
     StringRows& rows,
@@ -1487,49 +1522,67 @@ FOLLY_NOINLINE bool CellPayloadDecoder::appendStringDictionary(
   auto hits = static_cast<uint32_t>(
       std::min<uint64_t>(dense, cursor.matchedRows - cursor.matchedRead));
   remaining -= hits;
-  std::string_view values[kLengthsPerBlock];
-  const auto takeMatched = [&](auto count) {
-    uint64_t heapChars = 0;
+  const auto takeMatched = [&](auto count, const Dictionary& dictionary) {
+    const auto* indexes = cursor.indexes + cursor.matchedRead;
+    uint8_t maxIndex = 0;
     for (uint32_t i = 0; i < count; ++i) {
-      while (cursor.currentMatchedLeft == 0) {
-        cursor.currentDictionary = cursor.nextDictionary++;
-        cursor.currentMatchedLeft =
-            cursor.dictionaries[cursor.currentDictionary].matchedRows;
-      }
-      --cursor.currentMatchedLeft;
-      const auto& dictionary = cursor.dictionaries[cursor.currentDictionary];
-      const uint8_t index = cursor.indexes[cursor.matchedRead++];
-      if (index >= dictionary.numEntries) {
-        return fail(error, "dictionary index out of range");
-      }
-      values[i] = cursor.entries[dictionary.firstEntry + index];
-      if (values[i].size() > StringView::kInlineSize) {
-        heapChars += values[i].size();
-      }
+      maxIndex = std::max(maxIndex, indexes[i]);
     }
-    char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
-    rows.place(count, [&](StringView& value, uint32_t i) {
-      materializeString(
-          value,
-          values[i].data(),
-          static_cast<int32_t>(values[i].size()),
-          chars);
-    });
+    if (maxIndex >= dictionary.numEntries) {
+      return fail(error, "dictionary index out of range");
+    }
+    const auto* entries = cursor.entries.data() + dictionary.firstEntry;
+    if (dictionary.allInline) {
+      // Inline entries already own their bytes, including zeroed padding.
+      rows.place(count, [&](StringView& value, uint32_t i) {
+        value = entries[indexes[i]];
+      });
+    } else {
+      const StringView* values[kLengthsPerBlock];
+      uint64_t heapChars = 0;
+      for (uint32_t i = 0; i < count; ++i) {
+        const auto& entry = entries[indexes[i]];
+        if (!entry.isInline()) {
+          heapChars += entry.size();
+        }
+        values[i] = &entry;
+      }
+      char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
+      rows.place(count, [&](StringView& value, uint32_t i) {
+        const auto& entry = *values[i];
+        if (entry.isInline()) {
+          value = entry;
+        } else {
+          materializeString(value, entry.data(), entry.size(), chars);
+        }
+      });
+    }
     return true;
   };
-  while (hits >= kLengthsPerBlock) {
-    if (!takeMatched(FullBlock{})) {
+  while (hits > 0) {
+    while (cursor.currentMatchedLeft == 0) {
+      cursor.currentDictionary = cursor.nextDictionary++;
+      cursor.currentMatchedLeft =
+          cursor.dictionaries[cursor.currentDictionary].matchedRows;
+    }
+    // Keep the entry base and matched counters fixed for the whole group.
+    const auto& dictionary = cursor.dictionaries[cursor.currentDictionary];
+    const uint32_t count =
+        std::min({hits, cursor.currentMatchedLeft, kLengthsPerBlock});
+    if (!(count == kLengthsPerBlock ? takeMatched(FullBlock{}, dictionary)
+                                    : takeMatched(count, dictionary))) {
       return false;
     }
-    hits -= kLengthsPerBlock;
-  }
-  if (hits > 0 && !takeMatched(hits)) {
-    return false;
+    cursor.matchedRead += count;
+    cursor.currentMatchedLeft -= count;
+    hits -= count;
   }
   return remaining == 0 || appendStringFlat(col, remaining, rows, error);
 }
 
-char* CellPayloadDecoder::stringSpace(uint32_t col, uint64_t bytes) {
+FOLLY_NOINLINE char* CellPayloadDecoder::stringSpace(
+    uint32_t col,
+    uint64_t bytes) {
   // Small appends share one buffer per column and batch.
   constexpr uint64_t kMinStringBufferBytes = 32 << 10;
   auto& column = batch_[col];

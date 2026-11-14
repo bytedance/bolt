@@ -1344,6 +1344,8 @@ TEST_F(CellWriterTest, readerStringBlockBoundaries) {
     std::vector<std::string> dense(numRows);
     std::vector<std::optional<std::string>> nullable(numRows);
     std::vector<std::optional<std::string>> mixed(numRows);
+    std::vector<std::string> inlineStrings(numRows);
+    std::vector<std::optional<std::string>> inlineNullable(numRows);
     for (vector_size_t row = 0; row < numRows; ++row) {
       const auto length =
           row == 20 ? (32 << 10) + 1 : lengths[(row / 16) % lengths.size()];
@@ -1363,6 +1365,18 @@ TEST_F(CellWriterTest, readerStringBlockBoundaries) {
               'A' + (row + batch) % 26);
         }
       }
+      // Every inline width, with enough repetition to chain dictionaries
+      // instead of falling back. Nine-row runs put dictionary boundaries
+      // inside the reader's eight-value groups.
+      const auto inlineLength = (row / 9) % (StringView::kInlineSize + 1);
+      inlineStrings[row].assign(
+          inlineLength, 'a' + (inlineLength + batch) % 26);
+      if (inlineLength != 0) {
+        inlineStrings[row][inlineLength / 2] = '\0';
+      }
+      if (batch != 1 && row % 5 != 0) {
+        inlineNullable[row] = inlineStrings[row];
+      }
     }
     input.data.push_back(makeRowVector({
         makeFlatVector<int64_t>(
@@ -1375,6 +1389,8 @@ TEST_F(CellWriterTest, readerStringBlockBoundaries) {
             [](auto row) {
               return StringView(row % 2 == 0 ? "short" : "dictionary-13");
             }),
+        makeFlatVector<std::string>(inlineStrings),
+        makeNullableFlatVector<std::string>(inlineNullable),
     }));
     input.pids.emplace_back(numRows, 0);
     firstRow += numRows;
@@ -1401,6 +1417,23 @@ TEST_F(CellWriterTest, readerStringBlockBoundaries) {
       const auto batches = test::readPartition(
           written.partitions[0], type, codec.get(), pool(), batchSize, 1 << 30);
       test::expectPartitionRows(rows[0], batches, 0, batchSize);
+      // Inline bytes beyond the value must remain zero, including empty
+      // values and null rows: hash/equality consumers read the whole words.
+      for (const auto& batch : batches) {
+        for (const uint32_t col : {5, 6}) {
+          const auto* column =
+              batch->childAt(col)->as<FlatVector<StringView>>();
+          const auto* values = column->rawValues();
+          for (vector_size_t row = 0; row < batch->size(); ++row) {
+            ASSERT_TRUE(values[row].isInline());
+            const auto canonical = column->isNullAt(row)
+                ? StringView()
+                : StringView(values[row].data(), values[row].size());
+            EXPECT_EQ(
+                ::memcmp(values + row, &canonical, sizeof(StringView)), 0);
+          }
+        }
+      }
       for (size_t i = 0; i + 1 < batches.size(); ++i) {
         EXPECT_EQ(batches[i]->size(), batchSize);
       }

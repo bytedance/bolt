@@ -315,22 +315,67 @@ TYPED_TEST(CellStreamCursorTest, blockReadsMixWithCopiesAndReset) {
   EXPECT_TRUE(cursor.finished());
 }
 
+TYPED_TEST(CellStreamCursorTest, constantBlocksSignExtendEveryByteWidth) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  for (uint32_t width = 1; width <= sizeof(T); ++width) {
+    SCOPED_TRACE(width);
+    const uint64_t signBit = uint64_t{1} << (width * 8 - 1);
+    const int64_t minimum = width == sizeof(int64_t)
+        ? std::numeric_limits<int64_t>::min()
+        : -static_cast<int64_t>(signBit);
+    for (const int64_t value :
+         {int64_t{0},
+          int64_t{1},
+          int64_t{-1},
+          minimum,
+          static_cast<int64_t>(signBit - 1)}) {
+      SCOPED_TRACE(value);
+      // Construct the wire width explicitly, including non-minimal widths.
+      // A writer may choose kPlain for a single full-width value.
+      const auto bytes = block(
+          EncodingKind::kConstNarrow,
+          width,
+          bytesOf<T>({static_cast<T>(value)}).substr(0, width));
+      for (const uint32_t count : {1u, kBlockValues - 1, kBlockValues}) {
+        SCOPED_TRACE(count);
+        StreamCursor<T> cursor;
+        cursor.reset(
+            reinterpret_cast<const uint8_t*>(bytes.data()),
+            bytes.size(),
+            count);
+        const T* values = nullptr;
+        ASSERT_EQ(cursor.nextBlock(count, values), count);
+        ASSERT_NE(values, nullptr);
+        for (uint32_t i = 0; i < count; ++i) {
+          EXPECT_EQ(values[i], static_cast<T>(value));
+        }
+        EXPECT_TRUE(cursor.finished());
+      }
+    }
+  }
+}
+
 TYPED_TEST(CellStreamCursorTest, malformedBlocksDoNotExposeValues) {
   using T = TypeParam;
   constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
   const auto first = encoded(std::vector<T>(kBlockValues, T{7}));
-  const std::vector<std::string> malformed{
+  std::vector<std::string> malformed{
       "",
       block(EncodingKind::kConstNarrow, 0, ""),
       block(EncodingKind::kConstNarrow, sizeof(T) + 1, std::string(9, '\0')),
-      block(
-          EncodingKind::kConstNarrow,
-          sizeof(T),
-          std::string(sizeof(T) - 1, '\0')),
       block(EncodingKind::kBitPack, 0, std::string(kCacheLineBytes, '\0')),
       block(EncodingKind::kPlain, 1, std::string(kCacheLineBytes, '\0')),
       block(EncodingKind::kPlain, 0, std::string(kCacheLineBytes - 1, '\0')),
       block(EncodingKind::kForBitPack, 0, std::string(sizeof(T) - 1, '\0'))};
+  // Each specialized load and the odd-width fallback must check its whole
+  // body before loading any bytes.
+  for (uint32_t width = 1; width <= sizeof(T); ++width) {
+    for (uint32_t available = 0; available < width; ++available) {
+      malformed.push_back(block(
+          EncodingKind::kConstNarrow, width, std::string(available, '\0')));
+    }
+  }
   for (size_t i = 0; i < malformed.size(); ++i) {
     SCOPED_TRACE(i);
     const auto bytes = first + malformed[i];
@@ -738,6 +783,24 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
        varchar,
        plain(3, {encoded<int64_t>({2, 2, 2}), "aabbccd"}),
        "string data length mismatch"},
+      {"a negative string length in the last lane of a full block",
+       varchar,
+       plain(8, {encoded<int64_t>({0, 0, 0, 0, 0, 0, 0, -1}), ""}),
+       "string length out of range"},
+      {"an oversized string length in the last lane of a full block",
+       varchar,
+       plain(
+           8,
+           {encoded<int64_t>({0, 0, 0, 0, 0, 0, 0, int64_t{kInt32Max} + 1}),
+            ""}),
+       "string length out of range"},
+      {"a negative fallback length in the last lane of a full block",
+       varchar,
+       dictionaryForm(
+           8,
+           encoded<int64_t>({0, 0, 0, 0, 0, 0, 0, -1}),
+           dictionary({}, kDictLastMarker, 0)),
+       "fallback length out of range"},
       {"an all-null string column with lengths",
        varchar,
        payload(
@@ -753,6 +816,20 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
            std::string("\x00\x02\x01", 3),
            dictionary({"a", "b"}, kDictMoreMarker, 2) +
                dictionary({"c", "d", "e"}, kDictLastMarker, 1)),
+       "dictionary index out of range"},
+      {"a full inline dictionary block ending in index 255",
+       varchar,
+       dictionaryForm(
+           8,
+           std::string(7, '\0') + '\xFF',
+           dictionary({"a", "b"}, kDictLastMarker, 8)),
+       "dictionary index out of range"},
+      {"a full mixed dictionary block ending in index 255",
+       varchar,
+       dictionaryForm(
+           8,
+           std::string(7, '\0') + '\xFF',
+           dictionary({"a", std::string(13, 'b')}, kDictLastMarker, 8)),
        "dictionary index out of range"},
       {"a dictionary of 64 bytes",
        varchar,
@@ -956,6 +1033,50 @@ TEST_F(CellMalformedInputTest, edgesOfTheFormatAreRead) {
         test::rowsIn({makeRowVector(
             {makeFlatVector<int32_t>(std::vector<int32_t>(16, kBase))})}),
         read(forZero, integer, false, batchSize),
+        0,
+        batchSize);
+  }
+
+  // Zero-matched dictionaries, including empty ones, consume no indexes.
+  // The non-empty segments cross full blocks and batch boundaries before
+  // the same row cursor continues into the fallback lengths.
+  std::string indexes;
+  std::string data;
+  std::vector<std::string> strings;
+  const auto addDictionary = [&](const std::vector<std::string>& entries,
+                                 uint32_t matched) {
+    data += dictionary(entries, kDictMoreMarker, matched);
+    for (uint32_t i = 0; i < matched; ++i) {
+      const auto index = i % entries.size();
+      indexes += static_cast<char>(index);
+      strings.push_back(entries[index]);
+    }
+  };
+  addDictionary({}, 0);
+  addDictionary({"unused"}, 0);
+  addDictionary({"", "abcdefgh", std::string("a\0b", 3)}, 9);
+  addDictionary({}, 0);
+  addDictionary({"", std::string(13, 'x')}, 11);
+  data += dictionary({}, kDictLastMarker, 0);
+  const std::vector<std::string> fallback{"", std::string(12, 'y'), "z"};
+  std::vector<int64_t> lengths;
+  for (const auto& value : fallback) {
+    lengths.push_back(value.size());
+    data += value;
+    strings.push_back(value);
+  }
+  const auto dictionarySequence = payload(
+      strings.size(),
+      nullBody({NullTag::kNoNull}),
+      std::string(1, '\x01'),
+      {storedRun({indexes + encoded(lengths), data})});
+  const auto expectedStrings =
+      makeRowVector({makeFlatVector<std::string>(strings)});
+  for (const int32_t batchSize : {4096, 7, 8, 9}) {
+    SCOPED_TRACE(batchSize);
+    test::expectPartitionRows(
+        test::rowsIn({expectedStrings}),
+        read(dictionarySequence, ROW({"a"}, {VARCHAR()}), false, batchSize),
         0,
         batchSize);
   }
