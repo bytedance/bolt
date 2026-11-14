@@ -249,8 +249,26 @@ inline uint64_t loadLowBytes(const uint8_t* in, uint32_t bytes) {
   return value;
 }
 
+/// Sign-extends a validated 1..8-byte value without reading past its body.
+/// Fixed-width loads avoid a partial stack store followed by a wider reload
+/// for the common widths.
+FOLLY_ALWAYS_INLINE int64_t loadSignedBytes(const uint8_t* in, uint32_t bytes) {
+  switch (bytes) {
+    case 1:
+      return folly::loadUnaligned<int8_t>(in);
+    case 2:
+      return folly::loadUnaligned<int16_t>(in);
+    case 4:
+      return folly::loadUnaligned<int32_t>(in);
+    case 8:
+      return folly::loadUnaligned<int64_t>(in);
+    default:
+      return signExtend(loadLowBytes(in, bytes), bytes * 8);
+  }
+}
+
 template <typename T, typename Count>
-inline uint32_t
+FOLLY_ALWAYS_INLINE uint32_t
 decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
@@ -269,8 +287,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
       if (param < 1 || param > kWidth || bodyAvail < param) {
         return 0;
       }
-      const T value =
-          static_cast<T>(signExtend(loadLowBytes(body, param), param * 8));
+      const T value = static_cast<T>(loadSignedBytes(body, param));
       for (uint32_t i = 0; i < count; ++i) {
         dst[i] = value;
       }
@@ -433,7 +450,8 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
 /// too little input after the block for the gathers' 8-byte reads (a
 /// stream's last blocks). The scalar decoder then takes the block.
 template <typename T>
-inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
+FOLLY_ALWAYS_INLINE uint32_t
+decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kCount = kCacheLineBytes / kWidth;
   constexpr uint32_t kMaxBits = kWidth == 8 ? 57 : kWidth * 8;
@@ -508,9 +526,10 @@ FOLLY_ALWAYS_INLINE uint32_t encodeBlockFull(const T* values, uint8_t* out) {
 /// nothing. Otherwise fills dst[0, count) and returns the bytes consumed
 /// (1 + body).
 ///
-/// T is one of int16_t, int32_t, int64_t, like encodeBlock.
+/// T is one of int16_t, int32_t, int64_t, like encodeBlock. Keep the runtime
+/// count decoder separate so stream cursors inline only their full blocks.
 template <typename T>
-inline uint32_t
+FOLLY_NOINLINE uint32_t
 decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
   return detail::decodeBlockImpl(in, inBytes, count, dst);
 }
@@ -520,9 +539,11 @@ decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
 /// Every block of a stream but its tail is full. With AVX2, kBitPack and
 /// kForBitPack blocks unpack in vector lanes; the scalar path takes the
 /// rest, and the last blocks of an input that the 8-byte gathers would
-/// read past.
+/// read past. Keep full-block decoding inside the stream cursor rather than
+/// adding a call for each group of eight string lengths.
 template <typename T>
-inline uint32_t decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
+FOLLY_ALWAYS_INLINE uint32_t
+decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
 #if defined(__AVX2__)
   if (const uint32_t consumed = detail::decodeFullBlockAvx2(in, inBytes, dst)) {
     return consumed;
