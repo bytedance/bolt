@@ -1047,6 +1047,59 @@ TEST_F(CellWriterTest, inputMappings) {
   }
 }
 
+TEST_F(CellWriterTest, dictionaryFallbackBatchPaths) {
+  // Mix dictionary and fallback partitions within a batch, then send a
+  // batch only to a demoted partition while unused partitions remain in
+  // dictionary mode. Later batches exercise new partitions and window
+  // resets. Null rows must not be counted as fallback values.
+  constexpr int32_t kPartitions = 3;
+  constexpr vector_size_t kRows = 257;
+  ShuffleInput input;
+  uint64_t nonNullRows = 0;
+  for (int batch = 0; batch < 5; ++batch) {
+    std::vector<std::optional<std::string>> values(kRows);
+    auto& pids = input.pids.emplace_back(kRows);
+    for (vector_size_t row = 0; row < kRows; ++row) {
+      const auto pid = batch == 1 ? 0 : batch == 4 ? 2 : row % 2;
+      pids[row] = pid;
+      if (row % 7 == 0) {
+        continue;
+      }
+      ++nonNullRows;
+      if ((pid == 0 && row >= 10) || (pid == 1 && batch >= 2 && row >= 9)) {
+        values[row] = std::string(70 + row % 5, 'a' + batch);
+      } else {
+        values[row] = pid == 2 ? "fresh" : "keep";
+      }
+    }
+    input.data.push_back(makeRowVector({
+        makeFlatVector<int64_t>(
+            kRows, [batch](auto row) { return batch * kRows + row; }),
+        makeNullableFlatVector<std::string>(values),
+    }));
+  }
+  for (const bool seal : {false, true}) {
+    SCOPED_TRACE(seal);
+    roundTrip(
+        input,
+        kPartitions,
+        {{false, arrow::Compression::LZ4_FRAME},
+         {true, arrow::Compression::LZ4_FRAME}},
+        [seal](CellShuffleOptions& options, bool) {
+          options.stringDictionaryProbeRowCount = 0;
+          options.partitionSealBytes = seal ? 1 : 1LL << 30;
+        },
+        [nonNullRows](const test::WrittenShuffle& written, bool) {
+          const auto& metrics = written.metrics;
+          EXPECT_GT(metrics.dictionaryMatchedRows, 0);
+          EXPECT_GT(metrics.dictionaryFallbackRows, 0);
+          EXPECT_EQ(
+              metrics.dictionaryMatchedRows + metrics.dictionaryFallbackRows,
+              nonNullRows);
+        });
+  }
+}
+
 TEST_F(CellWriterTest, dictionaryProbeUsesFirstBatchThreshold) {
   // The first batch decides the dictionary form. A later large batch must
   // not enable it if the first one fell below the configured threshold.
