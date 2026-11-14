@@ -193,13 +193,18 @@ class CellSplitter {
                                          : windowRowCounts_.data();
   }
 
+  enum class InputMapping { kIdentity, kConstant, kDictionary };
+
+  template <typename Split>
+  static void dispatchInputMapping(const DecodedVector& decoded, Split&& split);
+
   /// Boolean values as 0/1 bytes of a Raw Data stream.
   template <bool kHasNulls>
   BOLT_CELL_KERNEL void splitBoolean(uint32_t col, const SplitBatch& batch);
 
   /// The full 16-byte Timestamp: seconds and nanos into two Bigint encoded
   /// streams whose cache cursors move in lockstep.
-  template <bool kHasNulls, bool kIndexed>
+  template <bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitTimestamp(uint32_t col, const SplitBatch& batch);
 
   /// log2(kCacheLineBytes): a line's offset from its stream's base.
@@ -232,13 +237,13 @@ class CellSplitter {
     }
   }
 
-  template <typename T, bool kHasNulls, bool kIndexed>
+  template <typename T, bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitFixed(uint32_t col, const SplitBatch& batch);
 
-  template <typename T, bool kHasNulls, bool kIndexed>
+  template <typename T, bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
-  template <bool kHasNulls, bool kIndexed>
+  template <bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitString(uint32_t col, const SplitBatch& batch);
 
   template <typename T>
@@ -254,7 +259,10 @@ class CellSplitter {
     uint64_t fallbackRows{0}; // rows written through the fallback tail
   };
 
-  template <bool kHasNulls, bool kIndexed>
+  template <bool kHasNulls, InputMapping kMapping>
+  void dispatchStringDict(uint32_t col, const SplitBatch& batch);
+
+  template <bool kHasNulls, InputMapping kMapping, bool kPrefetchInput>
   BOLT_CELL_KERNEL void splitStringDict(uint32_t col, const SplitBatch& batch);
 
   /// Per (partition, dictionary column): the open segment's bookkeeping, 8

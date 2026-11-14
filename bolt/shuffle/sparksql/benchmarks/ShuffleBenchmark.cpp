@@ -235,6 +235,9 @@ enum class Family {
   kWideRandom,
   kClusteredIds,
   kIds33To40Bit,
+  kStrMappingFlat,
+  kStrMappingPermuted,
+  kStrMappingCompact,
 };
 
 /// The families an extra Cell writer joins: CellNoDict the dictionary ones,
@@ -292,6 +295,9 @@ constexpr FamilyInfo kFamilies[] = {
     {Family::kWideRandom, "wide_random"},
     {Family::kClusteredIds, "clustered_ids"},
     {Family::kIds33To40Bit, "ids_33_40bit"},
+    {Family::kStrMappingFlat, "str_mapping_flat", kDictionary},
+    {Family::kStrMappingPermuted, "str_mapping_permuted", kDictionary},
+    {Family::kStrMappingCompact, "str_mapping_compact", kDictionary},
 };
 
 const FamilyInfo& familyInfo(Family family) {
@@ -305,6 +311,12 @@ const FamilyInfo& familyInfo(Family family) {
 
 bool hasTrait(Family family, FamilyTrait trait) {
   return (familyInfo(family).traits & trait) != 0;
+}
+
+bool isStringMappingFamily(Family family) {
+  return family == Family::kStrMappingFlat ||
+      family == Family::kStrMappingPermuted ||
+      family == Family::kStrMappingCompact;
 }
 
 struct CaseSpec {
@@ -535,6 +547,12 @@ std::vector<CaseSpec> caseSpecs() {
   // The production shape under the 256 MiB limit: the spill path seen in
   // production.
   add("F11", Family::kUidZipf, 500, kStd, 0, 1024, false, 256);
+  // Identical rows and partitions, with flat strings, a permuted full-size
+  // base, or a compact vocabulary. No nulls: the two indexed cases exercise
+  // the dictionary mapping's non-null string-dictionary loop.
+  add("A26-flat", Family::kStrMappingFlat, 500, kStd, 0, 16);
+  add("A26-permuted", Family::kStrMappingPermuted, 500, kStd, 0, 16);
+  add("A26-compact", Family::kStrMappingCompact, 500, kStd, 0, 16);
   return c;
 }
 
@@ -1291,6 +1309,51 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
       return makeRow(
           {"pid", "key", "value"},
           {pid, key(), randomWords(nulls, rng, lowCardVocabulary())});
+    case Family::kStrMappingFlat:
+    case Family::kStrMappingPermuted:
+    case Family::kStrMappingCompact: {
+      auto keys = key();
+      const auto& vocab = lowCardVocabulary();
+      std::vector<vector_size_t> words(kRowsPerBatch);
+      for (auto& word : words) {
+        word = static_cast<vector_size_t>(rng() % vocab.size());
+      }
+      auto indices =
+          AlignedBuffer::allocate<vector_size_t>(kRowsPerBatch, inputPool());
+      auto* raw = indices->asMutable<vector_size_t>();
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        raw[i] = i;
+      }
+      if (spec.family == Family::kStrMappingPermuted) {
+        // A separate generator preserves subsequent batches' logical rows.
+        Rng mappingRng(0xA26ULL + batch);
+        std::shuffle(raw, raw + kRowsPerBatch, mappingRng);
+      }
+      std::vector<vector_size_t> baseWords;
+      if (spec.family == Family::kStrMappingCompact) {
+        baseWords.resize(vocab.size());
+        for (vector_size_t i = 0; i < baseWords.size(); ++i) {
+          baseWords[i] = i;
+        }
+        std::copy(words.begin(), words.end(), raw);
+      } else {
+        baseWords.resize(kRowsPerBatch);
+        for (vector_size_t row = 0; row < kRowsPerBatch; ++row) {
+          baseWords[raw[row]] = words[row];
+        }
+      }
+      auto values = flat<StringView>(
+          VARCHAR(),
+          0,
+          rng,
+          [&](vector_size_t i) { return StringView(vocab[baseWords[i]]); },
+          static_cast<vector_size_t>(baseWords.size()));
+      if (spec.family != Family::kStrMappingFlat) {
+        values = BaseVector::wrapInDictionary(
+            nullptr, indices, kRowsPerBatch, std::move(values));
+      }
+      return makeRow({"pid", "key", "value"}, {pid, keys, values});
+    }
     case Family::kStrDate8:
     case Family::kStrDate10:
       return makeRow(
@@ -2086,11 +2149,19 @@ const Case& getCase(const CaseSpec& spec) {
   if (FLAGS_bolt_benchmark_shuffle_input_mb > 0) {
     built->spec.inputMb = FLAGS_bolt_benchmark_shuffle_input_mb;
   }
-  Rng rng(std::hash<std::string>{}(spec.id) ^ 0x5eedULL);
+  const bool stringMapping = isStringMappingFamily(spec.family);
+  // Mapping comparisons share logical rows, including their partitions.
+  const auto seed = stringMapping ? std::string("A26") : spec.id;
+  Rng rng(std::hash<std::string>{}(seed) ^ 0x5eedULL);
   const int64_t target = built->spec.inputMb << 20;
   for (int32_t b = 0; built->inputBytes < target; ++b) {
     auto batch = makeBatch(built->spec, b, rng);
-    built->inputBytes += batch->estimateFlatSize();
+    // A compact dictionary's size estimate includes its small base's
+    // allocation slack. Count the same logical flat bytes in all three
+    // mapping cases so they process exactly the same batches and rows.
+    built->inputBytes += stringMapping ? int64_t{batch->size()} *
+            (sizeof(int32_t) + sizeof(int64_t) + sizeof(StringView))
+                                       : batch->estimateFlatSize();
     built->rows += batch->size();
     built->checksum += rowsHash(*withoutPid(batch));
     built->batches.push_back(std::move(batch));
