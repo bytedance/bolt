@@ -747,8 +747,8 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        },
        true,
        false},
-      // Every limit at once, each firing between the others: 21 growth
-      // spills, 4 partition seals and a null seal.
+      // Every limit at once: growth spills, partition seals and null seals
+      // interleave as the streams fill their cells.
       {"p7_lz4_every_limit",
        7,
        true,
@@ -781,8 +781,9 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        false,
        false},
   };
-  // Recorded since the writer packs wide values at whole bytes
-  // (kExactPackMaxBits, kBigintPlainMinBits).
+  // Wide values are packed at whole bytes (kExactPackMaxBits,
+  // kBigintPlainMinBits). The spill records also reflect full-line string
+  // staging, which changes when cell allocations trigger Run spills.
   static const Golden kGolden[] = {
       {"p1_none", 2517475, 0x43f7afffad8f6688ULL},
       {"p7_lz4", 2246101, 0x4530bbef09b209e6ULL},
@@ -793,11 +794,11 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
       {"p7_lz4_partition_seals_rss", 2246778, 0xeb80ff5ef947c8feULL},
       {"p7_none_null_seals", 2542676, 0xbba839d809099ae6ULL},
       {"p7_lz4_null_seals_rss", 2297123, 0xa746b56b725d20adULL},
-      {"p7_lz4_spills", 2251769, 0xeecc1d2e93fd4156ULL},
-      {"p1024_none_spills", 8635904, 0x2714cd1c35846e2aULL},
+      {"p7_lz4_spills", 2251184, 0x464fecdbff7bb5bdULL},
+      {"p1024_none_spills", 8757942, 0xb08529a93fe8607dULL},
       {"p7_lz4_spills_rss", 2255058, 0xc79faec398d8df82ULL},
       {"p1_lz4_seals", 2254213, 0xa98fc2436554c9cbULL},
-      {"p7_lz4_every_limit", 2285074, 0x1b47d371375a0ca8ULL},
+      {"p7_lz4_every_limit", 2328126, 0x8beb424d12b4ff9bULL},
       {"p7_lz4_no_dictionary", 2268893, 0xbca4ebf73b93e31aULL},
       {"p7_lz4_one_shot", 2224722, 0x77773523d15b6ad3ULL},
   };
