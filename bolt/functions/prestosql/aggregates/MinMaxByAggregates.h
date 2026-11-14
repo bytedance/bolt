@@ -872,9 +872,11 @@ class MinMaxByNAggregate : public exec::Aggregate {
     const auto* comparisonArray = result.comparisonArray;
     const auto* comparisons = result.comparisons;
 
-    const auto numValues = valueArray->sizeAt(decodedIndex);
-    const auto valueOffset = valueArray->offsetAt(decodedIndex);
-    const auto comparisonOffset = comparisonArray->offsetAt(decodedIndex);
+    const auto valueIndex = decodedValue_.index(decodedIndex);
+    const auto comparisonIndex = decodedComparison_.index(decodedIndex);
+    const auto numValues = valueArray->sizeAt(valueIndex);
+    const auto valueOffset = valueArray->offsetAt(valueIndex);
+    const auto comparisonOffset = comparisonArray->offsetAt(comparisonIndex);
     for (auto i = 0; i < numValues; ++i) {
       const auto comparison = comparisons->valueAt(comparisonOffset + i);
       if constexpr (std::is_same_v<V, ComplexType>) {
@@ -895,9 +897,10 @@ class MinMaxByNAggregate : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediates_.base());
 
-    decodedN_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
-    decodedValue_.decode(*baseRowVector->childAt(2), rows);
+    // Fields are accessed using base row indices, not input row indices.
+    decodedN_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
+    decodedValue_.decode(*baseRowVector->childAt(2));
 
     IntermediateResult result{};
     result.valueArray = decodedValue_.base()->template as<ArrayVector>();

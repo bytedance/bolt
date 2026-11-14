@@ -363,18 +363,25 @@ class MinMaxByAggregateBase : public exec::Aggregate {
     }
   }
 
+  void decodeIntermediateRows(
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args) {
+    decodedIntermediateResult_.decode(*args[0], rows);
+    auto baseRowVector =
+        dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
+
+    // Fields are accessed using base row indices, not input row indices.
+    decodedValue_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
+  }
+
   template <typename MayUpdate>
   void addIntermediateResults(
       char** groups,
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       MayUpdate mayUpdate) {
-    decodedIntermediateResult_.decode(*args[0], rows);
-    auto baseRowVector =
-        dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
-
-    decodedValue_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
+    decodeIntermediateRows(rows, args);
 
     if (decodedIntermediateResult_.isConstantMapping() &&
         decodedIntermediateResult_.isNullAt(0)) {
@@ -469,13 +476,7 @@ class MinMaxByAggregateBase : public exec::Aggregate {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       MayUpdate mayUpdate) {
-    // Decode struct(Value, ComparisonValue) as individual vectors.
-    decodedIntermediateResult_.decode(*args[0], rows);
-    auto baseRowVector =
-        dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
-
-    decodedValue_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
+    decodeIntermediateRows(rows, args);
 
     if (decodedIntermediateResult_.isConstantMapping()) {
       if (decodedIntermediateResult_.isNullAt(0)) {
