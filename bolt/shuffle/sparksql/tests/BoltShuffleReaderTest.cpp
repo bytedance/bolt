@@ -23,10 +23,12 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/Payload.h"
@@ -159,6 +161,65 @@ class BoltShuffleReaderTest : public ::testing::Test {
   std::vector<bool> isValidityBuffer_;
   std::unique_ptr<BoltColumnarBatchDeserializerFactory> factory_;
 };
+
+TEST_F(BoltShuffleReaderTest, RejectsCellPayloads) {
+  // Where the writer emits Cell payloads - forced, or an adaptive choice
+  // preferring Cell, under any partitioning - this factory must refuse the
+  // stream rather than misread it as V1/V2 payloads. Otherwise the writer
+  // is V1 without a pid, which reads as usual.
+  auto stream = buildStream(1, 16, &isValidityBuffer_, pool_);
+  const auto makeFactory = [&](ShuffleWriterType type,
+                               bool preferCell,
+                               const std::string& partitioning) {
+    auto factory = std::make_unique<BoltColumnarBatchDeserializerFactory>(
+        schema_,
+        nullptr,
+        rowType_,
+        1024,
+        1 << 20,
+        pool_,
+        boltPool_.get(),
+        false);
+    factory->setShuffleWriterType(static_cast<int32_t>(type));
+    factory->setPreferCellShuffle(preferCell);
+    factory->setNumPartitions(4);
+    factory->setpartitioningShortName(partitioning);
+    return factory;
+  };
+  const auto open = [&](BoltColumnarBatchDeserializerFactory& factory) {
+    return factory.createDeserializer(
+        std::make_shared<arrow::io::BufferReader>(stream));
+  };
+
+  // Cell payloads: refused with the reason.
+  for (const auto* partitioning : {"hash", "single", "rr"}) {
+    SCOPED_TRACE(partitioning);
+    for (const auto& [type, preferCell] :
+         {std::pair{ShuffleWriterType::Cell, false},
+          std::pair{ShuffleWriterType::Adaptive, true},
+          std::pair{ShuffleWriterType::V1, true}}) {
+      auto factory = makeFactory(type, preferCell, partitioning);
+      BOLT_ASSERT_THROW(open(*factory), "SparkShuffleReaderNode");
+    }
+  }
+
+  // V1 payloads: without a pid and without Cell, the writer is V1 whatever
+  // type is forced.
+  for (const auto& [type, preferCell] :
+       {std::pair{ShuffleWriterType::Adaptive, false},
+        std::pair{ShuffleWriterType::V2, false},
+        std::pair{ShuffleWriterType::RowBased, true}}) {
+    auto factory = makeFactory(type, preferCell, "single");
+    auto d = open(*factory);
+    drainAndVerify(*d, 16);
+  }
+
+  // Row-based payloads: the adaptive choice took the row-based writer
+  // before any preference for Cell, so the factory opens its row reader.
+  auto rowBased = makeFactory(ShuffleWriterType::Adaptive, true, "hash");
+  rowBased->setRowBasedShuffleThreshold(1);
+  EXPECT_NE(open(*rowBased), nullptr);
+}
 
 TEST_F(BoltShuffleReaderTest, SinglePayload) {
   constexpr int32_t kRows = 16;

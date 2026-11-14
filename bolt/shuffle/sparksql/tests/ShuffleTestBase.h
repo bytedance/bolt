@@ -106,6 +106,13 @@ class ShuffleTestBase : public bytedance::bolt::exec::test::OperatorTestBase {
   // execute test with param, generating input data internally
   void executeTest(const ShuffleTestParam& param);
 
+  // `input` as HashAggregation composite output: a pid column (all 0, set
+  // by the harness) and `input`'s rows serialized in `rowFormat`, each with
+  // its 4-byte size header.
+  std::shared_ptr<CompositeRowVector> createCompositeInput(
+      const RowVectorPtr& input,
+      row::RowFormat rowFormat);
+
   std::shared_ptr<CompositeRowVector> createCompositeRowVectorWithPid(
       const RowTypePtr& rowTypeWithoutPid,
       vector_size_t rowCount);

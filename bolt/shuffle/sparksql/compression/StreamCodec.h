@@ -104,6 +104,9 @@ class StreamCompressor {
   bool checksumEnabled() const {
     return options_.checksumEnabled;
   }
+  bool independentBlocks() const {
+    return options_.independentBlocks;
+  }
 
  private:
   const CodecType codecType_;

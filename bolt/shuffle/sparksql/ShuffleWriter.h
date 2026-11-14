@@ -119,6 +119,10 @@ class ShuffleWriter {
     return metrics_.useRowBased;
   }
 
+  int64_t useCellShuffle() const {
+    return metrics_.useCellShuffle;
+  }
+
   int64_t totalConvertTime() const {
     return metrics_.convertTime;
   }
@@ -129,6 +133,10 @@ class ShuffleWriter {
 
   int64_t totalComputePidTime() const {
     return metrics_.computePidTime;
+  }
+
+  int64_t sealSpillTime() const {
+    return metrics_.sealSpillTime;
   }
 
   const std::vector<int64_t>& partitionLengths() const {

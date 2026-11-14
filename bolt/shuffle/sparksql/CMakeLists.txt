@@ -33,6 +33,19 @@ bolt_add_library(
   BoltShuffleWriter.cpp
   BoltShuffleWriterV2.cpp
   CelebornReaderStreamIterator.cpp
+  cell/CellBuffer.cpp
+  cell/CellNestedAssembler.cpp
+  cell/CellNestedLayout.cpp
+  cell/CellNestedShredder.cpp
+  cell/CellOutput.cpp
+  cell/CellPayload.cpp
+  cell/CellSplitter.cpp
+  cell/CompositeShuffleWriter.cpp
+  cell/CellShuffleReader.cpp
+  cell/CellShuffleTypeAdapter.cpp
+  cell/CellShuffleWriter.cpp
+  cell/CellFormat.cpp
+  cell/RunCompressor.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp
@@ -55,6 +68,7 @@ bolt_add_library(
   partitioner/RoundRobinPartitioner.cpp
   partitioner/SinglePartitioner.cpp
   Options.cpp
+  PartitionBlockOutput.cpp
   Payload.cpp
   ShuffleColumnarToRowConverter.cpp
   ShuffleMemoryPool.cpp
