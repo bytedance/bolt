@@ -34,6 +34,12 @@
 #include <arrow/type_traits.h>
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <mutex>
+#include <thread>
 #include "bolt/common/base/Nulls.h"
 #include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/core/QueryCtx.h"
@@ -1013,6 +1019,218 @@ TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolMovedChildLease) {
   secondSchema.release(&secondSchema);
   schema.release(&schema);
   movedChild.release(&movedChild);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolConcurrentRelease) {
+  auto vector = vectorMaker_.rowVector({
+      vectorMaker_.flatVector<int64_t>({1, 2, 3}),
+      vectorMaker_.arrayVector<int64_t>({{4, 5}, {}, {6}}),
+  });
+  for (const auto numSlots : {0, 1, 4}) {
+    ReusableArrowBatchPool batchPool(numSlots);
+    struct Batch {
+      ArrowSchema schema{};
+      ArrowArray array{};
+      std::atomic_bool ready{false};
+    };
+    std::array<Batch, 4> batches;
+    std::atomic_bool done{false};
+    std::vector<std::thread> consumers;
+    for (auto& batch : batches) {
+      consumers.emplace_back([&, batch = &batch] {
+        while (!done.load(std::memory_order_acquire)) {
+          if (!batch->ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+            continue;
+          }
+          EXPECT_EQ(3, batch->array.length);
+          EXPECT_EQ(2, batch->array.n_children);
+          if (batch->array.n_children == 2) {
+            validateArray<int64_t>({1, 2, 3}, *batch->array.children[0]);
+            validateArray<int64_t>(
+                {4, 5, 6}, *batch->array.children[1]->children[0]);
+          }
+          batch->array.release(&batch->array);
+          batch->schema.release(&batch->schema);
+          batch->ready.store(false, std::memory_order_release);
+        }
+      });
+    }
+    for (size_t i = 0; i < 1000; ++i) {
+      auto& batch = batches[i % batches.size()];
+      while (batch.ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      batchPool.exportToArrow(
+          vector, pool_.get(), options_, &batch.schema, &batch.array);
+      batch.ready.store(true, std::memory_order_release);
+    }
+    for (auto& batch : batches) {
+      while (batch.ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+    }
+    done.store(true, std::memory_order_release);
+    for (auto& consumer : consumers) {
+      consumer.join();
+    }
+  }
+}
+
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolReleaseLockInversion) {
+  auto vector =
+      vectorMaker_.rowVector({vectorMaker_.flatVector<int64_t>({1, 2, 3})});
+  ReusableArrowBatchPool batchPool(1);
+  ArrowSchema schema{};
+  ArrowArray array{};
+  ASSERT_TRUE(
+      batchPool.exportToArrow(vector, pool_.get(), options_, &schema, &array));
+  const auto* slotBuffers = array.buffers;
+
+  struct ReleaseContext {
+    void (*release)(ArrowArray*);
+    void* privateData;
+    std::timed_mutex consumerMutex{};
+    std::promise<void> entered{};
+    bool timedOut{false};
+  } context{array.children[0]->release, array.children[0]->private_data};
+  auto entered = context.entered.get_future();
+  auto* child = array.children[0];
+  child->private_data = &context;
+  child->release = [](ArrowArray* child) {
+    auto* context = static_cast<ReleaseContext*>(child->private_data);
+    context->entered.set_value();
+    // Parent release holds the slot lock. The exporter holds the consumer
+    // lock, so waiting for the slot lock would deadlock. Bound the wait so
+    // the blocking implementation fails rather than hanging the test.
+    std::unique_lock<std::timed_mutex> lock(
+        context->consumerMutex, std::defer_lock);
+    context->timedOut = !lock.try_lock_for(std::chrono::seconds(5));
+    child->release = context->release;
+    child->private_data = context->privateData;
+    child->release(child);
+  };
+
+  std::unique_lock<std::timed_mutex> consumerLock(context.consumerMutex);
+  std::thread consumer([&] { array.release(&array); });
+  const auto status = entered.wait_for(std::chrono::seconds(5));
+  if (status != std::future_status::ready) {
+    consumerLock.unlock();
+    consumer.join();
+    schema.release(&schema);
+    FAIL() << "the child release callback did not run";
+  }
+
+  ArrowSchema fallbackSchema{};
+  ArrowArray fallbackArray{};
+  EXPECT_FALSE(batchPool.exportToArrow(
+      vector, pool_.get(), options_, &fallbackSchema, &fallbackArray));
+  EXPECT_NE(slotBuffers, fallbackArray.buffers)
+      << "a slot locked by release must be skipped without blocking";
+  consumerLock.unlock();
+  consumer.join();
+  EXPECT_FALSE(context.timedOut)
+      << "export must finish before the release callback can acquire the "
+         "consumer lock";
+  schema.release(&schema);
+  validateArray<int64_t>({1, 2, 3}, *fallbackArray.children[0]);
+
+  ArrowSchema reusedSchema{};
+  ArrowArray reusedArray{};
+  EXPECT_FALSE(batchPool.exportToArrow(
+      vector, pool_.get(), options_, &reusedSchema, &reusedArray));
+  EXPECT_EQ(slotBuffers, reusedArray.buffers)
+      << "the slot must become reusable after release completes";
+  validateArray<int64_t>({1, 2, 3}, *reusedArray.children[0]);
+  reusedArray.release(&reusedArray);
+  reusedSchema.release(&reusedSchema);
+  fallbackArray.release(&fallbackArray);
+  fallbackSchema.release(&fallbackSchema);
+}
+
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    reusableArrowBatchPoolConcurrentMovedChildRelease) {
+  auto vector = vectorMaker_.rowVector({
+      vectorMaker_.arrayVector<int64_t>({{1, 2}, {}, {3}}),
+      BaseVector::wrapInDictionary(
+          nullptr,
+          makeBuffer<vector_size_t>({2, 0, 1}),
+          3,
+          vectorMaker_.flatVector<int64_t>({4, 5, 6})),
+  });
+  ReusableArrowBatchPool batchPool(1);
+  for (size_t i = 0; i < 100; ++i) {
+    ArrowSchema schema{};
+    ArrowArray array{};
+    batchPool.exportToArrow(vector, pool_.get(), options_, &schema, &array);
+    const auto* slotBuffers = array.buffers;
+    ArrowArray movedChild = *array.children[0];
+    array.children[0]->release = nullptr;
+    array.children[0]->private_data = nullptr;
+    ArrowArray movedDictionary = *array.children[1]->dictionary;
+    array.children[1]->dictionary->release = nullptr;
+    array.children[1]->dictionary->private_data = nullptr;
+
+    std::atomic_bool start{false};
+    std::atomic_bool finishChildren{false};
+    std::thread parent([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      array.release(&array);
+    });
+    std::thread schemaConsumer([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      schema.release(&schema);
+    });
+    std::thread childConsumer([&] {
+      while (!finishChildren.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      validateArray<int64_t>({1, 2, 3}, *movedChild.children[0]);
+      movedChild.release(&movedChild);
+    });
+    std::thread dictionaryConsumer([&] {
+      while (!finishChildren.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      validateArray<int64_t>({4, 5, 6}, movedDictionary);
+      movedDictionary.release(&movedDictionary);
+    });
+    start.store(true, std::memory_order_release);
+
+    ArrowSchema fallbackSchema{};
+    ArrowArray fallbackArray{};
+    batchPool.exportToArrow(
+        vector, pool_.get(), options_, &fallbackSchema, &fallbackArray);
+    EXPECT_NE(slotBuffers, fallbackArray.buffers);
+    fallbackArray.release(&fallbackArray);
+    fallbackSchema.release(&fallbackSchema);
+    finishChildren.store(true, std::memory_order_release);
+    for (size_t j = 0; j < 10; ++j) {
+      ArrowSchema nextSchema{};
+      ArrowArray nextArray{};
+      batchPool.exportToArrow(
+          vector, pool_.get(), options_, &nextSchema, &nextArray);
+      nextArray.release(&nextArray);
+      nextSchema.release(&nextSchema);
+    }
+    parent.join();
+    schemaConsumer.join();
+    childConsumer.join();
+    dictionaryConsumer.join();
+
+    ArrowSchema reusedSchema{};
+    ArrowArray reusedArray{};
+    batchPool.exportToArrow(
+        vector, pool_.get(), options_, &reusedSchema, &reusedArray);
+    EXPECT_EQ(slotBuffers, reusedArray.buffers);
+    reusedArray.release(&reusedArray);
+    reusedSchema.release(&reusedSchema);
+  }
 }
 
 TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolSchemaCache) {
