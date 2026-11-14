@@ -352,6 +352,22 @@ class CellPayloadDecoder {
       uint32_t dense,
       std::string& error);
 
+  class StringRows;
+
+  /// Ordinary strings and dictionary fallback share the length/data streams.
+  /// Keep their block loop separate from dictionary index resolution.
+  BOLT_CELL_KERNEL FOLLY_NOINLINE bool appendStringFlat(
+      uint32_t col,
+      uint32_t dense,
+      StringRows& rows,
+      std::string& error);
+
+  BOLT_CELL_KERNEL FOLLY_NOINLINE bool appendStringDictionary(
+      uint32_t col,
+      uint32_t dense,
+      StringRows& rows,
+      std::string& error);
+
   /// `bytes` of string space in the column's batch buffers.
   char* stringSpace(uint32_t col, uint64_t bytes);
 
@@ -395,8 +411,6 @@ class CellPayloadDecoder {
   // Per-append scratch, at most one batch of dense values.
   BufferPtr denseScratch_;
   BufferPtr timestampScratch_; // dense seconds then nanos
-  std::vector<int64_t> lengthScratch_;
-  std::vector<std::string_view> stringViews_;
 
   std::vector<ColumnBatch> batch_;
   bool batchOpen_{false};

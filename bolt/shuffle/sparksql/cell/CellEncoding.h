@@ -607,6 +607,40 @@ class StreamCursor {
     return true;
   }
 
+  /// Returns up to maxValues from the current Encoding Block, without
+  /// combining its remainder with the next block. The values point into
+  /// this cursor and stay valid until its next operation. May be mixed with
+  /// next(). Returns 0 and clears values when maxValues is zero, no values
+  /// remain, or the next block is malformed; a zero limit does not advance.
+  BOLT_CELL_KERNEL FOLLY_NOINLINE uint32_t
+  nextBlock(uint32_t maxValues, const T*& values) {
+    values = nullptr;
+    if (maxValues == 0) {
+      return 0;
+    }
+    if (stagedPos_ == stagedCount_) {
+      if (valuesLeft_ == 0) {
+        return 0;
+      }
+      const uint32_t blockValues =
+          std::min<uint64_t>(kValuesPerBlock, valuesLeft_);
+      const uint32_t consumed = blockValues == kValuesPerBlock
+          ? decodeBlockFull(in_ + offset_, size_ - offset_, staged_)
+          : decodeBlock(in_ + offset_, size_ - offset_, blockValues, staged_);
+      if (consumed == 0) {
+        return 0;
+      }
+      offset_ += consumed;
+      valuesLeft_ -= blockValues;
+      stagedPos_ = 0;
+      stagedCount_ = blockValues;
+    }
+    const uint32_t count = std::min(maxValues, stagedCount_ - stagedPos_);
+    values = staged_ + stagedPos_;
+    stagedPos_ += count;
+    return count;
+  }
+
   /// Once every value was read: whether the blocks consumed the stream
   /// exactly.
   bool finished() const {

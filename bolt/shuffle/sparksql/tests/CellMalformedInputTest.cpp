@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <unistd.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -207,6 +208,164 @@ std::string payload(
     out += bytes;
   }
   return out;
+}
+
+template <typename T>
+class CellStreamCursorTest : public testing::Test {
+ protected:
+  static constexpr uint32_t kBlockValues = kCacheLineBytes / sizeof(T);
+
+  static std::vector<T> inputValues() {
+    std::vector<T> values(kBlockValues, T{7});
+    for (uint32_t i = 0; i < kBlockValues + 3; ++i) {
+      values.push_back(static_cast<T>(static_cast<int32_t>(i) * 17 - 500));
+    }
+    return values;
+  }
+};
+
+using CellStreamCursorTypes = testing::Types<int16_t, int32_t, int64_t>;
+TYPED_TEST_SUITE(CellStreamCursorTest, CellStreamCursorTypes);
+
+TYPED_TEST(CellStreamCursorTest, blockReadsKeepNaturalBoundaries) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  const auto input = TestFixture::inputValues();
+  const auto bytes = encoded(input);
+  StreamCursor<T> cursor;
+  const T* values = nullptr;
+  const auto take = [&](uint32_t limit, uint32_t count, uint32_t at) {
+    ASSERT_EQ(cursor.nextBlock(limit, values), count);
+    ASSERT_NE(values, nullptr);
+    for (uint32_t i = 0; i < count; ++i) {
+      EXPECT_EQ(values[i], input[at + i]);
+    }
+  };
+
+  // A caller may finish one append in the middle of a block. Even if the
+  // next append has room, it must receive that remainder on its own.
+  for (uint32_t limit = 1; limit <= kBlockValues + 1; ++limit) {
+    SCOPED_TRACE(limit);
+    cursor.reset(
+        reinterpret_cast<const uint8_t*>(bytes.data()),
+        bytes.size(),
+        input.size());
+    EXPECT_EQ(cursor.nextBlock(0, values), 0);
+    EXPECT_EQ(values, nullptr);
+    EXPECT_FALSE(cursor.finished());
+    const uint32_t first = std::min(limit, kBlockValues);
+    take(limit, first, 0);
+    EXPECT_EQ(cursor.nextBlock(0, values), 0);
+    EXPECT_EQ(values, nullptr);
+    if (first < kBlockValues) {
+      take(kBlockValues, kBlockValues - first, first);
+    }
+    take(std::numeric_limits<uint32_t>::max(), kBlockValues, kBlockValues);
+    EXPECT_FALSE(cursor.finished());
+    take(kBlockValues, 3, 2 * kBlockValues);
+    EXPECT_TRUE(cursor.finished());
+    EXPECT_EQ(cursor.nextBlock(1, values), 0);
+    EXPECT_EQ(values, nullptr);
+    EXPECT_TRUE(cursor.finished());
+  }
+}
+
+TYPED_TEST(CellStreamCursorTest, blockReadsMixWithCopiesAndReset) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  const auto input = TestFixture::inputValues();
+  const auto bytes = encoded(input);
+  StreamCursor<T> cursor;
+  cursor.reset(
+      reinterpret_cast<const uint8_t*>(bytes.data()),
+      bytes.size(),
+      input.size());
+  std::vector<T> copied(kBlockValues);
+  ASSERT_TRUE(cursor.next(3, copied.data()));
+  EXPECT_EQ(
+      std::vector<T>(copied.begin(), copied.begin() + 3),
+      std::vector<T>(input.begin(), input.begin() + 3));
+  const T* values = nullptr;
+  ASSERT_EQ(cursor.nextBlock(kBlockValues, values), kBlockValues - 3);
+  EXPECT_EQ(
+      std::vector<T>(values, values + kBlockValues - 3),
+      std::vector<T>(input.begin() + 3, input.begin() + kBlockValues));
+  ASSERT_EQ(cursor.nextBlock(2, values), 2);
+  EXPECT_EQ(values[0], input[kBlockValues]);
+  EXPECT_EQ(values[1], input[kBlockValues + 1]);
+  // next() consumes the second block's remainder and two tail values.
+  ASSERT_TRUE(cursor.next(kBlockValues, copied.data()));
+  EXPECT_EQ(
+      copied,
+      std::vector<T>(input.begin() + kBlockValues + 2, input.end() - 1));
+  EXPECT_FALSE(cursor.finished());
+  ASSERT_EQ(cursor.nextBlock(kBlockValues, values), 1);
+  EXPECT_EQ(values[0], input.back());
+  EXPECT_TRUE(cursor.finished());
+
+  // Reset discards a partially delivered block.
+  cursor.reset(
+      reinterpret_cast<const uint8_t*>(bytes.data()),
+      bytes.size(),
+      input.size());
+  ASSERT_EQ(cursor.nextBlock(1, values), 1);
+  cursor.reset(nullptr, 0, 0);
+  EXPECT_EQ(cursor.nextBlock(1, values), 0);
+  EXPECT_EQ(values, nullptr);
+  EXPECT_TRUE(cursor.finished());
+}
+
+TYPED_TEST(CellStreamCursorTest, malformedBlocksDoNotExposeValues) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  const auto first = encoded(std::vector<T>(kBlockValues, T{7}));
+  const std::vector<std::string> malformed{
+      "",
+      block(EncodingKind::kConstNarrow, 0, ""),
+      block(EncodingKind::kConstNarrow, sizeof(T) + 1, std::string(9, '\0')),
+      block(
+          EncodingKind::kConstNarrow,
+          sizeof(T),
+          std::string(sizeof(T) - 1, '\0')),
+      block(EncodingKind::kBitPack, 0, std::string(kCacheLineBytes, '\0')),
+      block(EncodingKind::kPlain, 1, std::string(kCacheLineBytes, '\0')),
+      block(EncodingKind::kPlain, 0, std::string(kCacheLineBytes - 1, '\0')),
+      block(EncodingKind::kForBitPack, 0, std::string(sizeof(T) - 1, '\0'))};
+  for (size_t i = 0; i < malformed.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto bytes = first + malformed[i];
+    StreamCursor<T> cursor;
+    cursor.reset(
+        reinterpret_cast<const uint8_t*>(bytes.data()),
+        bytes.size(),
+        2 * kBlockValues);
+    const T* values = nullptr;
+    ASSERT_EQ(cursor.nextBlock(1, values), 1);
+    EXPECT_EQ(values[0], 7);
+    ASSERT_EQ(cursor.nextBlock(2 * kBlockValues, values), kBlockValues - 1);
+    for (uint32_t row = 0; row < kBlockValues - 1; ++row) {
+      EXPECT_EQ(values[row], 7);
+    }
+    EXPECT_EQ(cursor.nextBlock(kBlockValues, values), 0);
+    EXPECT_EQ(values, nullptr);
+    EXPECT_FALSE(cursor.finished());
+    EXPECT_EQ(cursor.nextBlock(1, values), 0);
+    EXPECT_EQ(values, nullptr);
+  }
+
+  // Exhausting the declared values does not hide bytes after the last block.
+  const auto trailing = first + '\0';
+  StreamCursor<T> cursor;
+  cursor.reset(
+      reinterpret_cast<const uint8_t*>(trailing.data()),
+      trailing.size(),
+      kBlockValues);
+  const T* values = nullptr;
+  ASSERT_EQ(cursor.nextBlock(kBlockValues, values), kBlockValues);
+  EXPECT_FALSE(cursor.finished());
+  EXPECT_EQ(cursor.nextBlock(1, values), 0);
+  EXPECT_EQ(values, nullptr);
+  EXPECT_FALSE(cursor.finished());
 }
 
 /// One case: a partition's bytes, read as `type`, and the error they fail

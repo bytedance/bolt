@@ -1330,6 +1330,91 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
   }
 }
 
+TEST_F(CellWriterTest, readerStringBlockBoundaries) {
+  // Length blocks hold eight non-null values. Reader batches split these
+  // blocks, cross payloads, and cross the dictionary prefix into fallback.
+  // Null bitmap words must not reset the dense position; several decoded
+  // blocks can materialize values into the same bitmap word.
+  ShuffleInput input;
+  const std::vector<size_t> lengths{0, 1, 7, 8, 12, 13, 63, 64, 257};
+  const std::vector<size_t> fallbackLengths{63, 0, 12, 13};
+  vector_size_t firstRow = 0;
+  for (const vector_size_t numRows : {137, 145, 73}) {
+    const auto batch = input.data.size();
+    std::vector<std::string> dense(numRows);
+    std::vector<std::optional<std::string>> nullable(numRows);
+    std::vector<std::optional<std::string>> mixed(numRows);
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      const auto length =
+          row == 20 ? (32 << 10) + 1 : lengths[(row / 16) % lengths.size()];
+      dense[row].assign(length, 'a' + (row + batch) % 26);
+      if (length != 0) {
+        dense[row][length / 2] = '\0';
+      }
+      if (batch != 1 && row % 11 != 0 && (row < 64 || row >= 128)) {
+        nullable[row] = dense[row];
+      }
+      if (row % 7 != 0) {
+        if (row < 20) {
+          mixed[row] = row % 2 == 0 ? "hit-short" : "dictionary-13";
+        } else {
+          mixed[row] = std::string(
+              fallbackLengths[(row - 20) % fallbackLengths.size()],
+              'A' + (row + batch) % 26);
+        }
+      }
+    }
+    input.data.push_back(makeRowVector({
+        makeFlatVector<int64_t>(
+            numRows, [firstRow](auto row) { return firstRow + row; }),
+        makeFlatVector<std::string>(dense),
+        makeNullableFlatVector<std::string>(nullable),
+        makeNullableFlatVector<std::string>(mixed),
+        makeFlatVector<StringView>(
+            numRows,
+            [](auto row) {
+              return StringView(row % 2 == 0 ? "short" : "dictionary-13");
+            }),
+    }));
+    input.pids.emplace_back(numRows, 0);
+    firstRow += numRows;
+  }
+  const auto type = asRowType(input.data.front()->type());
+  const auto rows = input.rowsOf(1);
+  const auto codec = test::lz4Codec();
+  for (const bool dictionary : {false, true}) {
+    SCOPED_TRACE(dictionary);
+    auto options = writerOptions(1);
+    options.cellOptions.enableStringDictionary = dictionary;
+    options.cellOptions.stringDictionaryProbeRowCount = 0;
+    options.cellOptions.partitionSealBytes = 1;
+    const auto written = test::writeShuffle(options, input, pool());
+    if (dictionary) {
+      EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
+      EXPECT_GT(written.metrics.dictionaryFallbackRows, 0);
+    }
+    for (const int32_t batchSize : {1, 7, 8, 9, 15, 17}) {
+      SCOPED_TRACE(batchSize);
+      // readPartition retains every batch until all payloads have been
+      // decoded and the reader destroyed. Long strings must still be owned
+      // by their output vectors rather than the reused payload buffers.
+      const auto batches = test::readPartition(
+          written.partitions[0], type, codec.get(), pool(), batchSize, 1 << 30);
+      test::expectPartitionRows(rows[0], batches, 0, batchSize);
+      for (size_t i = 0; i + 1 < batches.size(); ++i) {
+        EXPECT_EQ(batches[i]->size(), batchSize);
+      }
+    }
+    const auto batches = test::readPartition(
+        written.partitions[0], type, codec.get(), pool(), 256, 128);
+    test::expectPartitionRows(rows[0], batches, 0, 256);
+    ASSERT_EQ(batches.size(), input.data.size());
+    for (size_t i = 0; i < batches.size(); ++i) {
+      EXPECT_EQ(batches[i]->size(), input.data[i]->size());
+    }
+  }
+}
+
 TEST_F(CellWriterTest, readerCountsWhatItReads) {
   // The reader counts the rows it returned and the payloads and streams it
   // read. Reading the streams is a share of its decode time of its own,
