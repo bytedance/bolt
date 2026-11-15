@@ -38,6 +38,33 @@ namespace {
 /// the very last line into this padding rather than past the allocation.
 constexpr size_t kCacheTailPadding = 16;
 
+template <uint32_t kWidth>
+FOLLY_ALWAYS_INLINE void
+copyStringEnds(char* dst, const char* src, uint32_t bytes) {
+  ::memcpy(dst, src, kWidth);
+  ::memcpy(dst + bytes - kWidth, src + bytes - kWidth, kWidth);
+}
+
+/// Copies fewer than 64 bytes without reading or writing outside the range.
+/// Source and destination must not overlap. The two destination writes may
+/// overlap each other, but reproduce the same bytes.
+FOLLY_ALWAYS_INLINE void
+copyStringUnder64(char* dst, const char* src, uint32_t bytes) {
+  if (bytes >= 32) {
+    copyStringEnds<32>(dst, src, bytes);
+  } else if (bytes >= 16) {
+    copyStringEnds<16>(dst, src, bytes);
+  } else if (bytes >= 8) {
+    copyStringEnds<8>(dst, src, bytes);
+  } else if (bytes >= 4) {
+    copyStringEnds<4>(dst, src, bytes);
+  } else if (bytes >= 2) {
+    copyStringEnds<2>(dst, src, bytes);
+  } else if (bytes != 0) {
+    *dst = *src;
+  }
+}
+
 #if defined(__SSE2__)
 /// The 16-byte probe needle of a value of 8 to 12 characters, inline in its
 /// StringView: [size][chars][zeros]. The view's 16 bytes are (size u32)
@@ -146,7 +173,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
   char* line = cacheLine(stream, pid);
   while (cur[pid] != 0 && bytes != 0) {
     const uint32_t take = std::min<uint32_t>(bytes, kCacheLineBytes - cur[pid]);
-    ::memcpy(line + cur[pid], data, take);
+    copyStringUnder64(line + cur[pid], data, take);
     cur[pid] += take;
     data += take;
     bytes -= take;
@@ -195,7 +222,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     }
   }
   if (bytes != 0) {
-    ::memcpy(line, data, bytes);
+    copyStringUnder64(line, data, bytes);
     cur[pid] = static_cast<uint8_t>(bytes);
   }
 }
