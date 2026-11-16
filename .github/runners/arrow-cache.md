@@ -81,10 +81,6 @@ It replaces source-mirror URLs with `origin` fallback and preserves Conan
 package remotes and unrelated configuration. No ECS IP/hostname is added to
 public workflow configuration or the job's cache-helper output.
 
-For external Gluten CI, the existing `ARROW_CACHE_SCRIPT` and
-`ARROW_SOURCE_DIR` environment settings point to these same installed files.
-Re-run its prepare step before starting new workers after an upgrade.
-
 ## Local tests
 
 ```bash

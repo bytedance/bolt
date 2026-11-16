@@ -6,7 +6,7 @@ backend source and native/Spark test compatibility fixes, not CI helper scripts.
 The Bolt PR tier compiles native libraries, runs the native CTest suite and
 verifies the selected Bolt package, linkage, archive identity and nonempty backend
 output. Failed or missing test evidence fails the gate. It does not run benchmarks
-or Spark/JVM tasks. The external ECS controller retains its compile-only tier.
+or Spark/JVM tasks.
 The nightly tier runs 39 tasks: one native CTest task, 12 package configurations
 and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 
@@ -27,7 +27,6 @@ and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`.
 Its composite action is `.github/actions/bolt-ci-task/action.yml`. Both select
 helpers from the exact Bolt caller revision; source comes from Apache Gluten.
-The external controller exports the same scripts from its reviewed Bolt bundle.
 There is no fork fallback and no runtime source patching.
 
 Each task uses separate writable caches and report directories. Native artifacts
