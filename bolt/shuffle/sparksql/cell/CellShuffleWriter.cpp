@@ -253,7 +253,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       *allocator_,
       *output_,
       *boltPool_,
-      options_.cellOptions.enableStringNonTemporalStores);
+      options_.cellOptions.enableNonTemporalStores);
   if (nested_ != nullptr) {
     shredder_ = std::make_unique<CellNestedShredder>(
         *nested_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);

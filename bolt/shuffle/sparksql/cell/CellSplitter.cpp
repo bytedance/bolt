@@ -98,13 +98,13 @@ CellSplitter::CellSplitter(
     ChunkAllocator& allocator,
     CellOutput& output,
     memory::MemoryPool& pool,
-    bool enableStringNonTemporalStores)
+    bool enableNonTemporalStores)
     : layout_(layout),
       allocator_(allocator),
       output_(output),
       numPartitions_(numPartitions),
       numStreams_(layout.numStreams()),
-      enableStringNonTemporalStores_(enableStringNonTemporalStores),
+      enableNonTemporalStores_(enableNonTemporalStores),
       cells_(&pool, &allocator, numPartitions_, numStreams_),
       nulls_(&pool, numPartitions_, layout.numWireColumns()),
       windowRowCounts_(numPartitions_, 0),
@@ -572,7 +572,7 @@ void CellSplitter::split(const SplitBatch& batch) {
                 }
               });
         };
-        if (enableStringNonTemporalStores_) {
+        if (enableNonTemporalStores_) {
           splitStrings.template operator()<true>();
         } else {
           splitStrings.template operator()<false>();

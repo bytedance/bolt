@@ -1090,7 +1090,7 @@ TEST_F(CellWriterTest, dictionaryFallbackBatchPaths) {
           [seal, nonTemporalStores](CellShuffleOptions& options, bool) {
             options.stringDictionaryProbeRowCount = 0;
             options.partitionSealBytes = seal ? 1 : 1LL << 30;
-            options.enableStringNonTemporalStores = nonTemporalStores;
+            options.enableNonTemporalStores = nonTemporalStores;
           },
           [nonNullRows](const test::WrittenShuffle& written, bool) {
             const auto& metrics = written.metrics;
@@ -1843,7 +1843,7 @@ TEST_F(CellWriterTest, smallReclaimLeavesMostCellsResident) {
     auto leaf = root->addLeafChild("writer");
     auto options =
         writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
-    options.cellOptions.enableStringNonTemporalStores = nonTemporalStores;
+    options.cellOptions.enableNonTemporalStores = nonTemporalStores;
     CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
     const auto written = test::writeShuffle(
         writer, options, input, pool(), nullptr, [&](size_t batch) {
