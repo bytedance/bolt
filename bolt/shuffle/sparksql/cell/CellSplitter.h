@@ -79,7 +79,7 @@ class CellSplitter {
       ChunkAllocator& allocator,
       CellOutput& output,
       memory::MemoryPool& pool,
-      bool enableStringNonTemporalStores);
+      bool enableNonTemporalStores);
 
   BOLT_CELL_KERNEL void split(const SplitBatch& batch);
 
@@ -343,7 +343,7 @@ class CellSplitter {
   CellOutput& output_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
-  const bool enableStringNonTemporalStores_;
+  const bool enableNonTemporalStores_;
   DataCells cells_;
   NullCells nulls_;
   bool writingOutput_{false};
