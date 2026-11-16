@@ -24,14 +24,15 @@ and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 
 ## Entry points
 
-The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`.
-Its composite action is `.github/actions/bolt-ci-task/action.yml`. Both select
-helpers from an explicit revision; source comes from Apache Gluten. PRs pin both
-orchestration and helpers to the same reviewed Bolt commit, independently of the
-candidate passed as build input. Publish the reviewed helper commit before
-updating both caller pins, so GitHub can resolve it when parsing the workflow.
-Nightly uses the protected main revision.
-There is no fork fallback and no runtime source patching.
+The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`, called
+locally by Bolt's PR and nightly workflows. PRs load the composite action and
+helpers from a reviewed Bolt commit, independently of the candidate passed as
+build input. Nightly uses the protected main revision. There is no fork workflow
+dependency or runtime patching of Apache Gluten source.
+
+The workflow definition follows Bolt's existing PR review model. Pinning helpers
+prevents candidate helper changes from running before privilege dropping; it does
+not isolate arbitrary modifications to the calling workflow or runner settings.
 
 PRs resolve Apache main before checking merge-queue reuse. Reuse requires matching
 Gluten SHA evidence from the trusted gate; old records without it are misses.

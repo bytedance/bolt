@@ -258,14 +258,14 @@ jobs:
     name: Compile and test Gluten Bolt backend
     needs: reuse-check
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
-    # Reviewed orchestration is independent of the candidate being compiled.
-    uses: bytedance/bolt/.github/workflows/bolt_backend_x86.yml@6e021a135b8632b92669139df4ebf97da40741ee
+    uses: ./.github/workflows/bolt_backend_x86.yml
     with:
       mode: native
       bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
       gluten_repository: apache/gluten
       gluten_sha: ${{ needs.reuse-check.outputs.gluten_sha }}
+      # Pin privileged task helpers independently of the Bolt candidate.
       helper_repository: bytedance/bolt
       helper_sha: 6e021a135b8632b92669139df4ebf97da40741ee
       driver_repository: bytedance/bolt
