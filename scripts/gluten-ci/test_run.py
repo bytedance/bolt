@@ -564,6 +564,30 @@ class CliTest(unittest.TestCase):
             json.loads(result_path.read_text()) if result_path.exists() else {}
         )
 
+    def commit_fixture(self, name):
+        path = self.paths[name]
+        subprocess.run(["git", "-C", path, "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                path,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        manifest = self.paths["artifacts"] / "native-manifest.json"
+        if manifest.exists():
+            value = json.loads(manifest.read_text())
+            value[f"{name}_sha"] = run.git_sha(path)
+            manifest.write_text(json.dumps(value))
+
     def fake_maven_packages_jar(self, mutation=""):
         self.executable(
             self.paths["source"] / "build/mvn",
@@ -592,6 +616,8 @@ with ZipFile(target / "gluten-bolt-bundle-fixture.jar", "w") as jar:
     jar.writestr("gluten-build-info.properties", f"bolt_revision={{revision}}" + chr(10))
 """,
         )
+
+        self.commit_fixture("source")
 
     def fake_native_build(
         self, *, empty_backend=False, package_mismatch=False, ctest_report=None
@@ -647,7 +673,38 @@ if {package_mismatch!r}:
 PYTHON
 """,
         )
+        self.commit_fixture("bolt")
         return bundle / "run.py"
+
+    def test_native_rejects_dirty_inputs_before_build_or_publication(self):
+        script = self.fake_native_build()
+        for name in ("source", "bolt", "driver"):
+            path = self.paths[name]
+            tracked = path / "tracked.txt"
+            tracked.write_text("committed")
+            self.commit_fixture(name)
+        self.env["GLUTEN_CI_DRIVER_SHA"] = run.git_sha(self.paths["driver"])
+        for name in ("source", "bolt", "driver"):
+            path = self.paths[name]
+            for kind in ("unstaged", "staged", "untracked"):
+                with self.subTest(checkout=name, kind=kind):
+                    file = path / ("new.cc" if kind == "untracked" else "tracked.txt")
+                    file.write_text("modified")
+                    if kind == "staged":
+                        subprocess.run(["git", "-C", path, "add", "."], check=True)
+                    process, result = self.invoke("native", ["--compile-only"], script)
+                    self.assertEqual(process.returncode, 1, process.stderr)
+                    self.assertIn("clean checkout", process.stderr)
+                    self.assertFalse((self.paths["reports"] / "sources.json").exists())
+                    self.assertFalse(
+                        (self.paths["artifacts"] / "native-manifest.json").exists()
+                    )
+                    shutil.rmtree(self.paths["reports"])
+                    subprocess.run(
+                        ["git", "-C", path, "reset", "--hard", "-q"], check=True
+                    )
+                    if kind == "untracked":
+                        file.unlink()
 
     def test_native_only_requires_ut_and_verifies_the_compiled_package(self):
         script = self.fake_native_build(
@@ -827,6 +884,7 @@ PYTHON
 
     def test_package_cli_preserves_build_failure_exit_code(self):
         self.executable(self.paths["source"] / "build/mvn", "#!/bin/bash\nexit 37\n")
+        self.commit_fixture("source")
         process, result = self.invoke()
         self.assertEqual(process.returncode, 37)
         self.assertEqual((result["status"], result["exit_code"]), ("failure", 37))

@@ -99,6 +99,22 @@ def identity_for(args):
     driver = git_sha(args.driver)
     if driver != expected_driver:
         raise ValueError("Bolt CI driver revision does not match the trusted pin")
+    for checkout in (args.source, args.bolt, args.driver):
+        changes = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                checkout,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        )
+        if changes:
+            raise ValueError(
+                f"Commit-keyed artifacts require a clean checkout: {checkout}"
+            )
     helper = os.environ.get("GLUTEN_CI_HELPER_SHA")
     if helper is None:
         bundle = hashlib.sha256()
