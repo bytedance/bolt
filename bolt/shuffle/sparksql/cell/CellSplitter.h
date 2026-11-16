@@ -78,7 +78,8 @@ class CellSplitter {
       uint32_t numPartitions,
       ChunkAllocator& allocator,
       CellOutput& output,
-      memory::MemoryPool& pool);
+      memory::MemoryPool& pool,
+      bool enableStringNonTemporalStores);
 
   BOLT_CELL_KERNEL void split(const SplitBatch& batch);
 
@@ -230,6 +231,9 @@ class CellSplitter {
   /// Flushes a raw stream's staged cache line `line` bytes as they are.
   void flushRaw(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
 
+  /// Both paths pack bytes into full cache lines. Only ordinary string streams
+  /// request streaming stores; dictionary fallback keeps ordinary copies.
+  template <bool kStreaming>
   void appendStringData(
       uint32_t stream,
       uint32_t pid,
@@ -250,7 +254,7 @@ class CellSplitter {
   template <typename T, bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
-  template <bool kHasNulls, InputMapping kMapping>
+  template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
   BOLT_CELL_KERNEL void splitString(uint32_t col, const SplitBatch& batch);
 
   template <typename T>
@@ -269,10 +273,14 @@ class CellSplitter {
   FOLLY_NOINLINE void
   appendStringFallback(uint32_t col, uint32_t pid, const StringView& view);
 
-  template <bool kHasNulls, InputMapping kMapping>
+  template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
   void dispatchStringDict(uint32_t col, const SplitBatch& batch);
 
-  template <bool kHasNulls, InputMapping kMapping, bool kPrefetchInput>
+  template <
+      bool kHasNulls,
+      InputMapping kMapping,
+      bool kStreaming,
+      bool kPrefetchInput>
   BOLT_CELL_KERNEL void splitStringDict(uint32_t col, const SplitBatch& batch);
 
   /// Per (partition, dictionary column): the open segment's bookkeeping, 8
@@ -320,6 +328,7 @@ class CellSplitter {
   /// false when the partition just demoted to the fallback tail (the value
   /// was not appended; the caller routes it through the fallback path).
   /// Always inlined: it runs once per non-null row.
+  template <bool kStreaming>
   FOLLY_ALWAYS_INLINE bool appendDictValue(
       uint32_t lengthStream,
       uint32_t dataStream,
@@ -334,6 +343,7 @@ class CellSplitter {
   CellOutput& output_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
+  const bool enableStringNonTemporalStores_;
   DataCells cells_;
   NullCells nulls_;
   bool writingOutput_{false};

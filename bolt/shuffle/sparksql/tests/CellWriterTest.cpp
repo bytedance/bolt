@@ -1080,23 +1080,27 @@ TEST_F(CellWriterTest, dictionaryFallbackBatchPaths) {
   }
   for (const bool seal : {false, true}) {
     SCOPED_TRACE(seal);
-    roundTrip(
-        input,
-        kPartitions,
-        {{false, arrow::Compression::LZ4_FRAME},
-         {true, arrow::Compression::LZ4_FRAME}},
-        [seal](CellShuffleOptions& options, bool) {
-          options.stringDictionaryProbeRowCount = 0;
-          options.partitionSealBytes = seal ? 1 : 1LL << 30;
-        },
-        [nonNullRows](const test::WrittenShuffle& written, bool) {
-          const auto& metrics = written.metrics;
-          EXPECT_GT(metrics.dictionaryMatchedRows, 0);
-          EXPECT_GT(metrics.dictionaryFallbackRows, 0);
-          EXPECT_EQ(
-              metrics.dictionaryMatchedRows + metrics.dictionaryFallbackRows,
-              nonNullRows);
-        });
+    for (const bool nonTemporalStores : {false, true}) {
+      SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+      roundTrip(
+          input,
+          kPartitions,
+          {{false, arrow::Compression::LZ4_FRAME},
+           {true, arrow::Compression::LZ4_FRAME}},
+          [seal, nonTemporalStores](CellShuffleOptions& options, bool) {
+            options.stringDictionaryProbeRowCount = 0;
+            options.partitionSealBytes = seal ? 1 : 1LL << 30;
+            options.enableStringNonTemporalStores = nonTemporalStores;
+          },
+          [nonNullRows](const test::WrittenShuffle& written, bool) {
+            const auto& metrics = written.metrics;
+            EXPECT_GT(metrics.dictionaryMatchedRows, 0);
+            EXPECT_GT(metrics.dictionaryFallbackRows, 0);
+            EXPECT_EQ(
+                metrics.dictionaryMatchedRows + metrics.dictionaryFallbackRows,
+                nonNullRows);
+          });
+    }
   }
 }
 
@@ -1832,27 +1836,31 @@ TEST_F(CellWriterTest, smallReclaimLeavesMostCellsResident) {
   constexpr int64_t kRequest = 256 << 10;
   std::mt19937 rng(107);
   const auto input = spreadInput(kPartitions, 36, 4096, rng);
-  auto root =
-      memory::memoryManager()->addRootPool("cellSmallReclaimRun", 128 << 20);
-  auto leaf = root->addLeafChild("writer");
-  const auto options =
-      writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
-  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
-  const auto written = test::writeShuffle(
-      writer, options, input, pool(), nullptr, [&](size_t batch) {
-        if (batch != 33) {
-          return;
-        }
-        ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
-        const int64_t held = leaf->usedBytes();
-        int64_t freed = 0;
-        ASSERT_TRUE(writer.reclaimFixedSize(kRequest, &freed).ok());
-        EXPECT_GE(freed, kRequest);
-        EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
-        EXPECT_LT(writer.metrics().totalBytesEvicted, held / 2);
-      });
-  test::expectReadsBack(
-      input, written, arrow::Compression::UNCOMPRESSED, pool());
+  for (const bool nonTemporalStores : {false, true}) {
+    SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+    auto root = memory::memoryManager()->addRootPool(
+        fmt::format("cellSmallReclaimRun{}", nonTemporalStores), 128 << 20);
+    auto leaf = root->addLeafChild("writer");
+    auto options =
+        writerOptions(kPartitions, false, arrow::Compression::UNCOMPRESSED);
+    options.cellOptions.enableStringNonTemporalStores = nonTemporalStores;
+    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+    const auto written = test::writeShuffle(
+        writer, options, input, pool(), nullptr, [&](size_t batch) {
+          if (batch != 33) {
+            return;
+          }
+          ASSERT_EQ(writer.metrics().totalBytesEvicted, 0);
+          const int64_t held = leaf->usedBytes();
+          int64_t freed = 0;
+          ASSERT_TRUE(writer.reclaimFixedSize(kRequest, &freed).ok());
+          EXPECT_GE(freed, kRequest);
+          EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
+          EXPECT_LT(writer.metrics().totalBytesEvicted, held / 2);
+        });
+    test::expectReadsBack(
+        input, written, arrow::Compression::UNCOMPRESSED, pool());
+  }
 }
 
 TEST_F(CellWriterTest, celebornReclaimPushesTheWindowBetweenBatches) {

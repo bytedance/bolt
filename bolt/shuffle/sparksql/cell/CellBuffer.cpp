@@ -17,7 +17,6 @@
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -252,11 +251,7 @@ DataCells::DataCells(
     : pool_(pool),
       allocator_(allocator),
       numPartitions_(numPartitions),
-      numStreams_(numStreams),
-      streamingStoresEnabled_([] {
-        const auto* value = std::getenv("BOLT_CELL_STRING_NT");
-        return value != nullptr && std::strcmp(value, "1") == 0;
-      }()) {
+      numStreams_(numStreams) {
   const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
   if (numChains == 0) {
     return;
@@ -304,7 +299,7 @@ void DataCells::reserveNext(uint32_t capacity) {
   nextCapacity_ = newCapacity;
 }
 
-void DataCells::appendSlow(
+void DataCells::appendWithAllocation(
     uint32_t pid,
     uint32_t stream,
     const void* data,

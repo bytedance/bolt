@@ -560,7 +560,7 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
 
   /// Writes the scenario's shuffle, checks it reads back and returns its
   /// golden record.
-  Golden run(const Scenario& scenario) {
+  Golden run(const Scenario& scenario, bool nonTemporalStores) {
     removeFiles();
     const auto input = makeInput(scenario.numPartitions);
     auto options = test::shuffleOptions(
@@ -572,6 +572,7 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
     // Seals and spills through the spill file on disk, as recorded: with
     // memory to spare, spill memory would keep the seals off the disk.
     options.cellOptions.spillMemoryBytes = 0;
+    options.cellOptions.enableStringNonTemporalStores = nonTemporalStores;
     if (scenario.tune) {
       scenario.tune(options.cellOptions);
     }
@@ -616,7 +617,7 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
   /// Writes the nested scenario's shuffle of kNestedBatches, checks that it
   /// takes the way its options say and reads back, and returns its golden
   /// record.
-  Golden run(const NestedScenario& scenario) {
+  Golden run(const NestedScenario& scenario, bool nonTemporalStores) {
     removeFiles();
     const auto input = test::makeInput(
         scenario.type,
@@ -632,6 +633,7 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
         scenario.lz4 ? arrow::Compression::LZ4_FRAME
                      : arrow::Compression::UNCOMPRESSED,
         scenario.rss);
+    options.cellOptions.enableStringNonTemporalStores = nonTemporalStores;
     if (scenario.tune) {
       scenario.tune(options.cellOptions);
     }
@@ -783,7 +785,8 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
   };
   // Wide values are packed at whole bytes (kExactPackMaxBits,
   // kBigintPlainMinBits). The spill records also reflect full-line string
-  // staging, which changes when cell allocations trigger Run spills.
+  // staging, including unaligned dictionary fallback tails, which changes
+  // when cell allocations trigger Run spills.
   static const Golden kGolden[] = {
       {"p1_none", 2517475, 0x43f7afffad8f6688ULL},
       {"p7_lz4", 2246101, 0x4530bbef09b209e6ULL},
@@ -794,19 +797,22 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
       {"p7_lz4_partition_seals_rss", 2246778, 0xeb80ff5ef947c8feULL},
       {"p7_none_null_seals", 2542676, 0xbba839d809099ae6ULL},
       {"p7_lz4_null_seals_rss", 2297123, 0xa746b56b725d20adULL},
-      {"p7_lz4_spills", 2251184, 0x464fecdbff7bb5bdULL},
-      {"p1024_none_spills", 8757942, 0xb08529a93fe8607dULL},
+      {"p7_lz4_spills", 2251192, 0xa1d3fba5ccedb123ULL},
+      {"p1024_none_spills", 8757942, 0x6d20626e8577089eULL},
       {"p7_lz4_spills_rss", 2255058, 0xc79faec398d8df82ULL},
       {"p1_lz4_seals", 2254213, 0xa98fc2436554c9cbULL},
-      {"p7_lz4_every_limit", 2328126, 0x8beb424d12b4ff9bULL},
+      {"p7_lz4_every_limit", 2327804, 0x24fdb326a6fbb07aULL},
       {"p7_lz4_no_dictionary", 2268893, 0xbca4ebf73b93e31aULL},
       {"p7_lz4_one_shot", 2224722, 0x77773523d15b6ad3ULL},
   };
-  std::vector<Golden> actual;
-  for (const auto& scenario : scenarios) {
-    actual.push_back(run(scenario));
+  for (const bool nonTemporalStores : {false, true}) {
+    SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+    std::vector<Golden> actual;
+    for (const auto& scenario : scenarios) {
+      actual.push_back(run(scenario, nonTemporalStores));
+    }
+    expectRecorded(actual, kGolden);
   }
-  expectRecorded(actual, kGolden);
 }
 
 TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
@@ -882,11 +888,14 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
       {"deep_nested_p7_lz4_partition_seals", 473433, 0x1f560d7c6d0bb239ULL},
       {"deep_rows_p7_lz4_adapter", 1340921, 0x5fe55cc0018ef204ULL},
   };
-  std::vector<Golden> actual;
-  for (const auto& scenario : scenarios) {
-    actual.push_back(run(scenario));
+  for (const bool nonTemporalStores : {false, true}) {
+    SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+    std::vector<Golden> actual;
+    for (const auto& scenario : scenarios) {
+      actual.push_back(run(scenario, nonTemporalStores));
+    }
+    expectRecorded(actual, kGolden);
   }
-  expectRecorded(actual, kGolden);
 }
 
 } // namespace

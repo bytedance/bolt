@@ -248,7 +248,12 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });
   splitter_ = std::make_unique<CellSplitter>(
-      layout_, numPartitions_, *allocator_, *output_, *boltPool_);
+      layout_,
+      numPartitions_,
+      *allocator_,
+      *output_,
+      *boltPool_,
+      options_.cellOptions.enableStringNonTemporalStores);
   if (nested_ != nullptr) {
     shredder_ = std::make_unique<CellNestedShredder>(
         *nested_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);

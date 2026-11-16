@@ -120,6 +120,11 @@ DEFINE_bool(
     true,
     "Check each writer's output against the input once, untimed.");
 DEFINE_bool(
+    bolt_benchmark_shuffle_cell_string_nt,
+    false,
+    "Enable non-temporal stores for Cell string data and dictionary indexes; "
+    "dictionary fallback uses ordinary stores.");
+DEFINE_bool(
     bolt_benchmark_shuffle_list,
     false,
     "Print the cases of the tier and exit.");
@@ -2261,6 +2266,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.partitionWriterOptions.compressionType = benchmarkCodec();
   options.partitionWriterOptions.compressionLevel = benchmarkCodecLevel();
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
+  options.cellOptions.enableStringNonTemporalStores =
+      FLAGS_bolt_benchmark_shuffle_cell_string_nt;
   // Nested columns packed into the adapter's binary column, as before
   // nested layouts.
   options.cellOptions.nativeNestedTypes = writer != Writer::kCellAdapter;
