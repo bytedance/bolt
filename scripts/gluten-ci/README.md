@@ -26,9 +26,18 @@ and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 
 The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`.
 Its composite action is `.github/actions/bolt-ci-task/action.yml`. Both select
-helpers from the exact Bolt caller revision; source comes from Apache Gluten.
+helpers from an explicit revision; source comes from Apache Gluten. PRs pin both
+orchestration and helpers to the same reviewed Bolt commit, independently of the
+candidate passed as build input. Update both pins together after helper review.
+Nightly uses the protected main revision.
 There is no fork fallback and no runtime source patching.
 
+PRs resolve Apache main before checking merge-queue reuse. Reuse requires matching
+Gluten SHA evidence from the trusted gate; old records without it are misses.
+The gate begins preserving this evidence after this change reaches main.
+
+The CLI requires clean Gluten, Bolt and driver checkouts before building or
+consuming commit-keyed artifacts, including no untracked source files.
 Each task uses separate writable caches and report directories. Native artifacts
 are checked before downstream reuse. Test mode requires nonzero passing evidence;
 compile mode explicitly records zero tests. PR artifacts cannot substitute for
