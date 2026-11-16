@@ -258,15 +258,15 @@ jobs:
     name: Compile and test Gluten Bolt backend
     needs: reuse-check
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
-    # Bootstrap from the published reviewed commit; the candidate is only a build input.
-    uses: Weixin-Xu/bolt/.github/workflows/bolt_backend_x86.yml@6e021a135b8632b92669139df4ebf97da40741ee
+    # Reviewed orchestration is independent of the candidate being compiled.
+    uses: bytedance/bolt/.github/workflows/bolt_backend_x86.yml@6e021a135b8632b92669139df4ebf97da40741ee
     with:
       mode: native
       bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
       gluten_repository: apache/gluten
       gluten_sha: ${{ needs.reuse-check.outputs.gluten_sha }}
-      helper_repository: Weixin-Xu/bolt
+      helper_repository: bytedance/bolt
       helper_sha: 6e021a135b8632b92669139df4ebf97da40741ee
       driver_repository: bytedance/bolt
       driver_sha: 72f74589df524b2f4a7695b4f10c5b13a95812e8
