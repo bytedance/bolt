@@ -537,17 +537,27 @@ void FlatVector<T>::copyRanges(
       return;
     }
 
+    const auto flatSourceSize = flatSource->size();
     if constexpr (std::is_same_v<T, bool>) {
       auto rawValues = reinterpret_cast<uint64_t*>(rawValues_);
       auto* sourceValues = flatSource->template rawValues<uint64_t>();
       applyToEachRange(
           ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
+            const auto bound =
+                flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
+            const auto boundedCount = std::min(count, bound);
+            if (boundedCount == 0) {
+              return;
+            }
             bits::copyBits(
-                sourceValues, sourceIndex, rawValues, targetIndex, count);
+                sourceValues,
+                sourceIndex,
+                rawValues,
+                targetIndex,
+                boundedCount);
           });
     } else {
       const T* sourceValues = flatSource->rawValues();
-      const auto flatSourceSize = flatSource->size();
       applyToEachRange(
           ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
             auto bound =
@@ -598,12 +608,20 @@ void FlatVector<T>::copyRanges(
       BaseVector::setNulls(rawNulls, ranges, false);
     }
   } else {
+    const auto nonFlatSourceSize = source->size();
     auto* sourceVector = source->asUnchecked<SimpleVector<T>>();
     uint64_t* rawBoolValues = nullptr;
     if constexpr (std::is_same_v<T, bool>) {
       rawBoolValues = reinterpret_cast<uint64_t*>(rawValues_);
     }
     applyToEachRow(ranges, [&](auto targetIndex, auto sourceIndex) {
+      if (sourceIndex >= nonFlatSourceSize) {
+        if (!rawNulls) {
+          rawNulls = BaseVector::mutableRawNulls();
+        }
+        bits::setNull(rawNulls, targetIndex);
+        return;
+      }
       if (!source->isNullAt(sourceIndex)) {
         auto sourceValue = sourceVector->valueAt(sourceIndex);
         if constexpr (std::is_same_v<T, bool>) {
