@@ -92,10 +92,12 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         self.assertEqual(compile_job["needs"], "reuse-check")
         source = jobs["source-result"]
         self.assertIn("gluten-backend-compile", source["needs"])
+        self.assertIn("gluten-ci-check", source["needs"])
 
         context = {
             "needs.reuse-check.result": "success",
             "needs.changes.result": "success",
+            "needs.gluten-ci-check.result": "success",
             "needs.build-test.result": "skipped",
             "needs.build-only.result": "skipped",
             "needs.changes.outputs.source_code": "false",
@@ -120,6 +122,13 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
                         source["if"], status | {"needs.reuse-check.result": "failure"}
                     )
                 )
+                for check_result in ("failure", "cancelled", "skipped"):
+                    self.assertFalse(
+                        condition(
+                            source["if"],
+                            status | {"needs.gluten-ci-check.result": check_result},
+                        )
+                    )
 
     def test_gluten_is_resolved_before_reuse_and_recorded_after_testing(self):
         jobs = workflow("build-test.yml")["jobs"]
