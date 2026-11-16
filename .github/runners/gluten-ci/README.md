@@ -35,6 +35,8 @@ Apache Gluten supplies only backend source and necessary native/Spark test fixes
 it does not need to host CI workflows or deployment scripts. Spark 3.4 is outside
 this CI scope. Helpers come from the same Bolt revision as the caller or bundle.
 
+Deploy and verify the source seed with [Arrow source cache](../arrow-cache.md).
+
 Jobs use Linux x86_64 runners labelled `medium` and the existing CI image and
 registry. Native jobs mount `/data/ccache-data`, `/opt/bolt-arrow-sources` and
 `/opt/bolt-arrow-cache.py` read-only. The Conan service mounts
