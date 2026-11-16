@@ -4,8 +4,9 @@
 native build and Spark test source prerequisites in
 `3f4439f428bb7c7e399f60754b7ebe28263d0f6b`.
 
-Bolt PR compilation and nightly UT follow `apache/gluten` `main`. The prepare
-job resolves the ref once, and every worker checks out that exact commit.
+Bolt PR compilation and nightly UT follow `apache/gluten` `main`. PRs resolve
+the ref before reuse lookup; nightly resolves it in prepare. Every worker uses
+that exact commit, and PR reuse requires matching Gluten SHA evidence.
 Manual runs may supply an exact commit to reproduce a failure.
 
 Bolt owns the workflows, helpers, matrix and deployment. No Gluten fork or

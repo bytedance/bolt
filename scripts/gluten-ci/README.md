@@ -28,7 +28,8 @@ The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`.
 Its composite action is `.github/actions/bolt-ci-task/action.yml`. Both select
 helpers from an explicit revision; source comes from Apache Gluten. PRs pin both
 orchestration and helpers to the same reviewed Bolt commit, independently of the
-candidate passed as build input. Update both pins together after helper review.
+candidate passed as build input. Publish the reviewed helper commit before
+updating both caller pins, so GitHub can resolve it when parsing the workflow.
 Nightly uses the protected main revision.
 There is no fork fallback and no runtime source patching.
 
