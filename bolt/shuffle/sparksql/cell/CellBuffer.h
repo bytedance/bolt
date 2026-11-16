@@ -245,25 +245,32 @@ class DataCells {
       totalBytes_ += bytes;
       return;
     }
-    appendSlow(pid, stream, data, bytes);
+    appendWithAllocation(pid, stream, data, bytes);
   }
 
-  /// Experimental string-data append: only complete, aligned cache lines
-  /// use streaming stores. Other appends retain their ordinary hot path.
-  void appendStreaming(
+  /// Appends a positive multiple of 64 bytes to a cache-line-aligned stream.
+  /// Cells must be at least 64 bytes. The caller keeps the tail aligned by
+  /// appending only full lines until the stream closes or stops streaming.
+  /// The source need not be aligned. Allocation uses the general slow path.
+  void appendStreamingAligned(
       uint32_t pid,
       uint32_t stream,
       const void* data,
       uint32_t bytes) {
+    BOLT_DCHECK_GT(bytes, 0);
+    BOLT_DCHECK_EQ(bytes % kCacheLineBytes, 0);
+    BOLT_DCHECK_GE(allocator_->cellBytes(), kCacheLineBytes);
     auto& info = infos_[chainIndex(pid, stream)];
     if (FOLLY_LIKELY(bytes - 1 < info.tailLeft)) {
-      copyStreaming(info.tail, data, bytes);
+      BOLT_DCHECK_EQ(
+          reinterpret_cast<uintptr_t>(info.tail) % kCacheLineBytes, 0);
+      copyStreamingAligned(info.tail, data, bytes);
       info.tail += bytes;
       info.tailLeft -= bytes;
       totalBytes_ += bytes;
       return;
     }
-    appendSlow(pid, stream, data, bytes, /*streaming=*/true);
+    appendWithAllocation(pid, stream, data, bytes, /*streaming=*/true);
   }
 
   /// Contiguous scratch inside the current tail cell, or nullptr when the
@@ -345,18 +352,40 @@ class DataCells {
         info.tailLeft;
   }
 
-  void appendSlow(
+  void appendWithAllocation(
       uint32_t pid,
       uint32_t stream,
       const void* data,
       uint32_t bytes,
       bool streaming = false);
 
+  /// Full cache lines only; appendStreamingAligned checks the contract.
+  FOLLY_ALWAYS_INLINE void
+  copyStreamingAligned(char* dst, const void* data, uint32_t bytes) {
+#if defined(__AVX2__)
+    const auto* src = static_cast<const char*>(data);
+    pendingStreamingWrites_ = true;
+    do {
+      const auto first =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+      const auto second =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 32));
+      _mm256_stream_si256(reinterpret_cast<__m256i*>(dst), first);
+      _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + 32), second);
+      dst += kCacheLineBytes;
+      src += kCacheLineBytes;
+      bytes -= kCacheLineBytes;
+    } while (bytes != 0);
+#else
+    ::memcpy(dst, data, bytes);
+#endif
+  }
+
   FOLLY_ALWAYS_INLINE void
   copyStreaming(char* dst, const void* data, uint32_t bytes) {
     const auto* src = static_cast<const char*>(data);
 #if defined(__AVX2__)
-    if (streamingStoresEnabled_ && bytes >= kCacheLineBytes) {
+    if (bytes >= kCacheLineBytes) {
       const uint32_t prefix =
           -reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
       if (bytes >= prefix + kCacheLineBytes) {
@@ -410,7 +439,6 @@ class DataCells {
   ChunkAllocator* const allocator_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
-  const bool streamingStoresEnabled_;
   mutable bool pendingStreamingWrites_{false};
 
   /// numStreams * numPartitions chain infos; pool-backed.

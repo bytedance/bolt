@@ -97,12 +97,14 @@ CellSplitter::CellSplitter(
     uint32_t numPartitions,
     ChunkAllocator& allocator,
     CellOutput& output,
-    memory::MemoryPool& pool)
+    memory::MemoryPool& pool,
+    bool enableStringNonTemporalStores)
     : layout_(layout),
       allocator_(allocator),
       output_(output),
       numPartitions_(numPartitions),
       numStreams_(layout.numStreams()),
+      enableStringNonTemporalStores_(enableStringNonTemporalStores),
       cells_(&pool, &allocator, numPartitions_, numStreams_),
       nulls_(&pool, numPartitions_, layout.numWireColumns()),
       windowRowCounts_(numPartitions_, 0),
@@ -164,6 +166,7 @@ void CellSplitter::flushRaw(
   cur[pid] = 0;
 }
 
+template <bool kStreaming>
 FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     uint32_t stream,
     uint32_t pid,
@@ -171,7 +174,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     uint32_t bytes,
     uint8_t* cur) {
   char* line = cacheLine(stream, pid);
-  while (cur[pid] != 0 && bytes != 0) {
+  if (cur[pid] != 0 && bytes != 0) {
     const uint32_t take = std::min<uint32_t>(bytes, kCacheLineBytes - cur[pid]);
     copyStringUnder64(line + cur[pid], data, take);
     cur[pid] += take;
@@ -181,41 +184,27 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
       return;
     }
 
-    // Dictionary framing can leave a fallback tail unaligned. Complete
-    // that destination line first, retaining the rest of the staged bytes.
-    // Re-read the actual tail: a spill can replace it between input rows.
-    uint32_t flush = kCacheLineBytes;
-    if (const char* dst = cells_.tryReserve(pid, stream, 1)) {
-      flush -= reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
+    if constexpr (kStreaming) {
+      cells_.appendStreamingAligned(pid, stream, line, kCacheLineBytes);
+    } else {
+      cells_.append(pid, stream, line, kCacheLineBytes);
     }
-    cells_.appendStreaming(pid, stream, line, flush);
-    bumpPartitionBytes(pid, flush);
-    cur[pid] -= flush;
-    if (cur[pid] != 0) {
-      ::memmove(line, line + flush, cur[pid]);
-    }
+    bumpPartitionBytes(pid, kCacheLineBytes);
+    cur[pid] = 0;
   }
 
   if (bytes >= kCacheLineBytes) {
-    // Long values bypass staging once the destination is aligned. Only
-    // complete lines go directly to cells; the final fragment stays hot.
-    if (const char* dst = cells_.tryReserve(pid, stream, 1)) {
-      const uint32_t prefix =
-          -reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
-      if (prefix != 0) {
-        cells_.append(pid, stream, data, prefix);
-        bumpPartitionBytes(pid, prefix);
-        data += prefix;
-        bytes -= prefix;
-      }
-    }
-    // Preserve bounded allocations and the opportunity to spill between
-    // pieces of a very large value.
+    // Long values bypass staging in complete lines; the final fragment stays
+    // hot. Bound allocations so a very large value can spill between pieces.
     constexpr uint32_t kDirectAppendPiece = 256 << 10;
     while (bytes >= kCacheLineBytes) {
       const uint32_t take = std::min<uint32_t>(
           bytes & ~(kCacheLineBytes - 1), kDirectAppendPiece);
-      cells_.appendStreaming(pid, stream, data, take);
+      if constexpr (kStreaming) {
+        cells_.appendStreamingAligned(pid, stream, data, take);
+      } else {
+        cells_.append(pid, stream, data, take);
+      }
       bumpPartitionBytes(pid, take);
       data += take;
       bytes -= take;
@@ -333,7 +322,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <bool kHasNulls, CellSplitter::InputMapping kMapping>
+template <bool kHasNulls, CellSplitter::InputMapping kMapping, bool kStreaming>
 void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -381,7 +370,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
 
     const uint32_t size = view.size();
     variableBytes_[pid] += size;
-    appendStringData(dataStream, pid, view.data(), size, dataCur);
+    appendStringData<kStreaming>(dataStream, pid, view.data(), size, dataCur);
   }
 }
 
@@ -565,17 +554,31 @@ void CellSplitter::split(const SplitBatch& batch) {
         dispatchRaw<double>(col, batch, hasNulls);
         break;
       case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY:
-        dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
-          if (dictEnabled_[col] != 0) {
-            hasNulls ? dispatchStringDict<true, kMapping>(col, batch)
-                     : dispatchStringDict<false, kMapping>(col, batch);
-          } else {
-            hasNulls ? splitString<true, kMapping>(col, batch)
-                     : splitString<false, kMapping>(col, batch);
-          }
-        });
+      case TypeKind::VARBINARY: {
+        // Select the store policy once per column and batch, outside both
+        // the ordinary string and dictionary row loops.
+        const auto splitStrings = [&]<bool kStreaming>() {
+          dispatchInputMapping(
+              batch.decoded[col], [&]<InputMapping kMapping>() {
+                if (dictEnabled_[col] != 0) {
+                  hasNulls ? dispatchStringDict<true, kMapping, kStreaming>(
+                                 col, batch)
+                           : dispatchStringDict<false, kMapping, kStreaming>(
+                                 col, batch);
+                } else {
+                  hasNulls
+                      ? splitString<true, kMapping, kStreaming>(col, batch)
+                      : splitString<false, kMapping, kStreaming>(col, batch);
+                }
+              });
+        };
+        if (enableStringNonTemporalStores_) {
+          splitStrings.template operator()<true>();
+        } else {
+          splitStrings.template operator()<false>();
+        }
         break;
+      }
       default:
         BOLT_UNREACHABLE();
     }
@@ -945,6 +948,7 @@ void CellSplitter::closeDictSegment(
   dataCur[pid] = 0;
 }
 
+template <bool kStreaming>
 FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     uint32_t lengthStream,
     uint32_t dataStream,
@@ -1107,8 +1111,13 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     ++st.matched;
     cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
     if (FOLLY_UNLIKELY(++lengthCur[pid] == kCacheLineBytes)) {
-      cells_.appendStreaming(
-          pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);
+      if constexpr (kStreaming) {
+        cells_.appendStreamingAligned(
+            pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);
+      } else {
+        cells_.append(
+            pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);
+      }
       bumpPartitionBytes(pid, kCacheLineBytes);
       lengthCur[pid] = 0;
     }
@@ -1146,10 +1155,10 @@ FOLLY_NOINLINE void CellSplitter::appendStringFallback(
           lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
     }
   }
-  appendStringData(dataStream, pid, view.data(), view.size(), dataCur);
+  appendStringData<false>(dataStream, pid, view.data(), view.size(), dataCur);
 }
 
-template <bool kHasNulls, CellSplitter::InputMapping kMapping>
+template <bool kHasNulls, CellSplitter::InputMapping kMapping, bool kStreaming>
 void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
   // Only partitions present in this batch matter: an unused partition may
   // still have its initial dictionary state after every active one demoted.
@@ -1167,7 +1176,9 @@ void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
     dictStats_[col].fallbackRows += nulls == nullptr
         ? batch.numRows()
         : bits::countNonNulls(nulls, 0, batch.numRows());
-    splitString<kHasNulls, kMapping>(col, batch);
+    // Fallback data follows variable-sized dictionary frames. Keep ordinary
+    // stores even when the whole batch can reuse the regular string loop.
+    splitString<kHasNulls, kMapping, false>(col, batch);
     return;
   }
   if constexpr (kMapping == InputMapping::kDictionary) {
@@ -1176,16 +1187,17 @@ void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
     constexpr vector_size_t kSmallInputViews = 4096 / sizeof(StringView);
     const auto* base = batch.decoded[col].base();
     if (!base->isConstantEncoding() && base->size() > kSmallInputViews) {
-      splitStringDict<kHasNulls, kMapping, true>(col, batch);
+      splitStringDict<kHasNulls, kMapping, kStreaming, true>(col, batch);
       return;
     }
   }
-  splitStringDict<kHasNulls, kMapping, false>(col, batch);
+  splitStringDict<kHasNulls, kMapping, kStreaming, false>(col, batch);
 }
 
 template <
     bool kHasNulls,
     CellSplitter::InputMapping kMapping,
+    bool kStreaming,
     bool kPrefetchInput>
 void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
@@ -1246,7 +1258,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
     variableBytes_[pid] += view.size();
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
-        appendDictValue(
+        appendDictValue<kStreaming>(
             lengthStream, dataStream, pid, st, view, lengthCur, dataCur)) {
       continue;
     }

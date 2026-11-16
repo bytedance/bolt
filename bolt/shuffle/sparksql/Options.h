@@ -154,6 +154,10 @@ struct CellShuffleOptions {
   // columns; runtime dictionary fallback still applies. Ignored when
   // enableStringDictionary is false.
   uint32_t stringDictionaryProbeRowCount = 64;
+  // Use non-temporal stores for aligned full cache lines of ordinary string
+  // data and dictionary indexes when supported. Dictionary fallback always
+  // uses ordinary stores.
+  bool enableStringNonTemporalStores = false;
   // Compress runs through the codec's stream form, straight from the cells
   // with fixed buffers; off, each frame is gathered into a spill-pool
   // workspace
