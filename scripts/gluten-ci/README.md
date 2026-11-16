@@ -30,8 +30,11 @@ helpers from an explicit revision; source comes from Apache Gluten. PRs pin both
 orchestration and helpers to the same reviewed Bolt commit, independently of the
 candidate passed as build input. Publish the reviewed helper commit before
 updating both caller pins, so GitHub can resolve it when parsing the workflow.
+For bootstrap, the PR caller uses `Weixin-Xu/bolt` at an immutable reviewed commit.
+After merge, repin both references to an upstream commit containing these helpers.
+The tested Bolt candidate still comes from the calling PR; Gluten stays Apache-only.
 Nightly uses the protected main revision.
-There is no fork fallback and no runtime source patching.
+There is no Gluten fork fallback and no runtime source patching.
 
 PRs resolve Apache main before checking merge-queue reuse. Reuse requires matching
 Gluten SHA evidence from the trusted gate; old records without it are misses.

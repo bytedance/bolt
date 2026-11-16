@@ -62,14 +62,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
     def assert_pinned_caller(self, job, mode):
         if mode == "native":
             match = re.fullmatch(
-                r"bytedance/bolt/\.github/workflows/bolt_backend_x86.yml@([0-9a-f]{40})",
+                r"Weixin-Xu/bolt/\.github/workflows/bolt_backend_x86.yml@([0-9a-f]{40})",
                 job["uses"],
             )
             self.assertIsNotNone(
                 match, "PR orchestration must use a reviewed immutable revision"
             )
             helper = match[1]
-            repository = "bytedance/bolt"
+            repository = "Weixin-Xu/bolt"
             gluten = "${{ needs.reuse-check.outputs.gluten_sha }}"
         else:
             self.assertEqual(job["uses"], f"./.github/workflows/{MIRROR}")
