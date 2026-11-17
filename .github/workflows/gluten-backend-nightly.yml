@@ -48,5 +48,5 @@ jobs:
       gluten_sha: main
       helper_repository: ${{ github.repository }}
       helper_sha: ${{ github.sha }}
-      driver_repository: bytedance/bolt
-      driver_sha: 72f74589df524b2f4a7695b4f10c5b13a95812e8
+      driver_repository: ${{ github.repository }}
+      driver_sha: ${{ github.sha }}

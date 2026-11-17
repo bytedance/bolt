@@ -32,7 +32,7 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_DRIVER_SHA = "72f74589df524b2f4a7695b4f10c5b13a95812e8"
+DEFAULT_DRIVER_SHA = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
 NATIVE_PACKAGE = PurePosixPath("cpp/build/package/bolt/linux/amd64")
 NATIVE_RUNTIME = PurePosixPath("bolt-runtime")
 UDF_EXAMPLES = PurePosixPath("cpp/build/Release/bolt/udf/examples")

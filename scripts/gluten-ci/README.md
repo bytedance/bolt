@@ -27,7 +27,9 @@ and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`, called
 locally by Bolt's PR and nightly workflows. PRs load the composite action and
 helpers from a reviewed Bolt commit, independently of the candidate passed as
-build input. Nightly uses the protected main revision. There is no fork workflow
+build input. The same pinned revision contains the Spark driver; no separate
+PR branch is needed. Nightly uses the protected main revision for both helpers
+and driver. There is no fork workflow
 dependency or runtime patching of Apache Gluten source.
 
 The workflow definition follows Bolt's existing PR review model. Pinning helpers

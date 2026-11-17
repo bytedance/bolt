@@ -36,7 +36,7 @@ from merge_queue_ci import make_fingerprint  # noqa: E402
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github/workflows"
 GLUTEN = "main"
-DRIVER = "72f74589df524b2f4a7695b4f10c5b13a95812e8"
+DRIVER = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
 MIRROR = "bolt_backend_x86.yml"
 
 
@@ -67,7 +67,7 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
     def assert_pinned_caller(self, job, mode):
         self.assertEqual(job["uses"], f"./.github/workflows/{MIRROR}")
         if mode == "native":
-            helper = "6e021a135b8632b92669139df4ebf97da40741ee"
+            helper = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
             repository = "bytedance/bolt"
             gluten = "${{ needs.reuse-check.outputs.gluten_sha }}"
         else:
@@ -85,8 +85,8 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         self.assertEqual(inputs["helper_repository"], repository)
         self.assertEqual(inputs["gluten_sha"], gluten)
         self.assertEqual(inputs["helper_sha"], helper)
-        self.assertEqual(inputs["driver_repository"], "bytedance/bolt")
-        self.assertEqual(inputs["driver_sha"], DRIVER)
+        self.assertEqual(inputs["driver_repository"], repository)
+        self.assertEqual(inputs["driver_sha"], DRIVER if mode == "native" else helper)
 
     def test_pr_compile_and_source_artifact_require_compile_or_verified_reuse(self):
         build = workflow("build-test.yml")
