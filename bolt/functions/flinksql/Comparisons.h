@@ -18,11 +18,15 @@
 
 #pragma once
 
+#include <string>
 #include <string_view>
 
 #include "bolt/type/Type.h"
 
 namespace bytedance::bolt::functions::flinksql {
+
+void registerComparisonFunctions(const std::string& prefix);
+
 namespace detail {
 
 inline bool supportsRowEquality(const Type& type) {

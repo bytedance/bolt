@@ -38,7 +38,7 @@ parseDate(std::string_view value, bool compatibleWithMysql, bool& overflow) {
   std::array<int32_t, 3> parts{0, 1, 1};
   auto* pos = value.data();
   const auto* end = pos + value.size();
-  const bool startsWithSpace = !value.empty() && value.front() == ' ';
+  const bool startsWithSpace = value.starts_with(' ');
   const auto skipWhitespace = [&]() {
     // Java String.trim() removes characters up to U+0020.
     while (pos != end && static_cast<unsigned char>(*pos) <= 0x20) {
@@ -152,15 +152,13 @@ void FlinkCastExpr::evalSpecialForm(
       context.applyToSelectedNoThrow(*remainingRows, [&](vector_size_t row) {
         const auto value = decoded->valueAt<StringView>(row);
         bool overflow = false;
-        const auto date = parseDate(
-            std::string_view(value.data(), value.size()),
-            compatibleWithMysql,
-            overflow);
+        const auto date =
+            parseDate(std::string_view(value), compatibleWithMysql, overflow);
         BOLT_USER_CHECK(
             !overflow || nullOnFailure_,
             "Flink DATE component exceeds the 32-bit integer range");
-        if (date.has_value()) {
-          rawResult[row] = date.value();
+        if (date) {
+          rawResult[row] = *date;
         } else {
           flatResult->setNull(row, true);
         }

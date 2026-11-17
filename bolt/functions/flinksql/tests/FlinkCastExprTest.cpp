@@ -29,6 +29,19 @@ using bolt::test::assertEqualVectors;
 
 class FlinkCastExprTest : public functions::test::CastBaseTest {
  protected:
+  using DateCase =
+      std::pair<std::optional<std::string>, std::optional<int32_t>>;
+
+  void testDateCast(const std::vector<DateCase>& cases) {
+    std::vector<std::optional<std::string>> input;
+    std::vector<std::optional<int32_t>> expected;
+    for (const auto& [value, days] : cases) {
+      input.push_back(value);
+      expected.push_back(days);
+    }
+    testCast<std::string, int32_t>(VARCHAR(), DATE(), input, expected);
+  }
+
   static void SetUpTestCase() {
     parse::registerTypeResolver();
     exec::registerFunctionCallToSpecialForms();
@@ -40,67 +53,48 @@ class FlinkCastExprTest : public functions::test::CastBaseTest {
 };
 
 TEST_F(FlinkCastExprTest, stringToDateBoundaries) {
-  const std::vector<std::optional<std::string>> input = {
-      "1970-01-01",
-      "2026-11-11",
-      "2026-11-11 12:34:56",
-      "2026-11-11 arbitrary suffix",
-      "2026-11",
-      "2026",
-      " 2026-11-11",
-      "2026-11-11\t",
-      "2026-\t11-\t11",
-      "2026-1-2",
-      "0000-01-01",
-      "0000-02-29",
-      "0001-01-01",
-      "1582-10-10",
-      "2000-02-29",
-      "9999-12-31",
-      "0000002026-00011-00011",
-      "2026-11-11T12:34:56",
-      "10000-01-01",
-      "0000-00-00",
-      "2026-02-29",
-      "1900-02-29",
-      "2026-04-31",
-      "2026-00-01",
-      "2026-13-01",
-      "2026-11-00",
-      "2026-11-32",
-      "2026-",
-      "2026-11-",
-      "2026-11-11-1",
-      "+2026-11-11",
-      "-0001-01-01",
-      "2026/11/11",
-      " 2026-11-11 12:34:56",
-      "2026-11-11\t12:34:56",
-      "2026-11-11\xc2\xa0",
-      "invalid",
-      "",
-      std::nullopt};
   // Epoch days from Flink SqlDateTimeUtils.dateStringToUnixDate.
-  std::vector<std::optional<int32_t>> expected = {
-      0,
-      20768,
-      20768,
-      20768,
-      20758,
-      20454,
-      20768,
-      20768,
-      20768,
-      20455,
-      -719528,
-      -719469,
-      -719162,
-      -141432,
-      11016,
-      2932896,
-      20768};
-  expected.resize(input.size(), std::nullopt);
-  testCast<std::string, int32_t>(VARCHAR(), DATE(), input, expected);
+  testDateCast({
+      {"1970-01-01", 0},
+      {"2026-11-11", 20768},
+      {"2026-11-11 12:34:56", 20768},
+      {"2026-11-11 arbitrary suffix", 20768},
+      {"2026-11", 20758},
+      {"2026", 20454},
+      {" 2026-11-11", 20768},
+      {"2026-11-11\t", 20768},
+      {"2026-\t11-\t11", 20768},
+      {"2026-1-2", 20455},
+      {"0000-01-01", -719528},
+      {"0000-02-29", -719469},
+      {"0001-01-01", -719162},
+      {"1582-10-10", -141432},
+      {"2000-02-29", 11016},
+      {"9999-12-31", 2932896},
+      {"0000002026-00011-00011", 20768},
+      {"2026-11-11T12:34:56", std::nullopt},
+      {"10000-01-01", std::nullopt},
+      {"0000-00-00", std::nullopt},
+      {"2026-02-29", std::nullopt},
+      {"1900-02-29", std::nullopt},
+      {"2026-04-31", std::nullopt},
+      {"2026-00-01", std::nullopt},
+      {"2026-13-01", std::nullopt},
+      {"2026-11-00", std::nullopt},
+      {"2026-11-32", std::nullopt},
+      {"2026-", std::nullopt},
+      {"2026-11-", std::nullopt},
+      {"2026-11-11-1", std::nullopt},
+      {"+2026-11-11", std::nullopt},
+      {"-0001-01-01", std::nullopt},
+      {"2026/11/11", std::nullopt},
+      {" 2026-11-11 12:34:56", std::nullopt},
+      {"2026-11-11\t12:34:56", std::nullopt},
+      {"2026-11-11\xc2\xa0", std::nullopt},
+      {"invalid", std::nullopt},
+      {"", std::nullopt},
+      {std::nullopt, std::nullopt},
+  });
   testCast<std::string, int32_t>(
       VARCHAR(),
       DATE(),
@@ -134,29 +128,18 @@ TEST_F(FlinkCastExprTest, stringToDateIntegerOverflow) {
 
   // Java validates all digits within a component before parsing its integer,
   // and parses all components before checking the calendar date range.
-  testCast<std::string, int32_t>(
-      VARCHAR(),
-      DATE(),
-      {"2147483647-01-01",
-       "2026-2147483647-01",
-       "2026-01-2147483647",
-       "2147483648x-01-01",
-       "2026-2147483648x-01",
-       "2147483648\t0-01-01",
-       "2026-01-2147483648-1",
-       "invalid-2147483648-01",
-       "0000000000000000000002026-01-01",
-       std::nullopt},
-      {std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       std::nullopt,
-       20454,
-       std::nullopt});
+  testDateCast({
+      {"2147483647-01-01", std::nullopt},
+      {"2026-2147483647-01", std::nullopt},
+      {"2026-01-2147483647", std::nullopt},
+      {"2147483648x-01-01", std::nullopt},
+      {"2026-2147483648x-01", std::nullopt},
+      {"2147483648\t0-01-01", std::nullopt},
+      {"2026-01-2147483648-1", std::nullopt},
+      {"invalid-2147483648-01", std::nullopt},
+      {"0000000000000000000002026-01-01", 20454},
+      {std::nullopt, std::nullopt},
+  });
 
   auto input = makeRowVector({makeNullableFlatVector<std::string>(
       {"2147483648-01-01", "2026-01-01", std::nullopt, "invalid"})});
@@ -185,52 +168,33 @@ TEST_F(FlinkCastExprTest, stringToDateIntegerOverflow) {
 }
 
 TEST_F(FlinkCastExprTest, stringToDateCharacters) {
-  std::vector<std::optional<std::string>> input = {
-      "2000-02-29",
-      "2000-02-29 arbitrary suffix",
-      "2000-02-30 arbitrary suffix",
-      "2026-01-02 ",
-      "\t026-01-02",
-      " 026-01-02",
-      "2026-\t1-02",
-      "2026-01-\t2",
-      "2026-01-2\t",
-      "2026-01-2 ",
-      "2026-01- 2",
-      "2026 -1-02",
-      " 2026 -1-02",
-      "\t 2026-01-02",
-      "\t2026-01-02 arbitrary suffix",
-      "2000/02-29",
-      "2000-02/29"};
-  std::vector<std::optional<int32_t>> expected = {
-      11016,
-      11016,
-      std::nullopt,
-      20455,
-      -710030,
-      -710030,
-      20455,
-      20455,
-      20455,
-      20455,
-      std::nullopt,
-      20454,
-      20455,
-      std::nullopt,
-      20455,
-      std::nullopt,
-      std::nullopt};
+  std::vector<DateCase> cases = {
+      {"2000-02-29", 11016},
+      {"2000-02-29 arbitrary suffix", 11016},
+      {"2000-02-30 arbitrary suffix", std::nullopt},
+      {"2026-01-02 ", 20455},
+      {"\t026-01-02", -710030},
+      {" 026-01-02", -710030},
+      {"2026-\t1-02", 20455},
+      {"2026-01-\t2", 20455},
+      {"2026-01-2\t", 20455},
+      {"2026-01-2 ", 20455},
+      {"2026-01- 2", std::nullopt},
+      {"2026 -1-02", 20454},
+      {" 2026 -1-02", 20455},
+      {"\t 2026-01-02", std::nullopt},
+      {"\t2026-01-02 arbitrary suffix", 20455},
+      {"2000/02-29", std::nullopt},
+      {"2000-02/29", std::nullopt}};
   const std::string date = "2000-02-29";
   for (size_t i = 0; i < date.size(); ++i) {
     for (const auto c : {'/', ':', 'x', '\x7f', '\xff'}) {
       auto value = date;
       value[i] = c;
-      input.emplace_back(value);
-      expected.emplace_back(std::nullopt);
+      cases.emplace_back(value, std::nullopt);
     }
   }
-  testCast<std::string, int32_t>(VARCHAR(), DATE(), input, expected);
+  testDateCast(cases);
 }
 
 TEST_F(FlinkCastExprTest, stringToDateMysqlCompatibility) {
@@ -239,27 +203,18 @@ TEST_F(FlinkCastExprTest, stringToDateMysqlCompatibility) {
     queryCtx_->testingOverrideConfigUnsafe(
         {{"table.exec.compatible-with-mysql",
           compatibleWithMysql ? "true" : "false"}});
-    testCast<std::string, int32_t>(
-        VARCHAR(),
-        DATE(),
+    testDateCast({
         {"0000-00-00",
-         "0001-01-01",
-         "0000-01-01",
-         "0000-00-00 00:00:00",
-         "0000-00-00 ",
-         " 0000-00-00",
-         "0000-00-00\t",
-         "0-0-0",
-         std::nullopt},
-        {compatibleWithMysql ? std::optional<int32_t>(-719162) : std::nullopt,
-         -719162,
-         -719528,
-         std::nullopt,
-         std::nullopt,
-         std::nullopt,
-         std::nullopt,
-         std::nullopt,
-         std::nullopt});
+         compatibleWithMysql ? std::optional(-719162) : std::nullopt},
+        {"0001-01-01", -719162},
+        {"0000-01-01", -719528},
+        {"0000-00-00 00:00:00", std::nullopt},
+        {"0000-00-00 ", std::nullopt},
+        {" 0000-00-00", std::nullopt},
+        {"0000-00-00\t", std::nullopt},
+        {"0-0-0", std::nullopt},
+        {std::nullopt, std::nullopt},
+    });
   }
 }
 

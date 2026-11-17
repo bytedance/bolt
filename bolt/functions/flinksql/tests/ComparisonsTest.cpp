@@ -1048,7 +1048,7 @@ TEST_F(ComplexEqualTest, RowsUseJavaFloatingEquality) {
   auto left = makeRowVector(
       {makeNullableFlatVector<double>({std::nullopt, nan, 0.0, 1.0})});
   auto right = makeRowVector(
-      {makeNullableFlatVector<double>({std::nullopt, -nan, -0.0, 2.0})});
+      {makeNullableFlatVector<double>({std::nullopt, nan, -0.0, 2.0})});
   assertComparisons(left, right, {true, true, false, false}, "_binary");
   assertComparisons(left, right, {true, false, true, false});
 }

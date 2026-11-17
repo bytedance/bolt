@@ -484,7 +484,7 @@ FLATTEN inline bool mapEqual(
 template <typename T>
 bool equalCanonicalFloating(T left, T right) {
   using Bits = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-  // Flink's writers canonicalize NaNs but retain the sign of zero.
+  // Canonical encodings use one NaN representation and retain signed zero.
   return (std::isnan(left) && std::isnan(right)) ||
       std::bit_cast<Bits>(left) == std::bit_cast<Bits>(right);
 }
@@ -820,15 +820,6 @@ class FlinkComplexEqual final : public exec::VectorFunction {
   const bool negate_;
 };
 
-std::vector<std::shared_ptr<exec::FunctionSignature>> complexEqualSignatures() {
-  return {exec::FunctionSignatureBuilder()
-              .typeVariable("T")
-              .returnType("boolean")
-              .argumentType("T")
-              .argumentType("T")
-              .build()};
-}
-
 template <bool sqlKeys, ComparisonMode mode>
 std::shared_ptr<exec::VectorFunction> makeTypedMapEqual(
     const TypePtr& type,
@@ -880,21 +871,29 @@ std::shared_ptr<exec::VectorFunction> makeComplexEqual(
 
 } // namespace
 
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_complex_equal_generic,
-    complexEqualSignatures(),
-    (makeComplexEqual<false, ComparisonMode::kGeneric>));
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_complex_not_equal_generic,
-    complexEqualSignatures(),
-    (makeComplexEqual<true, ComparisonMode::kGeneric>));
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_complex_equal_binary,
-    complexEqualSignatures(),
-    (makeComplexEqual<false, ComparisonMode::kBinary>));
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_complex_not_equal_binary,
-    complexEqualSignatures(),
-    (makeComplexEqual<true, ComparisonMode::kBinary>));
+void registerComparisonFunctions(const std::string& prefix) {
+  const std::vector<exec::FunctionSignaturePtr> signatures{
+      exec::FunctionSignatureBuilder()
+          .typeVariable("T")
+          .returnType("boolean")
+          .argumentType("T")
+          .argumentType("T")
+          .build()};
+  for (const bool negate : {false, true}) {
+    const auto name =
+        prefix + (negate ? "flink_complex_not_equal" : "flink_complex_equal");
+    const auto generic = negate
+        ? makeComplexEqual<true, ComparisonMode::kGeneric>
+        : makeComplexEqual<false, ComparisonMode::kGeneric>;
+    exec::registerStatefulVectorFunction(name, signatures, generic);
+    exec::registerStatefulVectorFunction(
+        name + "_generic", signatures, generic);
+    exec::registerStatefulVectorFunction(
+        name + "_binary",
+        signatures,
+        negate ? makeComplexEqual<true, ComparisonMode::kBinary>
+               : makeComplexEqual<false, ComparisonMode::kBinary>);
+  }
+}
 
 } // namespace bytedance::bolt::functions::flinksql
