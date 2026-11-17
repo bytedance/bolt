@@ -121,7 +121,7 @@ def warm(seed, sources):
     check_seed(seed, sources)
 
 
-def configure_local(seed, home, sources):
+def configure_local(seed, home, sources, quiet=False):
     """Copy blobs, never share Conan's writable metadata/locks with the seed."""
     check_seed(seed, sources)
     cache = home / "source-backup"
@@ -140,7 +140,121 @@ def configure_local(seed, home, sources):
     lines = [line for line in lines if line.partition("=")[0].strip() not in settings]
     lines.extend(f"{key}={value}" for key, value in settings.items())
     conf.write_text("\n".join(lines) + "\n")
-    print("Source archives configured in the private Conan source cache")
+    if not quiet:
+        print("Source archives configured in the private Conan source cache")
+
+
+def copy_home_cache(source, destination):
+    """Only trusted dependency caches, never credentials or job outputs."""
+    for relative in (".m2/repository", ".cache/pip", ".cache/spark"):
+        base = source / relative
+        parts = Path(relative).parts
+        if not base.is_dir() or any(
+            source.joinpath(*parts[:i]).is_symlink() for i in range(1, len(parts) + 1)
+        ):
+            continue
+        for directory, dirs, files in os.walk(base, followlinks=False):
+            parent = Path(directory)
+            links = [name for name in dirs if (parent / name).is_symlink()]
+            dirs[:] = [name for name in dirs if name not in links]
+            for name in files + links:
+                item = parent / name
+                target = destination / item.relative_to(source)
+                if target.exists() or target.is_symlink():
+                    continue
+                if item.is_symlink():
+                    resolved = item.resolve()
+                    if resolved.is_relative_to(base.resolve()):
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.symlink_to(
+                            os.path.relpath(resolved, item.parent.resolve())
+                        )
+                elif item.is_file():
+                    atomic_copy(item, target)
+                    target.chmod(0o755 if item.stat().st_mode & 0o111 else 0o644)
+
+
+def auto_configure(root):
+    """Optional image bootstrap; unavailable caches must not break a build."""
+    home = Path(os.environ["HOME"])
+    conan = Path(os.environ.get("CONAN_HOME", str(home / ".conan2")))
+    try:
+        marker = conan / ".bolt-source-cache-ready"
+        if not marker.exists():
+            sources = load_sources(root / "s/manifest.json")
+            configure_local(root / "s", conan, sources, quiet=True)
+            marker.touch()
+    except (OSError, ValueError):
+        pass
+    try:
+        marker = home / ".cache/.bolt-home-cache-ready"
+        if (root / "home").is_dir() and not marker.exists():
+            copy_home_cache(root / "home", home)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+    except OSError:
+        pass
+
+
+def build_image(root, image, output, home_seed, sources):
+    if not output or output == image:
+        raise ValueError("Use --output-image with a distinct tag for verification")
+    check_seed(root / "s", sources)
+    config = json.loads(subprocess.check_output(["docker", "image", "inspect", image]))[
+        0
+    ]["Config"]
+    if any(
+        value.startswith("BASH_ENV=") and value != "BASH_ENV="
+        for value in config.get("Env", [])
+    ):
+        raise ValueError(
+            "Base image already defines BASH_ENV; keep its bootstrap intact"
+        )
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory)
+        seed = context / "cache"
+        seed.mkdir()
+        for source in sources:
+            atomic_copy(root / "s" / source["sha256"], seed / "s" / source["sha256"])
+        # The image contains no operator download URLs.
+        (seed / "s/manifest.json").write_text(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "name": source["sha256"],
+                            "sha256": source["sha256"],
+                            "urls": ["https://invalid.invalid/"],
+                        }
+                        for source in sources
+                    ]
+                }
+            )
+        )
+        if home_seed:
+            copy_home_cache(home_seed, seed / "home")
+        atomic_copy(Path(__file__), seed / "arrow-cache.py")
+        (seed / "init.sh").write_text(
+            "python3 /opt/bolt-ci-cache/arrow-cache.py auto-configure "
+            "--source-dir /opt/bolt-ci-cache >/dev/null 2>&1 || :\n"
+        )
+        (context / "Dockerfile").write_text(
+            "ARG BASE_IMAGE=scratch\nFROM ${BASE_IMAGE}\n"
+            "COPY --chmod=0755 cache/ /opt/bolt-ci-cache/\n"
+            "ENV BASH_ENV=/opt/bolt-ci-cache/init.sh\n"
+        )
+        subprocess.run(
+            [
+                "docker",
+                "build",
+                "--build-arg",
+                f"BASE_IMAGE={image}",
+                "--tag",
+                output,
+                str(context),
+            ],
+            check=True,
+        )
 
 
 def make_server(seed, bind, port, sources):
@@ -190,7 +304,6 @@ def prepare(root, manifest, sources):
     for name in (
         "arrow-cache.py",
         "compose.arrow-cache.yml",
-        "compose.arrow-cache-runners.yml",
     ):
         source = directory / name
         if source.resolve() != (root / name).resolve():
@@ -293,6 +406,8 @@ def main():
             "serve",
             "configure-local",
             "check-conan",
+            "auto-configure",
+            "image",
         ),
     )
     parser.add_argument(
@@ -308,8 +423,19 @@ def main():
         help="Source archive manifest (defaults to the shipped or deployed manifest)",
     )
     parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument(
+        "--output-image", help="New cache image tag; never overwrites the base"
+    )
+    parser.add_argument(
+        "--home-seed",
+        type=Path,
+        help="Trusted prewarmed HOME (dependency directories only)",
+    )
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
+    if args.command == "auto-configure":
+        auto_configure(args.source_dir)
+        return
     root = Path(
         os.environ.get(
             "BOLT_ARROW_CACHE_DIR",
@@ -323,7 +449,7 @@ def main():
     if manifest is None:
         if args.command in ("prepare", "up"):
             manifest = Path(__file__).with_name("arrow-cache-sources.json")
-        elif args.command == "verify":
+        elif args.command in ("verify", "image"):
             manifest = root / "s" / "manifest.json"
         else:
             manifest = args.source_dir / "manifest.json"
@@ -341,9 +467,9 @@ def main():
                 "--force-recreate",
                 "bolt-source-cache",
             )
-        print(
-            "Cache prepared; apply compose.arrow-cache-runners.yml to idle runners to enable CI mounts"
-        )
+        print("Cache prepared; use image to enable automatic CI cache consumption")
+    elif args.command == "image":
+        build_image(root, args.image, args.output_image, args.home_seed, sources)
     elif args.command == "verify":
         verify(
             root,

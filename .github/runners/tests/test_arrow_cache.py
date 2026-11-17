@@ -97,6 +97,89 @@ class ArrowCacheTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.cache.load_sources(manifest)
 
+    def test_automatic_cache_is_private_and_never_overwrites_job_changes(self):
+        deployed = self.root / "deployed"
+        self.cache.warm(deployed / "s", self.sources)
+        (deployed / "s/manifest.json").write_text(json.dumps({"sources": self.sources}))
+        artifact = deployed / "home/.m2/repository/library.jar"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(self.body)
+        for name in ("job-one", "job-two"):
+            home = self.root / name
+            conan = home / "custom-conan"
+            with patch.dict(os.environ, {"HOME": str(home), "CONAN_HOME": str(conan)}):
+                self.cache.auto_configure(deployed)
+                self.assertEqual(
+                    (conan / "source-backup/s" / self.sha).read_bytes(), self.body
+                )
+                copied = home / ".m2/repository/library.jar"
+                self.assertEqual(copied.read_bytes(), self.body)
+                copied.write_bytes(b"job change")
+                self.cache.auto_configure(deployed)
+                self.assertEqual(copied.read_bytes(), b"job change")
+        self.assertEqual(artifact.read_bytes(), self.body)
+
+    def test_automatic_cache_miss_or_corruption_does_not_fail_shell_startup(self):
+        deployed = self.root / "deployed"
+        home = self.root / "job"
+        with patch.dict(
+            os.environ, {"HOME": str(home), "CONAN_HOME": str(home / ".conan2")}
+        ):
+            self.cache.auto_configure(deployed)
+            self.cache.warm(deployed / "s", self.sources)
+            (deployed / "s/manifest.json").write_text(
+                json.dumps({"sources": self.sources})
+            )
+            (deployed / "s" / self.sha).write_bytes(b"corrupt")
+            self.cache.auto_configure(deployed)
+            self.assertFalse((home / ".conan2/global.conf").exists())
+
+    def test_home_snapshot_excludes_credentials_and_symlinks(self):
+        seed = self.root / "home"
+        (seed / ".m2/repository").mkdir(parents=True)
+        (seed / ".m2/settings.xml").write_text("secret")
+        (seed / ".m2/repository/library.jar").write_bytes(self.body)
+        (seed / ".m2/repository/escape").symlink_to(seed / ".m2/settings.xml")
+        target = self.root / "snapshot"
+        self.cache.copy_home_cache(seed, target)
+        self.assertEqual(
+            (target / ".m2/repository/library.jar").read_bytes(), self.body
+        )
+        self.assertFalse((target / ".m2/settings.xml").exists())
+        self.assertFalse((target / ".m2/repository/escape").exists())
+
+    def test_spark_snapshot_preserves_executables_and_internal_links(self):
+        seed = self.root / "home"
+        spark = seed / ".cache/spark/shims/example/spark_home"
+        (spark / "bin").mkdir(parents=True)
+        (spark / "bin/spark-submit").write_text("#!/bin/sh\nexit 0\n")
+        (spark / "bin/spark-submit").chmod(0o755)
+        (spark / "assembly/jars").mkdir(parents=True)
+        (spark / "assembly/jars/core.jar").write_bytes(self.body)
+        (spark / "jars").symlink_to("assembly/jars")
+        target = self.root / "snapshot"
+        self.cache.copy_home_cache(seed, target)
+        copied = target / spark.relative_to(seed)
+        self.assertTrue(os.access(copied / "bin/spark-submit", os.X_OK))
+        self.assertEqual((copied / "jars/core.jar").read_bytes(), self.body)
+
+    def test_automatic_cli_without_seed_exits_silently(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "auto-configure",
+                "--source-dir",
+                str(self.root / "missing"),
+            ],
+            env=os.environ
+            | {"HOME": str(self.root / "home"), "CONAN_HOME": str(self.root / "conan")},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+
     def test_warm_reuses_valid_content_and_repairs_corruption(self):
         self.cache.warm(self.seed, self.sources)
         self.origin.unlink()

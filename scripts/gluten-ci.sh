@@ -57,7 +57,7 @@ print(f"Verified {passed} passing tests")
 PYTHON
 }
 
-# Source this in each Spark step after setting Spark/Scala/JDK and cache paths.
+# Source this in each Spark step after setting Spark/Scala/JDK.
 spark_environment() {
   export SPARK_TESTING=true SPARK_ANSI_SQL_MODE=false SPARK_SCALA_VERSION="$SCALA_VERSION"
   SPARK_VERSION=$(xmllint --nonet --xpath \
@@ -67,7 +67,7 @@ spark_environment() {
   export SPARK_VERSION
   local resource="spark${SPARK_PROFILE/./}"
   if [[ "$SPARK_PROFILE/$SCALA_VERSION" == 3.5/2.13 ]]; then resource+="-scala-2.13"; fi
-  export SPARK_HOME="$GLUTEN_CACHE_ROOT/shims/$resource/spark_home"
+  export SPARK_HOME="$HOME/.cache/spark/shims/$resource/spark_home"
   export PATH="$GLUTEN_ROOT/.venv/bin:$JAVA_HOME/bin:$PATH"
   export PYSPARK_PYTHON="$GLUTEN_ROOT/.venv/bin/python3"
   export LD_LIBRARY_PATH="$GLUTEN_ROOT/bolt-runtime:$GLUTEN_ROOT/cpp/build/package/bolt/linux/amd64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -80,9 +80,9 @@ spark_environment() {
     )
     export PYTHONPATH="$zipped${PYTHONPATH:+:$PYTHONPATH}"
   fi
-  export JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=4 -XX:ErrorFile=$REPORTS/hs_err_pid%p.log"
+  export JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=4 -XX:ErrorFile=$REPORTS/hs_err_pid%p.log -Duser.home=$GLUTEN_ROOT/.home"
   MVN=(env "HOME=$GLUTEN_ROOT/.home" setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$GLUTEN_ROOT/build/mvn" -ntp -fae "-P$PROFILES"
-    "-Dmaven.repo.local=$GLUTEN_MAVEN_REPO" -DskipTests=false -Dmaven.test.skip=false
+    -DskipTests=false -Dmaven.test.skip=false
     -Dmaven.test.failure.ignore=false -DfailIfNoTests=false)
   if [[ "$STAGE" != package ]]; then MVN+=("-Dmaven.compiler.release=$JDK_VERSION"); fi
 }

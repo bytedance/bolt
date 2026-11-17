@@ -192,7 +192,7 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         self.assertNotIn("run-id", download)
         self.assertNotIn("repository", download)
 
-    def test_workflow_uses_candidate_checkout_and_persistent_dependency_cache(self):
+    def test_workflow_uses_candidate_checkout_without_cache_deployment_details(self):
         definition = workflow(MIRROR)
         self.assertEqual(set(definition["on"]), {"workflow_call", "workflow_dispatch"})
         self.assertEqual(definition["jobs"]["spark"]["if"], "inputs.mode == 'full'")
@@ -206,14 +206,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
             self.assertEqual(checkouts[0]["ref"], "${{ env.BOLT_SHA }}")
             self.assertEqual(checkouts[1]["repository"], "apache/gluten")
             self.assertEqual(checkouts[1]["ref"], "${{ env.GLUTEN_SHA }}")
-        cache = next(
-            s["with"]
-            for s in definition["jobs"]["spark"]["steps"]
-            if s.get("uses", "").startswith("actions/cache/restore@")
-        )
-        self.assertEqual(
-            cache["path"].split(),
-            [".gluten-cache/maven", ".gluten-cache/spark", ".gluten-cache/pip"],
-        )
-        self.assertIn("matrix.scala", cache["key"])
-        self.assertIn("hashFiles", cache["key"])
+        text = (WORKFLOWS / MIRROR).read_text()
+        for forbidden in (
+            "actions/cache/",
+            "bolt-arrow",
+            "configure-local",
+            "PIP_CACHE_DIR",
+            "GLUTEN_CACHE_ROOT",
+            "GLUTEN_MAVEN_REPO",
+        ):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("CCACHE_SECONDARY_STORAGE", text)

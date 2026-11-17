@@ -83,8 +83,6 @@ jobs:
       options: --user root --init
       volumes:
         - /data/ccache-data:/data/ccache-data:ro
-        - /opt/bolt-arrow-sources:/opt/bolt-arrow-sources:ro
-        - /opt/bolt-arrow-cache.py:/opt/bolt-arrow-cache.py:ro
     services:
       conanserver:
         image: bolt-registry:5000/conan-server:latest
@@ -125,9 +123,6 @@ jobs:
           test "$(git -C "$BOLT_ROOT" rev-parse HEAD)" = "$BOLT_SHA"
           test "$(git -C "$GLUTEN_ROOT" rev-parse HEAD)" = "$GLUTEN_SHA"
           bash "$BOLT_ROOT/scripts/install-bolt-deps.sh"
-          if [[ -f /opt/bolt-arrow-cache.py ]]; then
-            python3 /opt/bolt-arrow-cache.py configure-local
-          fi
           conan remote add ci http://conanserver:9300 --index 0
           source "$BOLT_ROOT/scripts/gluten-ci.sh"
           build_native "$BOLT_ROOT" "$GLUTEN_ROOT" "$REPORTS" "$CI_MODE"
@@ -259,16 +254,6 @@ jobs:
           cd ../gluten
           mkdir -p ep/build-bolt/build
           ln -s "$GITHUB_WORKSPACE/bolt" ep/build-bolt/build/bolt_ep
-      - name: Clear previous local dependency cache before restore
-        run: rm -rf -- "${GITHUB_WORKSPACE:?}/.gluten-cache"
-      - uses: actions/cache/restore@v4
-        id: cache
-        with:
-          path: |
-            .gluten-cache/maven
-            .gluten-cache/spark
-            .gluten-cache/pip
-          key: gluten-deps-v1-${{ matrix.stage == 'package' && 'package' || 'spark' }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.spark }}-${{ matrix.scala }}-${{ matrix.jdk }}-${{ hashFiles('gluten/**/pom.xml', 'gluten/.github/workflows/util/install-spark-resources.sh') }}
       - name: Prepare runtime and upstream Spark resources
         run: |
           if ! command -v xmllint >/dev/null || ! command -v shasum >/dev/null || ! command -v unzip >/dev/null; then
@@ -277,10 +262,8 @@ jobs:
           fi
           root="$GITHUB_WORKSPACE"
           rm -rf "$root/reports"
-          mkdir -p "$root/reports" "$root/.gluten-cache" "$root/gluten/.home"
-          for setting in "GLUTEN_ROOT=$root/gluten" "REPORTS=$root/reports" \
-            "GLUTEN_MAVEN_REPO=$root/.gluten-cache/maven" \
-            "GLUTEN_CACHE_ROOT=$root/.gluten-cache/spark" "PIP_CACHE_DIR=$root/.gluten-cache/pip"; do
+          mkdir -p "$root/reports" "$root/gluten/.home"
+          for setting in "GLUTEN_ROOT=$root/gluten" "REPORTS=$root/reports"; do
             printf '%s\n' "$setting" >> "$GITHUB_ENV"
             export "${setting?}"
           done
@@ -289,21 +272,20 @@ jobs:
           if [[ "$STAGE" != package ]]; then
             resource="$SPARK_PROFILE"
             if [[ "$resource/$SCALA_VERSION" == 3.5/2.13 ]]; then resource+=-scala2.13; fi
-            if [[ ! -f "$SPARK_HOME/.complete" ]]; then
-              mkdir -p "$GLUTEN_CACHE_ROOT"
-              (cd "$GLUTEN_CACHE_ROOT" && bash "$GLUTEN_ROOT/.github/workflows/util/install-spark-resources.sh" "$resource" "$GLUTEN_CACHE_ROOT")
+            if [[ ! -x "$SPARK_HOME/bin/spark-submit" || ! -f "$SPARK_HOME/jars/spark-core_${SCALA_VERSION}-${SPARK_VERSION}.jar" || ! -d "$SPARK_HOME/sql/core/src/test/resources" ]]; then
+              rm -rf "${SPARK_HOME:?}"
+              bash "$GLUTEN_ROOT/.github/workflows/util/install-spark-resources.sh" "$resource" "$HOME/.cache/spark"
               ln -sfn "assembly/target/scala-$SCALA_VERSION/jars" "$SPARK_HOME/jars"
-              touch "$SPARK_HOME/.complete"
             fi
             test -x "$SPARK_HOME/bin/spark-submit"
             test -f "$SPARK_HOME/jars/spark-core_${SCALA_VERSION}-${SPARK_VERSION}.jar"
             virtualenv --system-site-packages "$GLUTEN_ROOT/.venv"
             deps=("pyspark[sql]==$SPARK_VERSION")
             if [[ "$SPARK_PROFILE" == 3.* ]]; then deps=("pyspark==$SPARK_VERSION" numpy==1.26.4 pandas==2.2.3 pyarrow==20.0.0); fi
-            "$GLUTEN_ROOT/.venv/bin/python3" -m pip install --cache-dir "$PIP_CACHE_DIR" \
+            "$GLUTEN_ROOT/.venv/bin/python3" -m pip install \
               --timeout 120 setuptools==77.0.3 Cython==3.3.0 "${deps[@]}"
           fi
-          chown -R 65534:65534 "$root/bolt" "$GLUTEN_ROOT" "$REPORTS" "$root/.gluten-cache"
+          chown -R 65534:65534 "$root/bolt" "$GLUTEN_ROOT" "$REPORTS"
       - name: Build with Apache Gluten Maven profiles
         id: build
         run: |
@@ -374,7 +356,7 @@ jobs:
             tpc)
               "${MVN[@]}" -T 4 install -DskipTests=true
               cd tools/gluten-it
-              "$GLUTEN_ROOT/build/mvn" -ntp install "-Dmaven.repo.local=$GLUTEN_MAVEN_REPO" \
+              "$GLUTEN_ROOT/build/mvn" -ntp install \
                 "-Pspark-$SPARK_PROFILE" "-Pjava-$JDK_VERSION"
               for kind in h ds; do
                 GLUTEN_IT_JVM_ARGS=-Xmx6G bash sbin/gluten-it.sh queries-compare --local --preset=velox \
@@ -384,14 +366,6 @@ jobs:
               done
               ;;
           esac
-      - uses: actions/cache/save@v4
-        if: ${{ always() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            .gluten-cache/maven
-            .gluten-cache/spark
-            .gluten-cache/pip
-          key: ${{ steps.cache.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:

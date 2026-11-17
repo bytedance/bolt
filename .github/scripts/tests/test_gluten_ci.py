@@ -186,20 +186,6 @@ class WorkflowCommandsTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, stage == "jvm", result.stderr)
 
-    def test_cache_miss_does_not_leave_previous_dependency_contents(self):
-        stale = self.root / ".gluten-cache/spark/shims/old/.complete"
-        stale.parent.mkdir(parents=True)
-        stale.touch()
-        restore = next(i for i, s in enumerate(self.steps) if s.get("id") == "cache")
-        # Run cache-reset commands preceding restore, without checkout or artifact I/O.
-        for step in self.steps[:restore]:
-            if ".gluten-cache" in step.get("run", ""):
-                result = self.run_step(step["name"], "package")
-                self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(
-            stale.exists(), "Cache misses must start from an empty restore destination"
-        )
-
     def test_both_git_checkouts_are_owned_by_the_maven_worker(self):
         prepare = next(
             s["run"]

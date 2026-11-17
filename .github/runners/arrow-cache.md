@@ -19,7 +19,7 @@ limitations under the License.
 Seeds checksum-verified source archives from `arrow-cache-sources.json` (Arrow
 15.0.1 and Substrait 0.27.0 by default). Existing valid blobs in
 `conan-source-cache/s` are reused.
-No CI image rebuild, GitHub token or repository variable is needed.
+No GitHub token or repository variable is needed.
 
 ## Start and verify
 
@@ -53,43 +53,50 @@ The HTTP service defaults to `127.0.0.1:9301`; set `ARROW_CACHE_PORT` to change
 it. Use `ARROW_CACHE_BIND` only when explicitly exposing the mirror on another
 interface. Containers on the same Compose network can use
 `http://bolt-source-cache:8080/s/`. This hostname is not automatically available
-inside a runner's nested Docker daemon. GitHub jobs use the mounts below.
+inside a runner's nested Docker daemon. GitHub jobs use the image layer below.
 Only the configured archive hashes and `/healthz` are served; there are no write or
 listing endpoints. `python3 arrow-cache.py stop` preserves all cached files.
 For a combined stack, include the installed `compose.arrow-cache.yml` with the
 existing Compose files. `prepare` installs the files without starting Docker.
 
-## Enable existing runners
+## Enable automatic CI use
 
-When runners are idle, load the **same environment and all Compose files** used
-to create them. Append this override to that existing invocation:
+Build a cache layer on the **current** CI image; the original Dockerfile and
+compiler layers are unchanged. Use a distinct output tag to test before publishing:
 
 ```bash
-docker compose -p runners \
-  -f docker-compose.yml \
-  -f "$BOLT_ARROW_CACHE_DIR/compose.arrow-cache-runners.yml" \
-  up -d --no-deps --force-recreate runner-medium runner-small
+python3 arrow-cache.py image \
+  --image localhost:5000/bolt-ci:20260921 \
+  --output-image localhost:5000/bolt-ci:20260921-cache
 ```
 
-Recreation is also needed when upgrading the helper: an existing file bind
-mount can retain the old script after an atomic replacement. Updating only the
-source manifest later does not require recreation because `s` is a directory mount.
+Optionally add `--home-seed /path/to/trusted-prewarmed-home`. Only `.m2/repository`,
+`.cache/pip` and `.cache/spark` are included; settings, credentials and job outputs
+are excluded. Spark archives belong under `.cache/spark/shims/` in the layout
+produced by Gluten's `install-spark-resources.sh`. Use trusted prewarming output,
+not dependencies modified by a PR. Missing packages still download normally.
 
-The example assumes only the base file; keep any existing runner overrides
-before the cache override and retain it in future startup commands. Never omit
-repository, label or registration settings from the original deployment.
-The override adds only these read-only mounts to both runner sizes:
+The layer uses `BASH_ENV` to populate each job's private HOME/CONAN_HOME silently.
+It supports the non-login Bash shells used by Actions and changed HOME after
+privilege dropping. Existing job files are preserved; tasks never write back to
+the seed. Missing or invalid optional seeds do not block shell startup. A base
+image already defining `BASH_ENV` is rejected rather than replacing its setup.
+Source hashes are verified before import. Internal download URLs are not copied
+into the image. The workflow needs no source-cache mounts or initialization step.
 
-- `conan-source-cache/s` → `/opt/bolt-arrow-sources`
-- `conan-source-cache/arrow-cache.py` → `/opt/bolt-arrow-cache.py`
+After testing the image, publish it to the registry used by the runners. Keep the
+original image digest for rollback. Updating the existing CI tag requires no
+workflow change; using another tag requires changing the workflow image reference.
+For later refreshes, pass the original unmodified base digest to `--image`, not
+the tag that now points to the cache layer.
+Each ECS registry must receive the image. Do this between jobs; no runner
+re-registration is needed. Cache snapshots are refreshed by rebuilding this layer,
+not by saving untrusted job output. This trades automatic write-back for isolation.
 
-The existing Gluten workflow forwards them into each job and calls
-`configure-local` after setting its private `CONAN_HOME`. The helper verifies
-and copies the configured blobs into that home's writable `source-backup/s` directory,
-so Conan's locks, metadata and dirty markers never modify the shared seed.
-It replaces source-mirror URLs with `origin` fallback and preserves Conan
-package remotes and unrelated configuration. No ECS IP/hostname is added to
-public workflow configuration or the job's cache-helper output.
+The standalone HTTP service remains optional and independent of the CI image.
+`verify` checks the service and Conan cache format; it does not validate deployment
+of the new image. Check the actual image with an ordinary `bash --noprofile --norc`
+command and a fresh writable HOME before rollout.
 
 ## Local tests
 
