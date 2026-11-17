@@ -401,6 +401,8 @@ void SelectiveStructColumnReaderBase::getValues(
     resultRow->clearNulls(0, rows.size());
   }
   bool lazyPrepared = false;
+  std::shared_ptr<LazyLoadToken> lazyLoadToken;
+  const bool singleChild = scanSpec_->children().size() == 1;
   for (auto& childSpec : scanSpec_->children()) {
     if (!childSpec->projectOut()) {
       continue;
@@ -443,10 +445,14 @@ void SelectiveStructColumnReaderBase::getValues(
       if (rows.size() != outputRows_.size()) {
         setOutputRows(rows);
       }
+      lazyLoadToken = columnReaderOptions_.lazyLoadToken.lock();
       lazyPrepared = true;
     }
-    auto loader =
-        std::make_unique<ColumnLoader>(this, children_[index], numReads_);
+    auto loader = std::make_unique<ColumnLoader>(
+        this,
+        children_[index],
+        numReads_,
+        singleChild ? std::move(lazyLoadToken) : lazyLoadToken);
     if (childResult && childResult->isLazy() && childResult.use_count() == 1) {
       static_cast<LazyVector&>(*childResult)
           .reset(std::move(loader), rows.size());
