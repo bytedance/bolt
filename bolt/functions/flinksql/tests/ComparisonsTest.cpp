@@ -17,6 +17,8 @@
  */
 
 #include "bolt/functions/flinksql/Comparisons.h"
+#include <bit>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -24,6 +26,7 @@
 #include "bolt/expression/RegisterSpecialForm.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
+#include "bolt/functions/prestosql/Comparisons.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::functions::flinksql::test {
@@ -36,11 +39,17 @@ class ComplexEqualTest : public FlinkFunctionBaseTest {
   void assertComparisons(
       const VectorPtr& left,
       const VectorPtr& right,
-      std::vector<std::optional<bool>> expected) {
+      std::vector<std::optional<bool>> expected,
+      const std::string& suffix = "") {
     const auto input = makeRowVector({left, right});
     assertEqualVectors(
         makeNullableFlatVector<bool>(expected),
-        evaluate("flink_complex_equal(c0, c1)", input));
+        evaluate(fmt::format("flink_complex_equal{}(c0, c1)", suffix), input));
+    if (suffix.empty()) {
+      assertEqualVectors(
+          makeNullableFlatVector<bool>(expected),
+          evaluate("flink_complex_equal_generic(c0, c1)", input));
+    }
     for (auto& value : expected) {
       if (value.has_value()) {
         value = !value.value();
@@ -48,11 +57,17 @@ class ComplexEqualTest : public FlinkFunctionBaseTest {
     }
     assertEqualVectors(
         makeNullableFlatVector<bool>(expected),
-        evaluate("flink_complex_not_equal(c0, c1)", input));
+        evaluate(
+            fmt::format("flink_complex_not_equal{}(c0, c1)", suffix), input));
+    if (suffix.empty()) {
+      assertEqualVectors(
+          makeNullableFlatVector<bool>(expected),
+          evaluate("flink_complex_not_equal_generic(c0, c1)", input));
+    }
   }
 };
 
-TEST_F(ComplexEqualTest, NestedRowsAndLegacyNullPolicy) {
+TEST_F(ComplexEqualTest, NestedRowsAndSqlNullPolicy) {
   auto nested = makeRowVector(
       {makeNullableFlatVector<int64_t>({1, std::nullopt, 2}),
        makeFlatVector<std::string>({"a", "b", "c"})});
@@ -63,17 +78,10 @@ TEST_F(ComplexEqualTest, NestedRowsAndLegacyNullPolicy) {
   auto input = makeRowVector({left, right});
   assertComparisons(left, right, {true, true, false});
 
-  registerFunction<EqFunction, bool, Generic<T1>, Generic<T1>>({"legacy_eq"});
+  registerFunction<EqFunction, bool, Generic<T1>, Generic<T1>>({"sql_eq"});
   assertEqualVectors(
       makeNullableFlatVector<bool>({true, std::nullopt, false}),
-      evaluate("legacy_eq(c0, c1)", input));
-}
-
-TEST_F(ComplexEqualTest, RejectsUnsupportedRowFields) {
-  auto row = makeRowVector({makeFlatVector<double>({0.0})});
-  BOLT_ASSERT_THROW(
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({row, row})),
-      "Unsupported Flink ROW equality type");
+      evaluate("sql_eq(c0, c1)", input));
 }
 
 TEST_F(ComplexEqualTest, RowsCompareNestedNullsAsValues) {
@@ -903,7 +911,7 @@ TEST_P(MapEqualityModeTest, RejectsRepresentationDependentKeys) {
          {"flink_complex_equal(c0, c1)", "flink_complex_not_equal(c0, c1)"}) {
       BOLT_ASSERT_THROW(
           evaluate(expression, makeRowVector({map, map})),
-          "Unsupported Flink MAP equality type");
+          "Unsupported Flink complex equality type");
     }
   }
 }
@@ -925,6 +933,364 @@ TEST_P(MapEqualityModeTest, FloatingPointNestedValues) {
       makeMapVector(
           {0, 1, 2}, keys, makeArrayVector<double>({{-nan}, {-0.0}, {}})),
       {false, true, true});
+}
+
+TEST_P(MapEqualityModeTest, CanonicalArrayValues) {
+  // Flink BinaryArrayWriter canonicalizes NaNs but preserves signed zero.
+  // Generic ARRAY comparisons instead use numeric equality and reject NULLs.
+  const auto check = [&]<typename T>() {
+    const auto nan = std::numeric_limits<T>::quiet_NaN();
+    auto leftArrays = makeArrayVector(
+        {0, 2, 3, 4, 4, 5},
+        makeNullableFlatVector<T>({20, std::nullopt, nan, T(0), 1, 2}));
+    auto rightArrays = makeArrayVector(
+        {0, 2, 3, 4, 4, 5},
+        makeNullableFlatVector<T>({20, std::nullopt, -nan, -T(0), 1, 3}));
+    auto keys = makeFlatVector<int32_t>(6, [](auto) { return 1; });
+    auto left = makeMapVector({0, 1, 2, 3, 4, 5}, keys, leftArrays);
+    auto right = makeMapVector({0, 1, 2, 3, 4, 5}, keys, rightArrays);
+    const std::vector<std::optional<bool>> generic{
+        false, false, true, true, true, false};
+    const std::vector<std::optional<bool>> canonical{
+        true, true, false, true, true, false};
+    assertComparisons(left, right, generic);
+    assertComparisons(left, right, canonical, "_binary");
+    assertComparisons(leftArrays, rightArrays, canonical, "_binary");
+    assertComparisons(leftArrays, rightArrays, generic, "_generic");
+
+    leftArrays->setNull(4, true);
+    rightArrays->setNull(4, true);
+    right->setNull(5, true);
+    auto expected = canonical;
+    expected[4] = false; // NULL MAP values are outside the binary section.
+    expected[5] = std::nullopt;
+    auto input = makeRowVector({left, right});
+    for (const auto* function :
+         {"flink_complex_equal", "flink_complex_not_equal"}) {
+      testEncodings(
+          makeTypedExpr(
+              fmt::format("{}_binary(c0, c1)", function),
+              asRowType(input->type())),
+          {left, right},
+          makeNullableFlatVector<bool>(expected));
+      for (auto& value : expected) {
+        if (value) {
+          value = !*value;
+        }
+      }
+    }
+  };
+  check.operator()<float>();
+  check.operator()<double>();
+}
+
+TEST_P(MapEqualityModeTest, BinaryArrayContainsOrderedMaps) {
+  auto leftMaps = makeMapVector<int32_t, int32_t>(
+      {{{1, 2}, {3, 4}}, {{1, 0}, {1, 2}}, {{1, std::nullopt}}});
+  auto rightMaps = makeMapVector<int32_t, int32_t>(
+      {{{3, 4}, {1, 2}}, {{1, 1}, {1, 2}}, {{1, std::nullopt}}});
+  auto keys = makeFlatVector<int32_t>({1, 1, 1});
+  auto directLeft = makeMapVector({0, 1, 2}, keys, leftMaps);
+  auto directRight = makeMapVector({0, 1, 2}, keys, rightMaps);
+  assertComparisons(directLeft, directRight, {true, true, false});
+  assertComparisons(directLeft, directRight, {true, true, false}, "_binary");
+  auto left =
+      makeMapVector({0, 1, 2}, keys, makeArrayVector({0, 1, 2}, leftMaps));
+  auto right =
+      makeMapVector({0, 1, 2}, keys, makeArrayVector({0, 1, 2}, rightMaps));
+  assertComparisons(left, right, {true, true, false}, "_generic");
+  assertComparisons(left, right, {false, false, true}, "_binary");
+}
+
+TEST_P(MapEqualityModeTest, BinaryMapRowsCompareFields) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto arrays = makeArrayVector(
+      {0, 2, 4},
+      makeNullableFlatVector<int32_t>({20, std::nullopt, 20, std::nullopt}));
+  arrays->setNull(2, true);
+  auto leftRows = makeRowVector(
+      {makeNullableFlatVector<double>({std::nullopt, 0.0, nan}), arrays});
+  auto rightRows = makeRowVector(
+      {makeNullableFlatVector<double>({std::nullopt, -0.0, nan}), arrays});
+  auto keys = makeFlatVector<int32_t>({1, 1, 1});
+  auto left = makeMapVector({0, 1, 2}, keys, leftRows);
+  auto right = makeMapVector({0, 1, 2}, keys, rightRows);
+  assertComparisons(left, right, {false, false, false});
+  // A ROW read from BinaryMapData is NestedRowData: numeric fields retain
+  // numeric equality, and ARRAY fields take the BinaryArrayData path.
+  assertComparisons(left, right, {true, true, false}, "_binary");
+  // Comparing BinaryRowData itself compares its entire section instead.
+  assertComparisons(leftRows, rightRows, {true, false, true}, "_binary");
+}
+
+TEST_P(MapEqualityModeTest, LogicalKeyPolicyOutsideCanonicalSubtree) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto left = makeMapVector(
+      {0, 1, 2, 3},
+      makeNullableFlatVector<double>({nan, 0.0, std::nullopt, 1.0}),
+      makeArrayVector<double>({{nan}, {nan}, {nan}, {0.0}}));
+  auto right = makeMapVector(
+      {0, 1, 2, 3},
+      makeNullableFlatVector<double>({-nan, -0.0, std::nullopt, 1.0}),
+      makeArrayVector<double>({{-nan}, {-nan}, {-nan}, {-0.0}}));
+  assertComparisons(
+      left, right, {!sqlKeys(), sqlKeys(), true, false}, "_binary");
+  // Once inside a canonical ARRAY, MAP keys are bytes in physical order.
+  assertComparisons(
+      makeArrayVector({0, 1, 2, 3}, left),
+      makeArrayVector({0, 1, 2, 3}, right),
+      {true, false, true, false},
+      "_binary");
+}
+
+TEST_F(ComplexEqualTest, RowsUseJavaFloatingEquality) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto left = makeRowVector(
+      {makeNullableFlatVector<double>({std::nullopt, nan, 0.0, 1.0})});
+  auto right = makeRowVector(
+      {makeNullableFlatVector<double>({std::nullopt, nan, -0.0, 2.0})});
+  assertComparisons(left, right, {true, true, false, false}, "_binary");
+  assertComparisons(left, right, {true, false, true, false});
+}
+
+TEST_F(ComplexEqualTest, CanonicalScalarTypes) {
+  const std::vector<VectorPtr> scalars{
+      makeNullableFlatVector<bool>({std::nullopt, false, true}),
+      makeNullableFlatVector<int8_t>({std::nullopt, -1, 2}),
+      makeNullableFlatVector<int16_t>({std::nullopt, -300, 200}),
+      makeNullableFlatVector<int32_t>({std::nullopt, -1, 2}),
+      makeNullableFlatVector<int64_t>({std::nullopt, -1, 2}),
+      makeNullableFlatVector<int64_t>(
+          {std::nullopt, -100, 200}, DECIMAL(12, 2)),
+      makeNullableFlatVector<int128_t>(
+          {std::nullopt, -100, 200}, DECIMAL(30, 4)),
+      makeNullableFlatVector<int32_t>({std::nullopt, -1, 2}, DATE()),
+      makeNullableFlatVector<int64_t>(
+          {std::nullopt, -1, 2}, INTERVAL_DAY_TIME()),
+      makeNullableFlatVector<int32_t>(
+          {std::nullopt, -1, 2}, INTERVAL_YEAR_MONTH()),
+      makeNullableFlatVector<Timestamp>(
+          {std::nullopt, Timestamp(-1, 1), Timestamp(2, 2)}),
+      makeNullableFlatVector<std::string>(
+          {std::nullopt, "short", "a string longer than seven bytes"}),
+      makeNullableFlatVector<std::string>(
+          {std::nullopt, std::string("a\0b", 3), std::string("a\0c", 3)},
+          VARBINARY())};
+  for (const auto& scalar : scalars) {
+    SCOPED_TRACE(scalar->type()->toString());
+    auto left = makeArrayVector({0, 1, 2}, scalar);
+    auto right = makeArrayVector(
+        {0, 1, 2}, wrapInDictionary(makeIndices({0, 2, 1}), 3, scalar));
+    assertComparisons(left, left, {true, true, true}, "_binary");
+    assertComparisons(left, right, {true, false, false}, "_binary");
+  }
+}
+
+TEST_P(MapEqualityModeTest, RawBinarySections) {
+  // Existing BinaryArrayData copies preserve NaN payloads. BinarySection also
+  // compares hidden bytes in NULL slots and the RowKind byte in BinaryRowData.
+  const auto section = [](uint64_t header, uint64_t payload) {
+    std::string bytes(16, '\0');
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    std::memcpy(bytes.data() + 8, &payload, sizeof(payload));
+    return bytes;
+  };
+  auto leftBytes = makeNullableFlatVector<std::string>(
+      {section(1, 0x7ff8000000000001),
+       section(0x100000001, 1),
+       section(0, 1),
+       section(1, 0),
+       section(1, 0),
+       std::nullopt},
+      VARBINARY());
+  auto rightBytes = makeNullableFlatVector<std::string>(
+      {section(1, 0x7ff8000000000002),
+       section(0x100000001, 2),
+       section(3, 1),
+       section(1, 0),
+       section(1, 0) + '\0',
+       std::nullopt},
+      VARBINARY());
+  assertComparisons(
+      leftBytes,
+      rightBytes,
+      {false, false, false, true, false, std::nullopt},
+      "_binary");
+  auto keys = makeFlatVector<int32_t>({1, 1, 1, 1, 1, 1});
+  assertComparisons(
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, leftBytes),
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, rightBytes),
+      {false, false, false, true, false, false},
+      "_generic");
+  assertComparisons(
+      makeRowVector({leftBytes}),
+      makeRowVector({rightBytes}),
+      {false, false, false, true, false, true},
+      "_generic");
+
+  auto leftArrays = makeArrayVector<double>(
+      {{std::bit_cast<double>(uint64_t{0x7ff8000000000001})}});
+  auto rightArrays = makeArrayVector<double>(
+      {{std::bit_cast<double>(uint64_t{0x7ff8000000000002})}});
+  assertComparisons(leftArrays, rightArrays, {true}, "_binary");
+}
+
+TEST_F(ComplexEqualTest, RejectsUnsupportedTypes) {
+  auto scalar = makeFlatVector<int32_t>({1});
+  auto row = makeRowVector({scalar});
+  auto badKeys = makeMapVector({0}, row, scalar);
+  for (const auto* suffix : {"", "_generic", "_binary"}) {
+    for (const auto& value : {VectorPtr(scalar), VectorPtr(badKeys)}) {
+      BOLT_ASSERT_THROW(
+          evaluate(
+              fmt::format("flink_complex_equal{}(c0, c1)", suffix),
+              makeRowVector({value, value})),
+          "Unsupported Flink complex equality type");
+    }
+  }
+}
+
+TEST_P(MapEqualityModeTest, ComparisonModesWithLazyAliases) {
+  for (const auto* suffix : {"_binary", "_generic"}) {
+    SCOPED_TRACE(suffix);
+    std::vector<vector_size_t> loaded;
+    auto child = makeSelectedLazyValues(loaded);
+    auto left = makeMapVector(
+        {0, 1, 2},
+        makeFlatVector<int32_t>({1, 1, 1}),
+        makeArrayVector({0, 1, 2}, child));
+    auto right = makeMapVector(
+        {0, 1, 2},
+        makeFlatVector<int32_t>({1, 1, 1}),
+        makeArrayVector(
+            {0, 1, 2}, wrapInDictionary(makeIndices({2, 1, 0}), 3, child)));
+    auto indices = makeIndices({0, 2});
+    assertComparisons(
+        wrapInDictionary(indices, 2, left),
+        wrapInDictionary(indices, 2, right),
+        {true, true},
+        suffix);
+    EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 2}));
+  }
+}
+
+TEST_P(MapEqualityModeTest, MapSizesAvoidLoadingValues) {
+  for (const auto* suffix : {"", "_generic", "_binary"}) {
+    SCOPED_TRACE(suffix);
+    auto leftValues =
+        makeLazyFlatVector<int32_t>(2, [](auto row) { return row; });
+    auto rightValues =
+        makeLazyFlatVector<int32_t>(1, [](auto row) { return row; });
+    auto left = makeMapVector(
+        {0},
+        makeFlatVector<int32_t>({1, 2}),
+        makeArrayVector({0, 1}, leftValues));
+    auto right = makeMapVector(
+        {0}, makeFlatVector<int32_t>({1}), makeArrayVector({0}, rightValues));
+    assertComparisons(left, right, {false}, suffix);
+    assertComparisons(
+        BaseVector::wrapInConstant(3, 0, left),
+        BaseVector::wrapInConstant(3, 0, right),
+        {false, false, false},
+        suffix);
+    EXPECT_FALSE(leftValues->isLoaded());
+    EXPECT_FALSE(rightValues->isLoaded());
+
+    auto empty = makeMapVector(
+        {0},
+        makeFlatVector<int32_t>({}),
+        makeArrayVector({0}, leftValues)->slice(0, 0));
+    assertComparisons(empty, empty, {true}, suffix);
+    EXPECT_FALSE(leftValues->isLoaded());
+  }
+}
+
+TEST_F(ComplexEqualTest, ArraySizesAvoidLoadingElements) {
+  for (const auto* suffix : {"", "_generic", "_binary"}) {
+    SCOPED_TRACE(suffix);
+    auto leftValues =
+        makeLazyFlatVector<int32_t>(3, [](auto row) { return row; });
+    auto rightValues =
+        makeLazyFlatVector<int32_t>(2, [](auto row) { return row; });
+    auto left = makeArrayVector({0, 0, 2}, leftValues);
+    auto right = makeArrayVector({0, 0, 1}, rightValues);
+    // The matching empty row and mismatched row need no element decoding.
+    auto indices = makeIndices({0, 1});
+    assertComparisons(
+        wrapInDictionary(indices, 2, left),
+        wrapInDictionary(indices, 2, right),
+        {true, false},
+        suffix);
+    EXPECT_FALSE(leftValues->isLoaded());
+    EXPECT_FALSE(rightValues->isLoaded());
+    assertComparisons(left, right, {true, false, false}, suffix);
+  }
+}
+
+TEST_P(MapEqualityModeTest, ComparisonModesAcrossConditionalBranches) {
+  exec::registerFunctionCallToSpecialForms();
+  std::vector<vector_size_t> loaded;
+  auto left = makeMapVector(
+      {0, 1, 2},
+      makeFlatVector<int32_t>({1, 1, 1}),
+      makeArrayVector({0, 1, 2}, makeSelectedLazyValues(loaded)));
+  auto right = makeMapVector(
+      {0, 1, 2},
+      makeFlatVector<int32_t>({1, 1, 1}),
+      makeArrayVector<int32_t>({{7}, {7}, {7}}));
+  auto input = makeRowVector(
+      {left, makeFlatVector<bool>({true, false, false}), right, right});
+  assertEqualVectors(
+      makeFlatVector<bool>({true, true, true}),
+      evaluate(
+          "if(c1, flink_complex_equal_binary(c0, c2), "
+          "flink_complex_equal_generic(c0, c3))",
+          input));
+  EXPECT_EQ(loaded, (std::vector<vector_size_t>{0, 1, 2}));
+}
+
+TEST_F(ComplexEqualTest, BinarySelectionAndResultReuse) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto left = makeArrayVector<double>({{nan}, {0.0}, {1}, {2}, {3}, {}});
+  auto right = makeArrayVector<double>({{-nan}, {-0.0}, {1}, {2}, {4}, {}});
+  right->setNull(3, true);
+  auto indices = makeIndices({5, 0, 4, 3, 1, 2});
+  auto input = makeRowVector(
+      {wrapInDictionary(indices, 6, left),
+       wrapInDictionary(indices, 6, right)});
+  for (const bool negate : {false, true}) {
+    auto expression = compileExpression(
+        fmt::format(
+            "{}_binary(c0, c1)",
+            negate ? "flink_complex_not_equal" : "flink_complex_equal"),
+        asRowType(input->type()));
+    std::vector<VectorPtr> results{
+        makeFlatVector<bool>(6, [](auto) { return true; })};
+    results[0]->setNull(1, true);
+    auto expected = makeNullableFlatVector<bool>(
+        {!negate, !negate, negate, std::nullopt, negate, !negate});
+    SelectivityVector selected(6, false);
+    for (const auto row : {1, 3, 4}) {
+      selected.setValid(row, true);
+    }
+    selected.updateBounds();
+    exec::EvalCtx context(&execCtx_, expression.get(), input.get());
+    expression->eval(selected, context, results);
+    assertEqualVectors(expected, results[0], selected);
+    expression->eval(SelectivityVector(6), context, results);
+    assertEqualVectors(expected, results[0]);
+
+    auto equalInput = makeRowVector({left, left});
+    exec::EvalCtx nextContext(&execCtx_, expression.get(), equalInput.get());
+    expression->eval(SelectivityVector(6), nextContext, results);
+    assertEqualVectors(
+        makeFlatVector<bool>(6, [&](auto) { return !negate; }), results[0]);
+    assertComparisons(
+        left->slice(1, 3),
+        right->slice(1, 3),
+        {false, true, std::nullopt},
+        "_binary");
+  }
 }
 
 } // namespace

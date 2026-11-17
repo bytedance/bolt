@@ -13,16 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Flink MAP equality and inequality functions.
+ * Flink complex equality and inequality functions.
  */
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <numeric>
 #include <unordered_map>
 
+#include "bolt/core/QueryConfig.h"
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/InlineFlatten.h"
@@ -34,6 +36,16 @@
 
 namespace bytedance::bolt::functions::flinksql {
 namespace {
+
+// Generic comparisons use Java's elementwise ARRAY and fieldwise ROW rules.
+// Binary comparisons consume canonical BinaryArrayData/BinaryRowData values.
+// MAP still matches keys; ROWs read from a BinaryMapData are NestedRowData and
+// compare fieldwise, while their ARRAY fields compare as binary sections.
+// Callers must establish the Java representation before logical transport.
+// For mixed subtrees, preserve original bytes as VARBINARY at each proven
+// binary comparison boundary, or evaluate in Java. Original noncanonical
+// sections also require their bytes; logical vectors cannot reconstruct them.
+enum class ComparisonMode { kGeneric, kBinary };
 
 template <bool sqlKeys, typename T>
 int32_t compareFloatingKeys(T left, T right) {
@@ -469,7 +481,77 @@ FLATTEN inline bool mapEqual(
   return !sqlKeys || rightPos == rightIndices.size();
 }
 
-template <bool sqlKeys>
+template <typename T>
+bool equalCanonicalFloating(T left, T right) {
+  using Bits = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
+  // Canonical encodings use one NaN representation and retain signed zero.
+  return (std::isnan(left) && std::isnan(right)) ||
+      std::bit_cast<Bits>(left) == std::bit_cast<Bits>(right);
+}
+
+// Equality of a deterministic Flink binary encoding can be evaluated without
+// allocating that encoding. This requires canonical NaNs, zeroed null slots
+// and padding, and INSERT RowKind throughout the subtree.
+FOLLY_NOINLINE bool equalCanonicalValues(
+    const DecodedValue& left,
+    vector_size_t leftIndex,
+    const DecodedValue& right,
+    vector_size_t rightIndex) {
+  const bool leftNull = left.decoded->isNullAt(leftIndex);
+  const bool rightNull = right.decoded->isNullAt(rightIndex);
+  if (leftNull || rightNull) {
+    return leftNull == rightNull;
+  }
+  const auto kind = left.decoded->base()->typeKind();
+  if (kind == TypeKind::REAL) {
+    return equalCanonicalFloating(
+        left.decoded->valueAt<float>(leftIndex),
+        right.decoded->valueAt<float>(rightIndex));
+  }
+  if (kind == TypeKind::DOUBLE) {
+    return equalCanonicalFloating(
+        left.decoded->valueAt<double>(leftIndex),
+        right.decoded->valueAt<double>(rightIndex));
+  }
+  if (left.scalar.value) {
+    return left.scalar.value(
+        *left.decoded, leftIndex, *right.decoded, rightIndex);
+  }
+  const auto leftRow = left.decoded->index(leftIndex);
+  const auto rightRow = right.decoded->index(rightIndex);
+  if (kind == TypeKind::ROW) {
+    for (size_t i = 0; i < left.children.size(); ++i) {
+      if (!equalCanonicalValues(
+              *left.children[i], leftRow, *right.children[i], rightRow)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  const auto* leftArray = left.decoded->base()->asUnchecked<ArrayVectorBase>();
+  const auto* rightArray =
+      right.decoded->base()->asUnchecked<ArrayVectorBase>();
+  const auto size = leftArray->sizeAt(leftRow);
+  if (size != rightArray->sizeAt(rightRow)) {
+    return false;
+  }
+  // MAP entries inside a binary section retain physical order and duplicates.
+  // Both the key and value arrays participate in the byte comparison.
+  for (size_t child = 0; child < left.children.size(); ++child) {
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (!equalCanonicalValues(
+              *left.children[child],
+              leftArray->offsetAt(leftRow) + i,
+              *right.children[child],
+              rightArray->offsetAt(rightRow) + i)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+template <bool sqlKeys, ComparisonMode mode>
 FLATTEN FOLLY_NOINLINE bool equalValues(
     const DecodedValue& left,
     vector_size_t leftIndex,
@@ -485,6 +567,8 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
   }
   switch (left.decoded->base()->typeKind()) {
     case TypeKind::ROW: {
+      // Logical vectors omit RowKind. Callers establish matching kinds at
+      // every fieldwise ROW boundary before logical vector transport.
       const auto leftRow = left.decoded->index(leftIndex);
       const auto rightRow = right.decoded->index(rightIndex);
       for (size_t i = 0; i < left.children.size(); ++i) {
@@ -496,7 +580,7 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
           if (leftNull != rightNull) {
             return false;
           }
-        } else if (!equalValues<sqlKeys>(
+        } else if (!equalValues<sqlKeys, mode>(
                        leftChild, leftRow, rightChild, rightRow)) {
           return false;
         }
@@ -504,6 +588,9 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
       return true;
     }
     case TypeKind::ARRAY: {
+      if constexpr (mode == ComparisonMode::kBinary) {
+        return equalCanonicalValues(left, leftIndex, right, rightIndex);
+      }
       const auto* leftArray = left.decoded->base()->asUnchecked<ArrayVector>();
       const auto* rightArray =
           right.decoded->base()->asUnchecked<ArrayVector>();
@@ -513,7 +600,7 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
         return false;
       }
       for (vector_size_t i = 0; i < leftArray->sizeAt(leftRow); ++i) {
-        if (!equalValues<sqlKeys>(
+        if (!equalValues<sqlKeys, mode>(
                 *left.children[0],
                 leftArray->offsetAt(leftRow) + i,
                 *right.children[0],
@@ -537,7 +624,7 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
           *right.children[0],
           GenericKeyCompare{left.children[0]->scalar.key},
           [&](auto leftEntry, auto rightEntry) {
-            return equalValues<sqlKeys>(
+            return equalValues<sqlKeys, mode>(
                 *left.children[1], leftEntry, *right.children[1], rightEntry);
           });
     }
@@ -549,7 +636,11 @@ FLATTEN FOLLY_NOINLINE bool equalValues(
   }
 }
 
-template <bool sqlKeys, typename K, typename V>
+template <
+    bool sqlKeys,
+    typename K,
+    typename V,
+    ComparisonMode mode = ComparisonMode::kGeneric>
 void compareRows(
     const SelectivityVector& rows,
     const MapVector* leftMap,
@@ -566,35 +657,60 @@ void compareRows(
     output->set(
         row,
         negate !=
-            (leftMap->sizeAt(left.index(row)) == 0 ||
-             mapEqual<sqlKeys, false>(
-                 leftMap,
-                 left.index(row),
-                 rightMap,
-                 right.index(row),
-                 leftKeys,
-                 rightKeys,
-                 ScalarKeyCompare<
-                     (sqlKeys && std::is_floating_point_v<K>),
-                     K>{},
-                 [&](auto li, auto ri) {
-                   if constexpr (std::is_void_v<V>) {
-                     return equalValues<sqlKeys>(
-                         leftValues, li, rightValues, ri);
-                   } else {
-                     return equalScalarValues<V>(
-                         *leftValues.decoded, li, *rightValues.decoded, ri);
-                   }
-                 })));
+            mapEqual<sqlKeys, false>(
+                leftMap,
+                left.index(row),
+                rightMap,
+                right.index(row),
+                leftKeys,
+                rightKeys,
+                ScalarKeyCompare<(sqlKeys && std::is_floating_point_v<K>), K>{},
+                [&](auto li, auto ri) {
+                  if constexpr (std::is_void_v<V>) {
+                    return equalValues<sqlKeys, mode>(
+                        leftValues, li, rightValues, ri);
+                  } else {
+                    return equalScalarValues<V>(
+                        *leftValues.decoded, li, *rightValues.decoded, ri);
+                  }
+                }));
   });
 }
 
 using CompareRows = decltype(&compareRows<false, int32_t, int32_t>);
 
+// Resolve unequal sizes and empty containers before decoding their children.
+const SelectivityVector& filterContainerRows(
+    const SelectivityVector& rows,
+    const DecodedVector& left,
+    const DecodedVector& right,
+    bool negate,
+    FlatVector<bool>* output,
+    exec::LocalSelectivityVector& remainingRows) {
+  const auto* leftContainer = left.base()->asUnchecked<ArrayVectorBase>();
+  const auto* rightContainer = right.base()->asUnchecked<ArrayVectorBase>();
+  SelectivityVector* selected = nullptr;
+  rows.applyToSelected([&](vector_size_t row) {
+    const auto leftSize = leftContainer->sizeAt(left.index(row));
+    const auto rightSize = rightContainer->sizeAt(right.index(row));
+    if (leftSize != rightSize || leftSize == 0) {
+      output->set(row, negate != (leftSize == rightSize));
+      if (!selected) {
+        selected = remainingRows.get(rows);
+      }
+      selected->setValid(row, false);
+    }
+  });
+  if (selected) {
+    selected->updateBounds();
+  }
+  return selected ? *selected : rows;
+}
+
 template <bool sqlKeys>
 class FlinkMapEqual final : public exec::VectorFunction {
  public:
-  explicit FlinkMapEqual(CompareRows compare, bool negate)
+  FlinkMapEqual(CompareRows compare, bool negate)
       : compare_(compare), negate_(negate) {}
   void apply(
       const SelectivityVector& rows,
@@ -611,24 +727,11 @@ class FlinkMapEqual final : public exec::VectorFunction {
     context.ensureWritable(rows, outputType, result);
     auto* output = result->asFlatVector<bool>();
     exec::LocalSelectivityVector equalSizeRows(context);
-    SelectivityVector* matchingRows = nullptr;
-    rows.applyToSelected([&](vector_size_t row) {
-      if (leftMap->sizeAt(left->index(row)) !=
-          rightMap->sizeAt(right->index(row))) {
-        output->set(row, negate);
-        if (!matchingRows) {
-          matchingRows = equalSizeRows.get(rows);
-        }
-        matchingRows->setValid(row, false);
-      }
-    });
-    if (matchingRows) {
-      matchingRows->updateBounds();
-      if (!matchingRows->hasSelections()) {
-        return;
-      }
+    const auto& compareRows =
+        filterContainerRows(rows, *left, *right, negate, output, equalSizeRows);
+    if (!compareRows.hasSelections()) {
+      return;
     }
-    const auto& compareRows = matchingRows ? *matchingRows : rows;
     const auto elementRows = [&](const MapVector* map, DecodedVector& parent) {
       if (canDecodeWithoutRows(map->mapKeys()) &&
           canDecodeWithoutRows(map->mapValues())) {
@@ -674,17 +777,50 @@ class FlinkMapEqual final : public exec::VectorFunction {
   const bool negate_;
 };
 
-std::vector<std::shared_ptr<exec::FunctionSignature>> mapEqualSignatures() {
-  return {exec::FunctionSignatureBuilder()
-              .typeVariable("K")
-              .typeVariable("V")
-              .returnType("boolean")
-              .argumentType("map(K,V)")
-              .argumentType("map(K,V)")
-              .build()};
-}
+template <bool sqlKeys, ComparisonMode mode>
+class FlinkComplexEqual final : public exec::VectorFunction {
+ public:
+  explicit FlinkComplexEqual(bool negate) : negate_(negate) {}
 
-template <bool sqlKeys>
+  void apply(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      const TypePtr& outputType,
+      exec::EvalCtx& context,
+      VectorPtr& result) const override {
+    context.ensureWritable(rows, outputType, result);
+    auto* output = result->asFlatVector<bool>();
+    exec::LocalSelectivityVector equalSizeRows(context);
+    const SelectivityVector* compareRows = &rows;
+    if (args[0]->typeKind() == TypeKind::ARRAY) {
+      exec::DecodedArgs decoded(rows, args, context);
+      compareRows = &filterContainerRows(
+          rows, *decoded.at(0), *decoded.at(1), negate_, output, equalSizeRows);
+      if (!compareRows->hasSelections()) {
+        return;
+      }
+    }
+    constexpr std::bool_constant<sqlKeys> policy;
+    std::unique_ptr<LazyLoads> lazyLoads;
+    DecodedValue left(args[0], *compareRows, context, lazyLoads, policy);
+    DecodedValue right(args[1], *compareRows, context, lazyLoads, policy);
+    if (lazyLoads) {
+      loadLazyValues(std::move(lazyLoads), context, policy);
+    }
+    compareRows->applyToSelected([&](vector_size_t row) {
+      const bool equal = mode == ComparisonMode::kBinary &&
+              args[0]->typeKind() == TypeKind::ROW
+          ? equalCanonicalValues(left, row, right, row)
+          : equalValues<sqlKeys, mode>(left, row, right, row);
+      output->set(row, negate_ != equal);
+    });
+  }
+
+ private:
+  const bool negate_;
+};
+
+template <bool sqlKeys, ComparisonMode mode>
 std::shared_ptr<exec::VectorFunction> makeTypedMapEqual(
     const TypePtr& type,
     bool negate) {
@@ -695,40 +831,69 @@ std::shared_ptr<exec::VectorFunction> makeTypedMapEqual(
         } else {
           return dispatchScalar(
               type->childAt(1)->kind(), []<typename V>() -> CompareRows {
-                return compareRows<sqlKeys, K, V>;
+                if constexpr (std::is_void_v<V>) {
+                  return compareRows<sqlKeys, K, V, mode>;
+                } else {
+                  return compareRows<sqlKeys, K, V>;
+                }
               });
         }
       });
   return std::make_shared<FlinkMapEqual<sqlKeys>>(compare, negate);
 }
 
-template <bool negate>
-std::shared_ptr<exec::VectorFunction> makeMapEqual(
+template <bool negate, ComparisonMode mode>
+std::shared_ptr<exec::VectorFunction> makeComplexEqual(
     const std::string&,
     const std::vector<exec::VectorFunctionArg>& inputs,
     const core::QueryConfig& config) {
+  const auto& type = *inputs[0].type;
   BOLT_USER_CHECK(
-      detail::supportsMapEquality(*inputs[0].type),
-      "Unsupported Flink MAP equality type: {}",
-      inputs[0].type->toString());
-  const auto mode = config.flinkMapEqualityMode();
-  if (mode == "sql_keys") {
-    return makeTypedMapEqual<true>(inputs[0].type, negate);
+      (type.isMap() || type.isArray() || type.isRow() || type.isVarbinary()) &&
+          detail::supportsMapValueEquality(type),
+      "Unsupported Flink complex equality type: {}",
+      type.toString());
+  const auto make =
+      [&]<bool sqlKeys>() -> std::shared_ptr<exec::VectorFunction> {
+    if (inputs[0].type->isMap()) {
+      return makeTypedMapEqual<sqlKeys, mode>(inputs[0].type, negate);
+    }
+    return std::make_shared<FlinkComplexEqual<sqlKeys, mode>>(negate);
+  };
+  const auto keyMode = config.flinkMapEqualityMode();
+  if (keyMode == "sql_keys") {
+    return make.template operator()<true>();
   }
   BOLT_USER_CHECK_EQ(
-      mode, "java_map", "Unsupported Flink MAP equality mode: {}", mode);
-  return makeTypedMapEqual<false>(inputs[0].type, negate);
+      keyMode, "java_map", "Unsupported Flink MAP equality mode: {}", keyMode);
+  return make.template operator()<false>();
 }
 
 } // namespace
 
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_map_equal,
-    mapEqualSignatures(),
-    makeMapEqual<false>);
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
-    flink_map_not_equal,
-    mapEqualSignatures(),
-    makeMapEqual<true>);
+void registerComparisonFunctions(const std::string& prefix) {
+  const std::vector<exec::FunctionSignaturePtr> signatures{
+      exec::FunctionSignatureBuilder()
+          .typeVariable("T")
+          .returnType("boolean")
+          .argumentType("T")
+          .argumentType("T")
+          .build()};
+  for (const bool negate : {false, true}) {
+    const auto name =
+        prefix + (negate ? "flink_complex_not_equal" : "flink_complex_equal");
+    const auto generic = negate
+        ? makeComplexEqual<true, ComparisonMode::kGeneric>
+        : makeComplexEqual<false, ComparisonMode::kGeneric>;
+    exec::registerStatefulVectorFunction(name, signatures, generic);
+    exec::registerStatefulVectorFunction(
+        name + "_generic", signatures, generic);
+    exec::registerStatefulVectorFunction(
+        name + "_binary",
+        signatures,
+        negate ? makeComplexEqual<true, ComparisonMode::kBinary>
+               : makeComplexEqual<false, ComparisonMode::kBinary>);
+  }
+}
 
 } // namespace bytedance::bolt::functions::flinksql
