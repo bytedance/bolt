@@ -35,7 +35,6 @@
 #include "bolt/functions/lib/string/StringImpl.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/FloatingDecimal.h"
-#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 using namespace bytedance::bolt;
@@ -316,14 +315,15 @@ class Converter {
     if constexpr (
         kIsInSpark && std::is_same_v<FromKind, DateKind> &&
         std::is_same_v<ToKind, StringKind>) {
-      const bool legacyDateFormat =
-          functions::parseTimePolicy(queryConfig.timeParserPolicy()) ==
-          functions::TimePolicy::LEGACY;
-      dateToStringOptions_ = {
-          .leadingPositiveSign = !legacyDateFormat,
-          .zeroPaddingYear = true,
-          .yearOfEra = legacyDateFormat,
-      };
+      dateTimePolicy_ =
+          functions::parseTimePolicy(queryConfig.timeParserPolicy());
+      // Reuse year formatting only. The SimpleDateFormat profile also rebases
+      // the calendar, which is outside the scope of this DATE cast path.
+      dateFormatter_ = dateTimePolicy_ == functions::TimePolicy::LEGACY
+          ? functions::buildJavaDateTimeFormatter("yyyy-MM-dd")
+          : functions::buildSparkDateTimeFormatter(
+                "yyyy-MM-dd", /*isParsing=*/false);
+      cached_.resize(dateFormatter_->maxResultSize(nullptr));
     }
     auto sessionTzName = queryConfig.sessionTimezone();
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
@@ -637,7 +637,23 @@ class Converter {
       }
     } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
-        to.set(util::dateToString(from, dateToStringOptions_));
+        if constexpr (kIsInSpark) {
+          // DATE days are calendar values: do not apply the session time zone
+          // or convert through Spark's int64 microsecond timestamp range.
+          const Timestamp date(
+              static_cast<int64_t>(from) * Timestamp::kSecondsInDay, 0);
+          const auto size = dateFormatter_->format(
+              date,
+              /*timezone=*/nullptr,
+              cached_.size(),
+              cached_.data(),
+              /*allowOverflow=*/false,
+              dateTimePolicy_,
+              /*isPrecision=*/true);
+          to.set(std::string_view(cached_.data(), size));
+        } else {
+          to.set(DATE()->toString(from));
+        }
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
       }
@@ -852,7 +868,8 @@ class Converter {
   const tz::TimeZone* timeZone_ = nullptr;
   bool isFlinkCompatible_ = false;
   bool trimStringToFloatingPointControlChars_ = false;
-  util::DateToStringOptions dateToStringOptions_;
+  std::shared_ptr<const functions::DateTimeFormatter> dateFormatter_;
+  functions::TimePolicy dateTimePolicy_{functions::TimePolicy::CORRECTED};
 
   bool canAsInlinedStr_ = false;
 };

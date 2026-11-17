@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <limits>
 #include "bolt/functions/prestosql/tests/CastBaseTest.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/parse/TypeResolver.h"
@@ -236,6 +237,37 @@ TEST_F(SparkCastExprTest, dateToStringYearFormatJavaOracle) {
     testCast(
         makeNullableFlatVector<int32_t>(days, DATE()),
         makeNullableFlatVector<std::string>(expected));
+  }
+}
+
+TEST_F(SparkCastExprTest, dateToStringYearFormatBoundaries) {
+  for (const auto* policy : {"LEGACY", "CORRECTED", "EXCEPTION"}) {
+    SCOPED_TRACE(policy);
+    const bool legacy = std::string_view(policy) == "LEGACY";
+    for (const auto* zone : {"UTC", "Asia/Shanghai", "America/Los_Angeles"}) {
+      SCOPED_TRACE(zone);
+      queryCtx_->testingOverrideConfigUnsafe({
+          {core::QueryConfig::kTimeParserPolicy, policy},
+          {core::QueryConfig::kSessionTimezone, zone},
+          {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+      });
+      // Preserve the year-formatting-only contract even at the DATE bounds.
+      // LEGACY calendar rebasing and its overflow errors remain separate work.
+      testCast<int32_t, std::string>(
+          "varchar",
+          {std::numeric_limits<int32_t>::min(),
+           std::numeric_limits<int32_t>::max(),
+           -141428,
+           0,
+           std::nullopt},
+          {legacy ? "5877642-06-23" : "-5877641-06-23",
+           legacy ? "5881580-07-11" : "+5881580-07-11",
+           "1582-10-14",
+           "1970-01-01",
+           std::nullopt},
+          DATE(),
+          VARCHAR());
+    }
   }
 }
 
