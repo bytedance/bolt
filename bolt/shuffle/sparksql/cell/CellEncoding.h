@@ -125,16 +125,42 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       kWidth == 8 ? kBigintPlainMinBits : kMaxPackBits + 1;
   const uint32_t sourceBytes = count * kWidth;
 
-  // Two independent reductions vectorize; the equality test folds into
-  // them (all values equal iff min == max).
   T minValue = values[0];
   T maxValue = values[0];
-  for (uint32_t i = 1; i < count; ++i) {
-    const T value = values[i];
-    minValue = value < minValue ? value : minValue;
-    maxValue = value > maxValue ? value : maxValue;
+  if constexpr (
+      std::is_same_v<T, int64_t> &&
+      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
+    // Pairwise reductions shorten the full-block dependency chains.
+    const T min01 = std::min(values[0], values[1]);
+    const T min23 = std::min(values[2], values[3]);
+    const T min45 = std::min(values[4], values[5]);
+    const T min67 = std::min(values[6], values[7]);
+    const T max01 = std::max(values[0], values[1]);
+    const T max23 = std::max(values[2], values[3]);
+    const T max45 = std::max(values[4], values[5]);
+    const T max67 = std::max(values[6], values[7]);
+    minValue = std::min(std::min(min01, min23), std::min(min45, min67));
+    maxValue = std::max(std::max(max01, max23), std::max(max45, max67));
+  } else {
+    for (uint32_t i = 1; i < count; ++i) {
+      const T value = values[i];
+      minValue = value < minValue ? value : minValue;
+      maxValue = value > maxValue ? value : maxValue;
+    }
   }
   const bool allEqual = minValue == maxValue;
+  if constexpr (
+      std::is_same_v<T, int64_t> &&
+      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
+    // A constant full BIGINT block always beats its 64-byte plain body.
+    if (allEqual) {
+      const uint32_t bytes = narrowBytesFor(values[0], kWidth);
+      out[0] = makeEncodingByte(EncodingKind::kConstNarrow, bytes);
+      folly::storeUnaligned<uint64_t>(
+          out + 1, static_cast<uint64_t>(values[0]));
+      return 1 + bytes;
+    }
+  }
 
   // The kinds' parameters and body sizes, from the minimum and maximum
   // alone. Widths past kExactPackMaxBits are whole bytes (packWidth), and
@@ -142,9 +168,23 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   // above kPlain's.
   const uint32_t constBytes =
       allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
-  const uint32_t exactWidth = std::max(
-      signedBitWidth(static_cast<int64_t>(minValue)),
-      signedBitWidth(static_cast<int64_t>(maxValue)));
+  uint32_t exactWidth;
+  if constexpr (
+      std::is_same_v<T, int64_t> &&
+      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
+    // OR the sign-normalized extrema to compute their maximum signed width.
+    const uint64_t minSign = uint64_t{0} - static_cast<uint64_t>(minValue < 0);
+    const uint64_t maxSign = uint64_t{0} - static_cast<uint64_t>(maxValue < 0);
+    const uint64_t normalized = (static_cast<uint64_t>(minValue) ^ minSign) |
+        (static_cast<uint64_t>(maxValue) ^ maxSign);
+    // Normalization clears bit 63. Shifting accounts for the sign bit; OR
+    // with 1 keeps the input nonzero, including for zero and -1.
+    exactWidth = unsignedBitWidth((normalized << 1) | uint64_t{1});
+  } else {
+    exactWidth = std::max(
+        signedBitWidth(static_cast<int64_t>(minValue)),
+        signedBitWidth(static_cast<int64_t>(maxValue)));
+  }
   const bool wide = exactWidth > kExactPackMaxBits;
   const uint32_t bitWidth = packWidth(exactWidth);
   const uint32_t deltaBits = packWidth(unsignedBitWidth(
