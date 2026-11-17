@@ -34,6 +34,7 @@ struct BmAggregateWindowTestStats {
   uint64_t inputAggregationRows{0};
   uint64_t inputAggregationPartitions{0};
   uint64_t inputAggregationFunctions{0};
+  uint64_t aggregateResets{0};
 };
 
 void resetBmAggregateWindowTestStats();

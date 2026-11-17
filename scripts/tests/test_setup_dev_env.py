@@ -63,6 +63,7 @@ class SetupReviewTest(unittest.TestCase):
             result = self.run_shell(f'''
 export PATH="{cc}:{ld}:$PATH"
 OS_TYPE=Linux
+check_libcxx() {{ :; }}
 find_installed_clang
 find_clang_linker
 [[ "$CLANG_COMPILER" == "{cc}/clang-22" ]]
@@ -85,6 +86,56 @@ configure_conan_profile
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("libc++ and libc++abi", result.stdout)
+
+    def test_find_installed_clang_skips_incomplete_candidate(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            incomplete = root / "incomplete"
+            complete = root / "complete"
+            incomplete.mkdir()
+            complete.mkdir()
+            for directory in [incomplete, complete]:
+                compiler = directory / "clang"
+                compiler.write_text(
+                    f'#!/bin/bash\ncase "$1" in\n-dumpversion) echo 22;;\n--version) echo "InstalledDir: {directory}";;\nesac\n'
+                )
+                compiler.chmod(0o755)
+            linker = complete / "ld.lld"
+            linker.write_text("#!/bin/bash\nexit 0\n")
+            linker.chmod(0o755)
+
+            result = self.run_shell(f'''
+export PATH="{incomplete}:{complete}:/usr/bin:/bin"
+OS_TYPE=Linux
+check_libcxx() {{ [[ "$CLANG_COMPILER" == "{complete}/clang" ]]; }}
+find_installed_clang
+[[ "$CLANG_COMPILER" == "{complete}/clang" ]]
+[[ "$CLANG_LINKER" == "{complete}/ld.lld" ]]
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                f"toolchain at {incomplete}/clang is incomplete", result.stdout
+            )
+
+    def test_macos_uses_versioned_llvm_formula(self):
+        result = self.run_shell(r"""
+OS_TYPE=Darwin
+LLVM_VERSION=22
+brew() {
+  if [[ "$1" == "--prefix" ]]; then
+    printf '/mock/%s\n' "$2"
+  else
+    printf 'brew %s\n' "$*"
+  fi
+}
+install_llvm_macos
+printf 'compiler=%s\nlinker=%s\n' "$CLANG_COMPILER" "$CLANG_LINKER"
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("brew install llvm@22 lld", result.stdout)
+        self.assertIn("brew upgrade llvm@22 lld", result.stdout)
+        self.assertIn("compiler=/mock/llvm@22/bin/clang", result.stdout)
+        self.assertIn("linker=/mock/lld/bin/ld64.lld", result.stdout)
 
     def test_setup_stops_before_recipes_when_profile_fails(self):
         result = self.run_shell("""

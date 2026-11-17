@@ -30,6 +30,7 @@
 
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/common/memory/MemoryResource.h"
+#include "bolt/type/FloatingPointUtil.h"
 
 #include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
@@ -1081,7 +1082,12 @@ uint64_t hashSwitch(ByteInputStream& stream, const Type* type);
 template <TypeKind Kind>
 uint64_t hashOne(ByteInputStream& stream, const Type* /*type*/) {
   using T = typename TypeTraits<Kind>::NativeType;
-  return folly::hasher<T>()(stream.read<T>());
+  const auto value = stream.read<T>();
+  if constexpr (std::is_floating_point_v<T>) {
+    return util::floating_point::NaNAwareHash<T>{}(value);
+  } else {
+    return folly::hasher<T>()(value);
+  }
 }
 
 template <>

@@ -34,7 +34,7 @@ static FOLLY_ALWAYS_INLINE std::string transDanglingRightBrackets(
   while (cur != end) {
     bool literal = false;
     if (*cur == '\\') {
-      while (*cur == '\\' && cur != end) {
+      while (cur != end && *cur == '\\') {
         cur++;
         literal = !literal;
         result.push_back('\\');

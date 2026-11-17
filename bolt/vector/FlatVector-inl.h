@@ -104,9 +104,12 @@ std::unique_ptr<SimpleVector<uint64_t>> FlatVector<T>::hashAll() const {
   auto hashData = hashBuffer->asMutable<uint64_t>();
 
   if (rawValues_ != nullptr) { // non all-null case
-    folly::hasher<T> hasher;
     for (size_t i = 0; i < BaseVector::length_; ++i) {
-      hashData[i] = hasher(valueAtFast(i));
+      if constexpr (std::is_floating_point_v<T>) {
+        hashData[i] = util::floating_point::NaNAwareHash<T>{}(valueAtFast(i));
+      } else {
+        hashData[i] = folly::hasher<T>{}(valueAtFast(i));
+      }
     }
   }
 

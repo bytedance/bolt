@@ -1916,6 +1916,82 @@ TEST_F(RowContainerTest, extractSerializedRow) {
   }
 }
 
+// Regression test for null handling in the batched string extraction:
+// covers null rows passed directly in the rows array (a column with no
+// nulls and no negative row numbers) and result vectors reused across
+// extractions (stale NULL bits must be cleared).
+TEST_F(RowContainerTest, extractStringsBatchNullRowsAndVectorReuse) {
+  auto strings = makeFlatVector<std::string>(
+      {"", "inline", std::string(100, 'a'), std::string(13, 'b')});
+  auto data = makeRowVector({strings});
+  for (bool monotonic : {false, true}) {
+    SCOPED_TRACE(monotonic);
+    RowContainer::RowContainerParam params;
+    params.useMonotonicStringAllocation = monotonic;
+    RowContainer container(
+        data->type()->asRow().children(),
+        true,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool(),
+        params);
+    auto rows = store(container, data);
+    const auto size = rows.size();
+
+    // Null rows in the rows array with a null-free column: extraction must
+    // report nulls at those positions instead of crashing.
+    std::vector<char*> input(size, nullptr);
+    for (auto i = 1; i < size; i += 2) {
+      input[i] = rows[i];
+    }
+    auto result = BaseVector::create(strings->type(), size, pool_.get());
+    container.extractColumn(input.data(), size, 0, result);
+    EXPECT_TRUE(result->mayHaveNulls());
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (i % 2 == 0) {
+        EXPECT_TRUE(result->isNullAt(i)) << "at " << i;
+      } else {
+        EXPECT_FALSE(result->isNullAt(i)) << "at " << i;
+        EXPECT_TRUE(strings->equalValueAt(result.get(), i, i)) << "at " << i;
+      }
+    }
+
+    // Reuse the same result vector (it now carries a null bitmap) for a
+    // null-free extraction: stale NULL bits must be cleared.
+    container.extractColumn(rows.data(), size, 0, result);
+    for (vector_size_t i = 0; i < size; ++i) {
+      EXPECT_FALSE(result->isNullAt(i)) << "at " << i;
+      EXPECT_TRUE(strings->equalValueAt(result.get(), i, i)) << "at " << i;
+    }
+
+    // Two-stage extraction into one fresh vector: the first stage is
+    // null-free (no bitmap yet); the second stage writes nulls at an
+    // offset, which allocates the bitmap for the first time. Rows
+    // produced by the first stage must stay valid.
+    auto staged = BaseVector::create(strings->type(), size, pool_.get());
+    container.extractColumn(rows.data(), size / 2, 0, staged);
+    std::vector<char*> secondHalf(size - size / 2, nullptr);
+    for (auto i = 1; i < secondHalf.size(); i += 2) {
+      secondHalf[i] = rows[size / 2 + i];
+    }
+    container.extractColumn(
+        secondHalf.data(), secondHalf.size(), 0, size / 2, staged);
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (i >= size / 2 && (i - size / 2) % 2 == 0) {
+        EXPECT_TRUE(staged->isNullAt(i)) << "at " << i;
+      } else {
+        EXPECT_FALSE(staged->isNullAt(i)) << "at " << i;
+        EXPECT_TRUE(strings->equalValueAt(staged.get(), i, i)) << "at " << i;
+      }
+    }
+  }
+}
+
 TEST_F(RowContainerTest, serializedRowSize) {
   auto strings =
       makeFlatVector<std::string>({"", "inline", std::string(100, 'a')});

@@ -29,6 +29,8 @@
  */
 
 #include "bolt/functions/prestosql/json/JsonPathTokenizer.h"
+
+#include <algorithm>
 namespace bytedance::bolt::functions {
 
 constexpr char ROOT = '$';
@@ -68,6 +70,10 @@ ParseResult JsonPathTokenizer::getNext() {
   if (match(OPEN_BRACKET)) {
     ParseResult token;
     if (match(QUOTE)) {
+      // Presto supports quote within bracket, while spark does not.
+      if (spark_compatible_) {
+        return folly::makeUnexpected(false);
+      }
       token = matchQuotedSubscriptKey(QUOTE);
     } else if (match(SINGLE_QUOTE)) {
       token = matchQuotedSubscriptKey(SINGLE_QUOTE);
@@ -82,7 +88,7 @@ ParseResult JsonPathTokenizer::getNext() {
   return folly::makeUnexpected(false);
 }
 
-ParseResult JsonPathTokenizer::getSimdjsonPathPointer() const noexcept {
+const std::string& JsonPathTokenizer::getSimdjsonPathPointer() const noexcept {
   return simdJsonPathPointer_;
 }
 
@@ -114,7 +120,7 @@ ParseResult JsonPathTokenizer::matchDotKey() {
     auto res = path_.subpiece(start, index_ - start).str();
     simdJsonPathPointer_.append(1, SIMDJSON_PATH_SEPERATOR);
     simdJsonPathPointer_.append(res);
-    return res;
+    return JsonPathToken::Token(res);
   }
 }
 
@@ -128,9 +134,14 @@ ParseResult JsonPathTokenizer::matchUnquotedSubscriptKey() {
     return folly::makeUnexpected(false);
   }
   auto res = path_.subpiece(start, index_ - start).str();
+  const auto isIndex =
+      std::ranges::all_of(res, [](char c) { return c >= '0' && c <= '9'; });
+  if (spark_compatible_ && res != "*" && !isIndex) {
+    return folly::makeUnexpected(false);
+  }
   simdJsonPathPointer_.append(1, SIMDJSON_PATH_SEPERATOR);
   simdJsonPathPointer_.append(res);
-  return res;
+  return res == "*" ? JsonPathToken::Wildcard() : JsonPathToken::Token(res);
 }
 
 // Reference Presto logic in
@@ -170,7 +181,7 @@ ParseResult JsonPathTokenizer::matchQuotedSubscriptKey(char quote) {
   if (escaped || token.empty() || !match(quote)) {
     return folly::makeUnexpected(false);
   }
-  return token;
+  return JsonPathToken::Token(token);
 }
 
 bool JsonPathTokenizer::isUnquotedBracketKeyFormat(char c) {

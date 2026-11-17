@@ -245,6 +245,53 @@ TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
   EXPECT_EQ("charlie", strings->valueAt(4).str());
 }
 
+TEST_F(BmRowContainerTest, ExtractStringHonorsExactSize) {
+  const std::string value = "1234567890123";
+  BmRowContainer container(
+      {VARCHAR(), VARCHAR()},
+      {false, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<std::string>({value, value, value}),
+      makeNullableFlatVector<std::string>({value, std::nullopt, value}),
+  });
+  auto rows = storeAll(container, input);
+  const std::vector<vector_size_t> selected{0, 1, -1, 2};
+
+  for (int column = 0; column < 2; ++column) {
+    for (bool byRowNumbers : {false, true}) {
+      auto exact = BaseVector::create(VARCHAR(), 0, pool());
+      auto normal = BaseVector::create(VARCHAR(), 0, pool());
+      for (auto [result, exactSize] :
+           {std::make_pair(exact, true), std::make_pair(normal, false)}) {
+        if (byRowNumbers) {
+          container.extractColumnResident(
+              rows.data(),
+              {selected.data(), selected.size()},
+              column,
+              0,
+              result,
+              exactSize);
+        } else {
+          container.extractColumnResident(
+              rows.data(), rows.size(), column, 0, result, exactSize);
+        }
+      }
+      auto* exactFlat = exact->asFlatVector<StringView>();
+      auto* normalFlat = normal->asFlatVector<StringView>();
+      test::assertEqualVectors(exact, normal);
+      ASSERT_FALSE(exactFlat->stringBuffers().empty());
+      ASSERT_FALSE(normalFlat->stringBuffers().empty());
+      EXPECT_LT(
+          exactFlat->stringBuffers().front()->capacity(),
+          normalFlat->stringBuffers().front()->capacity());
+      EXPECT_EQ(value, exactFlat->valueAt(0).str());
+    }
+  }
+}
+
 TEST_F(BmRowContainerDiskIoTest, BulkReadSessionLoadSkipsConsumedChunks) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);

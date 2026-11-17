@@ -191,8 +191,11 @@ class JsonToMapFunction : public exec::VectorFunction {
         // round-tripping through a double (which loses precision and reformats,
         // e.g. 1e10 -> 10000000000.0) or failing on out-of-range exponents
         // (e.g. 1e400). Matches the Hive reference UDF (com.jsoniter).
-        constexpr unsigned kParseFlags =
-            kParseIntegerAsRaw | kParseOverflowNumAsNumStr;
+        //
+        // Fixme: In-range integer input such as '-0' will raw text output
+        // in Hive UDF. But bolt will parse it and have the output '0'.
+        constexpr ParseFlags kParseFlags =
+            ParseFlags::kParseFloatAndOverflowNumAsNumStr;
         doc.Parse<kParseFlags>(current);
         std::string escaped;
         if (doc.HasParseError() && escapeControlChars) {

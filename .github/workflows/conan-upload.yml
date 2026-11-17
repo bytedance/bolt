@@ -76,6 +76,7 @@ jobs:
         run: |
           conan remote remove ci || true
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Release" \
             -c "bolt/*:tools.build:skip_test=False" \
@@ -97,7 +98,7 @@ jobs:
 
           # Match the Python wheel dependency graph in bolt_build_backend.py.
           conan install . \
-            -pr:h default -pr:b default \
+            -pr:h host-profile -pr:b build-profile \
             -s "build_type=Release" \
             -s "&:build_type=Release" \
             -o "&:python_bind=True" \
@@ -112,6 +113,7 @@ jobs:
         shell: bash
         run: |
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Debug" \
             -c "bolt/*:tools.build:skip_test=False" \

@@ -1999,6 +1999,244 @@ TEST_F(BmStreamingWindowBuildTest, aggregateUsesReverseIncrementalForSuffix) {
 #endif
 }
 
+class BmAggregateWindowRepeatedFrameTest : public BmStreamingWindowBuildTest {
+ protected:
+  void assertRepeatedFrames(const std::string& name) {
+    using Frame = std::pair<vector_size_t, vector_size_t>;
+    const std::vector<std::vector<Frame>> batches{
+        // Both bounds vary across selected frames, forcing simpleAggregation.
+        // Move each bound in both directions across non-null values, so SUM
+        // and COUNT detect accidentally comparing only one bound. Include
+        // repeated single-row frames at both partition edges.
+        {{1, 0}, {0, 0}, {0, 0}, {0, 1}, {0, 1}, {1, 3}, {1, 3},
+         {1, 4}, {1, 4}, {2, 4}, {2, 4}, {1, 4}, {1, 4}, {1, 3},
+         {1, 3}, {8, 8}, {8, 8}, {6, 7}, {6, 7}, {1, 0}},
+        // Take the existing all-equal path between two simple apply calls.
+        {{0, 0}, {0, 0}},
+        // Start with the preceding simple call's last frame, after the
+        // intervening call changed aggregate state. Reuse must be call-local.
+        {{6, 7}, {6, 7}, {1, 0}, {3, 5}, {3, 5}, {2, 5}, {2, 5}},
+        {{1, 0}, {1, 0}},
+        // End at the next partition's first selected frame, [0, 0], to check
+        // partition isolation with different values at identical bounds.
+        {{2, 5}, {2, 5}, {0, 0}, {0, 0}},
+    };
+    const std::vector<std::vector<std::optional<int64_t>>> inputs{
+        {10, 20, 30, -5, 40, 7, std::nullopt, std::nullopt, 90},
+        {100, -13, 3, -50, 17, 11, std::nullopt, std::nullopt, -9},
+        std::vector<std::optional<int64_t>>(9, std::nullopt),
+    };
+#ifndef NDEBUG
+    const std::array<uint64_t, 5> expectedResets{9, 1, 3, 0, 2};
+#endif
+
+    auto manager = createWindowTestBufferManager(pool()->root(), "repeated");
+    bm::BmRowContainer container(
+        {BIGINT()}, {true}, 0, manager, memory::bm::MemoryTag::kWindow);
+    HashStringAllocator stringAllocator(pool());
+    const core::QueryConfig config{
+        std::unordered_map<std::string, std::string>{}};
+    auto function = window::createBmAggregateWindowFunction(
+        name,
+        {{BIGINT(), nullptr, column_index_t{0}}},
+        BIGINT(),
+        false,
+        pool(),
+        &stringAllocator,
+        config);
+    ASSERT_NE(function, nullptr);
+
+    bm::RowNumber partitionStart = 0;
+    for (const auto& values : inputs) {
+      auto input = makeRowVector({makeNullableFlatVector<int64_t>(values)});
+      window::BmWindowPartitionDescriptor descriptor;
+      descriptor.numRows = input->size();
+      container.appendBatch(
+          input, bm::kDefaultPartition, &descriptor.residentRows);
+      descriptor.ranges.push_back(
+          {container.activeSegmentId(),
+           partitionStart,
+           static_cast<bm::RowNumber>(input->size())});
+      partitionStart += input->size();
+      window::BmWindowPartition partition(
+          &container,
+          pool(),
+          {BIGINT()},
+          std::move(descriptor),
+          {0},
+          std::vector<std::pair<column_index_t, core::SortOrder>>{});
+      function->resetPartition(&partition);
+
+      for (size_t batch = 0; batch < batches.size(); ++batch) {
+        const auto& frames = batches[batch];
+        const vector_size_t size = frames.size();
+        auto starts = AlignedBuffer::allocate<vector_size_t>(size, pool());
+        auto ends = AlignedBuffer::allocate<vector_size_t>(size, pool());
+        SelectivityVector validRows(size);
+        for (vector_size_t row = 0; row < size; ++row) {
+          starts->asMutable<vector_size_t>()[row] = frames[row].first;
+          ends->asMutable<vector_size_t>()[row] = frames[row].second;
+          validRows.setValid(row, frames[row].first <= frames[row].second);
+        }
+        validRows.updateBounds();
+
+        constexpr vector_size_t kOffset = 2;
+        constexpr int64_t kSentinel = -987654;
+        auto result = makeFlatVector<int64_t>(
+            size + 2 * kOffset, [kSentinel](auto) { return kSentinel; });
+#ifndef NDEBUG
+        window::resetBmAggregateWindowTestStats();
+#endif
+        function->apply(
+            nullptr, nullptr, starts, ends, validRows, kOffset, result);
+#ifndef NDEBUG
+        EXPECT_EQ(
+            expectedResets[batch],
+            window::bmAggregateWindowTestStats().aggregateResets)
+            << "batch " << batch << ", aggregate " << name;
+#endif
+        const auto* flat = result->asFlatVector<int64_t>();
+        for (vector_size_t row = 0; row < result->size(); ++row) {
+          SCOPED_TRACE(fmt::format("{} output row {}", name, row));
+          if (row < kOffset || row >= kOffset + size) {
+            ASSERT_FALSE(flat->isNullAt(row));
+            EXPECT_EQ(kSentinel, flat->valueAt(row));
+            continue;
+          }
+          const auto [start, end] = frames[row - kOffset];
+          int64_t sum = 0;
+          int64_t count = 0;
+          for (auto inputRow = start; inputRow <= end; ++inputRow) {
+            if (values[inputRow].has_value()) {
+              sum += values[inputRow].value();
+              ++count;
+            }
+          }
+          const bool expectNull = name == "sum" && count == 0;
+          ASSERT_EQ(expectNull, flat->isNullAt(row));
+          if (!expectNull) {
+            EXPECT_EQ(name == "count" ? count : sum, flat->valueAt(row));
+          }
+        }
+      }
+    }
+  }
+};
+
+TEST_F(BmAggregateWindowRepeatedFrameTest, sumAcrossCallsAndPartitions) {
+  assertRepeatedFrames("sum");
+}
+
+TEST_F(BmAggregateWindowRepeatedFrameTest, countAcrossCallsAndPartitions) {
+  assertRepeatedFrames("count");
+}
+
+TEST_F(BmAggregateWindowRepeatedFrameTest, collectListPreservesEarlierResults) {
+  using Frame = std::pair<vector_size_t, vector_size_t>;
+  const std::vector<std::vector<Frame>> batches{
+      {{0, 1},
+       {0, 1},
+       {1, 3},
+       {1, 3},
+       {1, 0},
+       {0, 0},
+       {0, 0},
+       {3, 3},
+       {3, 3},
+       {2, 4},
+       {2, 4}},
+      // The last frame matches the next partition's first frame.
+      {{2, 4}, {2, 4}, {3, 4}, {3, 4}, {0, 1}, {0, 1}},
+  };
+  const std::vector<std::vector<std::optional<std::string>>> inputs{
+      {std::string(80, 'a'),
+       std::string(80, 'b'),
+       std::string(80, 'c'),
+       std::nullopt,
+       std::string(80, 'd')},
+      {std::string(80, 'w'),
+       std::string(80, 'x'),
+       std::string(80, 'y'),
+       std::nullopt,
+       std::string(80, 'z')},
+  };
+
+  auto manager = createWindowTestBufferManager(pool()->root(), "repeated-list");
+  bm::BmRowContainer container(
+      {VARCHAR()}, {true}, 0, manager, memory::bm::MemoryTag::kWindow);
+  HashStringAllocator stringAllocator(pool());
+  const core::QueryConfig config{
+      std::unordered_map<std::string, std::string>{}};
+  auto function = window::createBmAggregateWindowFunction(
+      "collect_list",
+      {{VARCHAR(), nullptr, column_index_t{0}}},
+      ARRAY(VARCHAR()),
+      false,
+      pool(),
+      &stringAllocator,
+      config);
+  ASSERT_NE(function, nullptr);
+
+  std::vector<std::pair<VectorPtr, VectorPtr>> priorResults;
+  bm::RowNumber partitionStart = 0;
+  for (const auto& values : inputs) {
+    auto input = makeRowVector({makeNullableFlatVector<std::string>(values)});
+    window::BmWindowPartitionDescriptor descriptor;
+    descriptor.numRows = input->size();
+    container.appendBatch(
+        input, bm::kDefaultPartition, &descriptor.residentRows);
+    descriptor.ranges.push_back(
+        {container.activeSegmentId(),
+         partitionStart,
+         static_cast<bm::RowNumber>(input->size())});
+    partitionStart += input->size();
+    window::BmWindowPartition partition(
+        &container,
+        pool(),
+        {VARCHAR()},
+        std::move(descriptor),
+        {0},
+        std::vector<std::pair<column_index_t, core::SortOrder>>{});
+    function->resetPartition(&partition);
+
+    for (const auto& frames : batches) {
+      const vector_size_t size = frames.size();
+      auto starts = AlignedBuffer::allocate<vector_size_t>(size, pool());
+      auto ends = AlignedBuffer::allocate<vector_size_t>(size, pool());
+      SelectivityVector validRows(size);
+      constexpr vector_size_t kOffset = 2;
+      const std::string sentinel(80, 's');
+      std::vector<std::vector<std::string>> expected(
+          size + 2 * kOffset, {sentinel});
+      for (vector_size_t row = 0; row < size; ++row) {
+        const auto [start, end] = frames[row];
+        starts->asMutable<vector_size_t>()[row] = start;
+        ends->asMutable<vector_size_t>()[row] = end;
+        validRows.setValid(row, start <= end);
+        auto& array = expected[kOffset + row];
+        array.clear();
+        for (auto inputRow = start; inputRow <= end; ++inputRow) {
+          if (values[inputRow].has_value()) {
+            array.push_back(values[inputRow].value());
+          }
+        }
+      }
+      validRows.updateBounds();
+      auto result =
+          makeArrayVector<std::string>(std::vector<std::vector<std::string>>(
+              size + 2 * kOffset, {sentinel}));
+      function->apply(
+          nullptr, nullptr, starts, ends, validRows, kOffset, result);
+      priorResults.emplace_back(makeArrayVector<std::string>(expected), result);
+      // Recheck outputs from earlier frames, calls and partitions after the
+      // aggregate and its cached result have been reset and reused.
+      for (const auto& [expectedResult, actualResult] : priorResults) {
+        bytedance::bolt::test::assertEqualVectors(expectedResult, actualResult);
+      }
+    }
+  }
+}
+
 TEST_F(BmStreamingWindowBuildTest, aggregateWindowRequiresBmPartition) {
   HashStringAllocator stringAllocator(pool());
   std::vector<WindowFunctionArg> args{{BIGINT(), nullptr, column_index_t{0}}};

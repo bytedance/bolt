@@ -77,7 +77,9 @@ CONAN_CONFIG ?=
 CONAN_OVERRIDE ?=
 
 BUILD_VERSION ?= main
-PROFILE ?= default
+CONAN_PROFILE_DIR = $(shell conan config home 2>/dev/null)/profiles
+HOST_PROFILE ?= $(if $(wildcard $(CONAN_PROFILE_DIR)/host-profile),host-profile,default)
+BUILD_PROFILE ?= $(if $(wildcard $(CONAN_PROFILE_DIR)/build-profile),build-profile,default)
 BUILD_TYPE=Release
 # Build third-party dependencies in Release unless explicitly overridden.
 DEPENDENCY_BUILD_TYPE ?= Release
@@ -93,8 +95,9 @@ CONAN_PACKAGE_ARGS = \
 	--user=${BUILD_USER} \
 	--channel=${BUILD_CHANNEL}
 
-CONAN_HOST_PROFILE_ARGS = \
-	-pr:h ${PROFILE}
+CONAN_PROFILE_ARGS = \
+	-pr:h ${HOST_PROFILE} \
+	-pr:b ${BUILD_PROFILE}
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \
@@ -228,7 +231,7 @@ _conan_prepare:
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
 	echo " \
-	$(CONAN_HOST_PROFILE_ARGS) \
+	$(CONAN_PROFILE_ARGS) \
 	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
@@ -352,10 +355,11 @@ python-wheel: BOLT_TEST_LINKAGE = static
 
 python-wheel:
 	NUM_THREADS="$(NUM_THREADS)" NUM_LINK_JOB="$(NUM_LINK_JOB)" \
+	  BOLT_CONAN_BUILD_PROFILE="$(BUILD_PROFILE)" \
 	  "$(PYTHON_EXECUTABLE)" \
 	  "$(PYTHON_PACKAGE_DIR)/packaging/build_dev_wheel.py" \
 	  --build-type "$(BUILD_TYPE)" --out-dir "$(PYTHON_DIST_DIR)" \
-	  --profile "$(PROFILE)" --dependency-build-type "$(DEPENDENCY_BUILD_TYPE)"
+	  --profile "$(HOST_PROFILE)" --dependency-build-type "$(DEPENDENCY_BUILD_TYPE)"
 
 benchmarks-basic-build:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
@@ -422,9 +426,9 @@ endif
 	@echo "### 3. Conan Dependency Manager"
 ifneq ($(CONAN_EXE),)
 	@echo "- **Conan Version**: $(shell conan --version)"
-	@echo "- **Conan Profile (default)**:"
+	@echo "- **Conan Profiles (host: $(HOST_PROFILE), build: $(BUILD_PROFILE))**:"
 	@echo "\`\`\`ini"
-	@conan profile show default 2>/dev/null || conan profile show 2>/dev/null || echo "Unable to read profile"
+	@conan profile show $(CONAN_PROFILE_ARGS) 2>/dev/null || echo "Unable to read profiles"
 	@echo "\`\`\`"
 else
 	@echo "*Conan not found in PATH*"

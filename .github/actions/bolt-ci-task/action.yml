@@ -1,0 +1,108 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+name: Gluten Bolt task
+description: Run a task from the pinned Gluten CI matrix
+inputs:
+  task:
+    description: Canonical task ID
+    required: true
+  jdk:
+    description: Java major version for the task
+    required: true
+  native_artifact:
+    description: Native artifact name for downstream tasks
+    required: false
+outputs:
+  native_artifact:
+    description: Native artifact name for downstream tasks
+    value: ${{ steps.native.outputs.name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare a clean job workspace
+      shell: bash
+      run: rm -rf -- "$GITHUB_WORKSPACE/bolt-ci-work"
+    - uses: actions/checkout@v6
+      with:
+        repository: ${{ env.GLUTEN_REPOSITORY }}
+        ref: ${{ env.GLUTEN_SHA }}
+        path: bolt-ci-work/source
+        persist-credentials: false
+    - uses: actions/checkout@v6
+      with:
+        repository: ${{ env.BOLT_REPOSITORY }}
+        ref: ${{ env.BOLT_SHA }}
+        path: bolt-ci-work/bolt
+        persist-credentials: false
+    - uses: actions/checkout@v6
+      with:
+        repository: ${{ env.DRIVER_REPOSITORY }}
+        ref: ${{ env.DRIVER_SHA }}
+        path: bolt-ci-work/driver
+        persist-credentials: false
+    - uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.jdk }}
+    - name: Install missing worker tools
+      shell: bash
+      run: |
+        if ! command -v jq >/dev/null || ! command -v xmllint >/dev/null \
+           || ! command -v unzip >/dev/null || ! command -v shasum >/dev/null; then
+          apt-get update
+          apt-get install -y --no-install-recommends jq libxml2-utils unzip libdigest-sha-perl
+        fi
+    - name: Require a native artifact from this run
+      if: inputs.task != 'native'
+      shell: bash
+      env:
+        NATIVE_ARTIFACT: ${{ inputs.native_artifact }}
+      run: test -n "$NATIVE_ARTIFACT"
+    - uses: actions/download-artifact@v8
+      if: inputs.task != 'native'
+      with:
+        name: ${{ inputs.native_artifact }}
+        path: bolt-ci-work/native-input
+    - id: task
+      name: Run the pinned task
+      shell: bash
+      env:
+        CI_TASK: ${{ inputs.task }}
+      run: bash "$GITHUB_WORKSPACE/bolt-ci-helpers/scripts/gluten-ci/run-actions-task.sh"
+    - name: Upload task evidence
+      if: always() && (steps.task.outcome == 'success' || steps.task.outcome == 'failure')
+      uses: actions/upload-artifact@v7
+      with:
+        name: gluten-bolt-${{ steps.task.outputs.artifact_task }}-evidence-${{ github.run_attempt }}
+        path: bolt-ci-work/upload/reports/
+        if-no-files-found: error
+        retention-days: 7
+    - id: native
+      name: Name the validated native artifact
+      if: inputs.task == 'native'
+      shell: bash
+      run: printf 'name=gluten-bolt-native-%s-%s\n' "$CI_MODE" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+    - name: Upload the validated native archive
+      if: inputs.task == 'native'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.native.outputs.name }}
+        path: bolt-ci-work/upload/native/
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 3

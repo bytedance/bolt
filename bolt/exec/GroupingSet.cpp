@@ -1151,7 +1151,12 @@ void GroupingSet::spill() {
     sortedAggregations_->clear();
   }
   adjustBypassHashTable(spillConf);
-  table_->clear();
+  clearTableAfterSpill();
+}
+
+void GroupingSet::clearTableAfterSpill() {
+  table_->clear(/*freeTable=*/true);
+  pool_.release();
 }
 
 void GroupingSet::adjustBypassHashTable(common::SpillConfig* spillConf) {
@@ -1197,7 +1202,7 @@ void GroupingSet::spill(const RowContainerIterator& rowIterator) {
   spiller_->setSpillConfig(spillConfig_);
   spiller_->spill(rowIterator);
   adjustBypassHashTable(spillConf);
-  table_->clear();
+  clearTableAfterSpill();
 }
 
 bool GroupingSet::getOutputWithSpill(

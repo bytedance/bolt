@@ -107,6 +107,8 @@ void ColumnLoader::loadInternal(
       scatter(rows, resultSize, result);
     }
   }
+  // Nested lazy columns acquire the token before this loader releases it.
+  token_.reset();
 }
 
 } // namespace bytedance::bolt::dwio::common

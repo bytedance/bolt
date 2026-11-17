@@ -6,7 +6,7 @@ Developer tooling for the Bolt repo.
 |---|---|
 | `setup-dev-env.sh` | Requires Clang 22, builds patched LLD 22.1.8 under `/opt/clang-22.1.8` on Linux, configures Conan and local recipes, and installs Git hooks. Uses LLVM APT packages on Debian/Ubuntu or Homebrew on macOS. |
 | `install-bolt-deps.sh` | Pulls Bolt's pinned Conan deps into the local Conan cache. |
-| `configure-conan-profile.py` | Regenerates a Conan profile with compiler, C++ runtime, linker; supports LTO and Clang PGO. |
+| `configure-conan-profile.py` | Regenerates `build-profile` and `host-profile` with compiler, C++ runtime, and linker settings; applies LTO to both and Clang PGO only to the host profile. Use `--profile NAME` to regenerate a single profile. |
 | `configure-conan-sources-cache.py` | Configures Conan's source download cache, mirror URL, and credentials. Requires `--url`, `--user`, and the `CONAN_SOURCE_PASSWORD` environment variable. |
 | `install-gcc.sh` | Optional GCC installation (root required). Clang 22 is the supported default; newer GCC versions are not covered by CI. |
 | `run-clang-tidy.py` | Runs clang-tidy on changed lines only; used by pre-commit + CI. |

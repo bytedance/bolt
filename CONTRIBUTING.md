@@ -62,12 +62,12 @@ scripts/setup-dev-env.sh
 **⚠️ Important: What this script does** This script is "opinionated" and performs the following actions. Please review them to ensure they fit your workflow:
 
 1. **LLVM Toolchain**:
-   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses Clang 22 when available, skipping LLVM installation.
+   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses Clang 22 only when LLD, libc++, and libc++abi are also usable; otherwise, installs the complete LLVM toolchain.
    - On Debian/Ubuntu supported by [apt.llvm.org](https://apt.llvm.org/), installs LLVM 22 using the official installer's `all` option, including Clang, LLD, LLDB, clangd, LLVM development tools, libc++, libc++abi, OpenMP, compiler-rt, libunwind, and Polly. Also installs the matching LLVM BOLT package and its runtime development files, which the official installer's `all` option omits. Requires root or `sudo`.
    - On Linux, builds patched LLD 22.1.8 under `/opt/clang-22.1.8` with the repository's `llvm-pr220492.patch` and selects that linker for the Conan profile.
-   - On macOS, installs or upgrades Homebrew `llvm` and `lld`. Homebrew must already be installed.
+   - On macOS, installs or upgrades Homebrew `llvm@22` and `lld`. Homebrew must already be installed.
    - Sets `clang`, `clang++`, `lld`, and `ld.lld` to the installed LLVM version using `update-alternatives` on Debian/Ubuntu. On macOS, adds the Homebrew LLVM and LLD directories to the shell configuration. Use `ld.lld --version` on Linux or `ld64.lld --version` on macOS; `lld` itself is the generic driver.
-   - Configures the default Conan profile with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If Clang 22 is not found, installs LLVM 22.
+   - Configures the Conan `build-profile` and `host-profile` with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If a complete Clang 22 toolchain is not found, installs LLVM 22.
    - Other Linux distributions require manual compiler installation.
 2. **Python Environment (Miniconda)**:
    - Checks for `~/miniconda3`.
@@ -75,7 +75,7 @@ scripts/setup-dev-env.sh
    - **Shell Modification**: Appends the Miniconda path to your shell configuration file (`~/.bashrc` or `~/.zshrc`).
    - Installs Python dependencies (including `conan`) into this environment.
 3. **Conan Configuration**:
-   - Sets the C++ standard to `gnu20` in the default Conan profile.
+   - Sets the C++ standard to `gnu23` in both Conan profiles.
    - **Clones & Patches Recipes**: Calls `install-bolt-deps.sh` to download a specific version of `conan-center-index` to `~/.conan2/conan-center-index` and applies Bolt-specific patches (required for `folly`, `arrow`, etc.).
    - Configures local Conan remotes to prioritize these patched recipes.
 4. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
@@ -96,6 +96,13 @@ python scripts/configure-conan-profile.py \
 
 The compiler and linker options also accept absolute paths. Newer compiler
 versions and GCC are not covered by CI; validate such configurations yourself.
+
+The script generates `build-profile` and `host-profile` in Conan's profiles
+directory. PGO settings apply only to `host-profile`; LTO applies to both.
+Use `--profile NAME` to regenerate just one named profile instead.
+The Makefile selects each profile independently, falling back to `default`
+only when the corresponding file is absent. Override them with
+`BUILD_PROFILE=NAME` and `HOST_PROFILE=NAME`.
 
 1. **Install Python Dependencies**:
 

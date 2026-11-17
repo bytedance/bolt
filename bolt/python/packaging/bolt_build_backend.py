@@ -206,7 +206,7 @@ def prepareConan(sourceRoot, buildType, env):
             "--profile:host",
             env.get("BOLT_CONAN_PROFILE", "default"),
             "--profile:build",
-            "default",
+            env.get("BOLT_CONAN_BUILD_PROFILE", "default"),
             "--settings",
             f"build_type={env.get('BOLT_DEPENDENCY_BUILD_TYPE', 'Release')}",
             "--settings",
