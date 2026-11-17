@@ -290,6 +290,86 @@ TYPED_TEST(CellStreamCursorTest, fullBlocksKeepGenericEncoding) {
   }
 }
 
+TEST(CellEncodingTest, narrowBigintBlocksMatchScalar) {
+  constexpr uint32_t kCount = 8;
+  constexpr int64_t kSentinel = 0x123456789abcdef;
+  for (uint32_t bits = 1; bits <= 16; ++bits) {
+    const uint64_t mask = (uint64_t{1} << bits) - 1;
+    const uint64_t sign = uint64_t{1} << (bits - 1);
+    const std::array<uint64_t, kCount> fields{
+        0, mask, 1, sign, sign - 1, mask - 1, 0x5555 & mask, 0xaaaa & mask};
+    for (const int64_t base :
+         {int64_t{0},
+          int64_t{-1700000000000},
+          std::numeric_limits<int64_t>::max() - 65535}) {
+      const bool isFor = base != 0;
+      const auto kind =
+          isFor ? EncodingKind::kForBitPack : EncodingKind::kBitPack;
+      const uint32_t headerBytes = 1 + (isFor ? sizeof(int64_t) : 0);
+      const uint32_t encodedBytes = headerBytes + bits;
+      const uint32_t paddedBytes = headerBytes + ((7 * bits) >> 3) + 8;
+      for (uint32_t rotation = 0; rotation < kCount; ++rotation) {
+        SCOPED_TRACE(
+            fmt::format("bits={}, base={}, rotation={}", bits, base, rotation));
+        std::array<uint8_t, kMaxBlockBytes + kCount> storage;
+        storage.fill(0xa5);
+        auto* input = storage.data() + rotation;
+        input[0] = makeEncodingByte(kind, bits);
+        if (isFor) {
+          folly::storeUnaligned<int64_t>(input + 1, base);
+        }
+        std::fill_n(input + headerBytes, bits, 0);
+        std::array<int64_t, kCount> expected;
+        for (uint32_t i = 0; i < kCount; ++i) {
+          const uint64_t raw = fields[(i + rotation) % kCount];
+          expected[i] = isFor ? base + static_cast<int64_t>(raw)
+                              : static_cast<int64_t>(raw) -
+                  ((raw & sign) != 0 ? int64_t{1} << bits : 0);
+          // Write individual wire bits independently of the encoder.
+          for (uint32_t bit = 0; bit < bits; ++bit) {
+            const uint32_t at = i * bits + bit;
+            input[headerBytes + at / 8] |= ((raw >> bit) & 1) << (at % 8);
+          }
+        }
+        std::array<int64_t, kCount> decoded;
+        ASSERT_EQ(
+            decodeBlock(input, encodedBytes, kCount, decoded.data()),
+            encodedBytes);
+        EXPECT_EQ(decoded, expected);
+        ASSERT_EQ(
+            decodeBlockFull(input, paddedBytes, decoded.data()), encodedBytes);
+        EXPECT_EQ(decoded, expected);
+#if defined(__AVX2__)
+        ASSERT_EQ(
+            detail::decodeFullBlockAvx2(input, paddedBytes, decoded.data()),
+            encodedBytes);
+        EXPECT_EQ(decoded, expected);
+        // The existing gather-reach guard remains conservative for the
+        // two word loads. Refusal must not write even a partial result.
+        decoded.fill(kSentinel);
+        EXPECT_EQ(
+            detail::decodeFullBlockAvx2(input, paddedBytes - 1, decoded.data()),
+            0);
+        EXPECT_TRUE(std::all_of(decoded.begin(), decoded.end(), [](auto value) {
+          return value == kSentinel;
+        }));
+#endif
+        ASSERT_EQ(
+            decodeBlockFull(input, encodedBytes, decoded.data()), encodedBytes);
+        EXPECT_EQ(decoded, expected);
+        for (uint32_t available = 0; available < encodedBytes; ++available) {
+          decoded.fill(kSentinel);
+          EXPECT_EQ(decodeBlockFull(input, available, decoded.data()), 0);
+          EXPECT_TRUE(
+              std::all_of(decoded.begin(), decoded.end(), [](auto value) {
+                return value == kSentinel;
+              }));
+        }
+      }
+    }
+  }
+}
+
 TYPED_TEST(CellStreamCursorTest, blockReadsKeepNaturalBoundaries) {
   using T = TypeParam;
   constexpr uint32_t kBlockValues = TestFixture::kBlockValues;

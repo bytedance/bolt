@@ -1475,13 +1475,26 @@ bool CellPayloadDecoder::appendString(
       source += cursor.dataOffset;
     }
     char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
-    rows.place(count, [&](StringView& value, uint32_t i) {
-      const auto size = static_cast<int32_t>(lengths[i]);
-      materializeString(value, source, size, chars);
-      if (size != 0) {
-        source += size;
-      }
-    });
+    if (heapChars != 0 && heapChars == dataBytes) {
+      // Only heap strings and empty strings: their bytes are contiguous
+      // in both buffers. Reserve/copy once, then build the group's views.
+      ::memcpy(chars, source, dataBytes);
+      rows.place(count, [&](StringView& value, uint32_t i) {
+        const auto size = static_cast<int32_t>(lengths[i]);
+        folly::assume(
+            size == 0 || size > static_cast<int32_t>(StringView::kInlineSize));
+        value.set(chars, size);
+        chars += size;
+      });
+    } else {
+      rows.place(count, [&](StringView& value, uint32_t i) {
+        const auto size = static_cast<int32_t>(lengths[i]);
+        materializeString(value, source, size, chars);
+        if (size != 0) {
+          source += size;
+        }
+      });
+    }
     cursor.dataOffset += dataBytes;
     return true;
   };

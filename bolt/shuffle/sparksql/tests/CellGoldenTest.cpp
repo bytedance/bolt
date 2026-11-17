@@ -670,6 +670,73 @@ class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
   std::shared_ptr<memory::MemoryPool> writerPool_;
 };
 
+TEST_F(CellGoldenTest, flatStringHeapBlocksWithEmptyValues) {
+  // Empty values occupy no bytes in an otherwise all-heap length block.
+  // Vary the heap lengths and cross the string buffer allocation boundary
+  // so that a single block copy must keep every view's prefix and offset.
+  constexpr std::array<size_t, 8> kLengths{0, 13, 16, 31, 0, 64, 257, 32769};
+  ShuffleInput input;
+  for (const vector_size_t numRows : {73, 69}) {
+    const auto batch = input.data.size();
+    std::vector<std::string> heap(numRows);
+    std::vector<std::optional<std::string>> nullable(numRows);
+    std::vector<std::string> mixed(numRows);
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      auto& value = heap[row];
+      value.resize(kLengths[row % kLengths.size()]);
+      for (size_t byte = 0; byte < value.size(); ++byte) {
+        value[byte] =
+            static_cast<char>((row * 29 + byte * 17 + batch * 53) & 255);
+      }
+      if (!value.empty()) {
+        value[value.size() / 2] = '\0';
+      }
+      if (row % 5 != 2) {
+        nullable[row] = value;
+      }
+      mixed[row] = value;
+      if (row % 8 == 3) {
+        mixed[row].resize(StringView::kInlineSize);
+      }
+    }
+    input.data.push_back(makeRowVector({
+        makeFlatVector<std::string>(heap),
+        makeNullableFlatVector<std::string>(nullable),
+        makeFlatVector<std::string>(mixed),
+    }));
+    input.pids.emplace_back(numRows, 0);
+  }
+  auto options = test::shuffleOptions(
+      dataFile_, 1, arrow::Compression::UNCOMPRESSED, false);
+  options.cellOptions.enableStringDictionary = false;
+  options.cellOptions.partitionSealBytes = 1;
+  const auto written = test::writeShuffle(options, input, writerPool_.get());
+  const auto rows = input.rowsOf(1);
+  const auto type = asRowType(input.data.front()->type());
+  for (const int32_t batchSize : {7, 8, 17}) {
+    SCOPED_TRACE(batchSize);
+    // Retain every output through later reads and destruction of the reader.
+    const auto batches = test::readPartition(
+        written.partitions[0], type, nullptr, pool(), batchSize, 1 << 30);
+    test::expectPartitionRows(rows[0], batches, 0, batchSize);
+    for (const auto& batch : batches) {
+      for (const auto& child : batch->children()) {
+        const auto* column = child->as<FlatVector<StringView>>();
+        const auto* values = column->rawValues();
+        for (vector_size_t row = 0; row < batch->size(); ++row) {
+          if (column->isNullAt(row) || values[row].isInline()) {
+            const auto canonical = column->isNullAt(row)
+                ? StringView()
+                : StringView(values[row].data(), values[row].size());
+            EXPECT_EQ(
+                ::memcmp(values + row, &canonical, sizeof(StringView)), 0);
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_F(CellGoldenTest, inputHoldsEveryShape) {
   // What the golden input is meant to hold, so that a change to it cannot
   // quietly weaken what the hashes pin.
