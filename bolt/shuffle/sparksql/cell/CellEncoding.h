@@ -425,10 +425,11 @@ inline void finishFieldsAvx2(T* dst, uint32_t bits, bool isForBitPack, T base) {
   }
 }
 
-/// Zero-extended `bits`-wide fields of a full block, LSB-first from `in`:
-/// field i is gathered from byte (i * bits) / 8 and shifted right by the
-/// rest. 32-bit lanes hold fields up to 25 bits (shift <= 7), 64-bit lanes
-/// up to 57; every gather reads 8 bytes or fewer from a field's first byte.
+/// Zero-extended `bits`-wide fields of a full block, LSB-first from `in`.
+/// Narrow int64 groups broadcast one word for four fields. Other fields
+/// are gathered from byte (i * bits) / 8 and shifted by the rest. 32-bit
+/// lanes hold fields up to 25 bits, 64-bit lanes up to 57; every load reads
+/// 8 bytes or fewer within the caller's validated gather reach.
 template <typename T>
 inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
   constexpr uint32_t kCount = kCacheLineBytes / sizeof(T);
@@ -436,6 +437,28 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
     const __m256i mask =
         _mm256_set1_epi64x(static_cast<int64_t>((uint64_t{1} << bits) - 1));
     const __m256i width = _mm256_set1_epi64x(bits);
+    if constexpr (sizeof(T) == 8) {
+      if (bits <= 16) {
+        // Four fields fit in one word. The second group starts at bit
+        // 4 * bits: even widths are byte-aligned, odd widths leave four
+        // leading bits. That offset plus four fields still fits in 64 bits.
+        const __m256i shifts =
+            _mm256_mul_epu32(_mm256_setr_epi64x(0, 1, 2, 3), width);
+        const __m256i low =
+            _mm256_set1_epi64x(folly::loadUnaligned<int64_t>(in));
+        const __m256i high =
+            _mm256_set1_epi64x(folly::loadUnaligned<int64_t>(in + (bits >> 1)));
+        const __m256i highShifts =
+            _mm256_add_epi64(shifts, _mm256_set1_epi64x((4 * bits) & 7));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(dst),
+            _mm256_and_si256(_mm256_srlv_epi64(low, shifts), mask));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(dst + 4),
+            _mm256_and_si256(_mm256_srlv_epi64(high, highShifts), mask));
+        return;
+      }
+    }
     for (uint32_t i = 0; i < kCount; i += 4) {
       const __m256i bit = _mm256_mul_epu32(
           _mm256_add_epi64(
