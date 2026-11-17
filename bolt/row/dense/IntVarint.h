@@ -641,7 +641,7 @@ FOLLY_ALWAYS_INLINE void addNullableIntColumnSizes(
     auto* rs = reinterpret_cast<int64_t*>(rowSizes);
 
     // Per-lane bit selector {1<<0, 1<<1, ...}, built once.
-    int64_t selArr[kBatchSize];
+    alignas(64) int64_t selArr[kBatchSize];
     for (std::size_t i = 0; i < kBatchSize; ++i) {
       selArr[i] = static_cast<int64_t>(int64_t{1} << i);
     }
@@ -667,7 +667,7 @@ FOLLY_ALWAYS_INLINE void addNullableIntColumnSizes(
     // Narrow int8/int16/int32: widen to the int32 size kernel, then override
     // null lanes to 1 byte.
     constexpr std::size_t kWidth = xsimd::batch<int32_t>::size;
-    uint32_t sz[kWidth];
+    alignas(64) uint32_t sz[kWidth];
     for (; j + kWidth <= count; j += kWidth) {
       nullableInt32SizesBatch(xsimd::batch<int32_t>::load_unaligned(raw + j))
           .store_aligned(sz);
