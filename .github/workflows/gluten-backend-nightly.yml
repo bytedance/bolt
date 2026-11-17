@@ -38,15 +38,9 @@ jobs:
     if: >-
       ${{ github.ref == 'refs/heads/main' &&
           (github.event_name != 'schedule' || github.repository == 'bytedance/bolt') }}
-    uses: ./.github/workflows/bolt_backend_x86.yml
+    uses: ./.github/workflows/gluten-ci.yaml
     with:
       mode: full
-      bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
-      gluten_repository: apache/gluten
       # Resolve Apache main once; all jobs in this run use the same commit.
       gluten_sha: main
-      helper_repository: ${{ github.repository }}
-      helper_sha: ${{ github.sha }}
-      driver_repository: ${{ github.repository }}
-      driver_sha: ${{ github.sha }}

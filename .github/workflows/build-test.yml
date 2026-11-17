@@ -283,17 +283,11 @@ jobs:
     name: Compile and test Gluten Bolt backend
     needs: reuse-check
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
-    uses: ./.github/workflows/bolt_backend_x86.yml
+    uses: ./.github/workflows/gluten-ci.yaml
     with:
       mode: native
-      bolt_repository: ${{ github.repository }}
       bolt_sha: ${{ github.sha }}
-      gluten_repository: apache/gluten
       gluten_sha: ${{ needs.reuse-check.outputs.gluten_sha }}
-      helper_repository: ${{ github.repository }}
-      helper_sha: ${{ github.sha }}
-      driver_repository: ${{ github.repository }}
-      driver_sha: ${{ github.sha }}
 
   source-result:
     needs: [reuse-check, changes, build-test, build-only, python-check, gluten-backend-compile, gluten-ci-check]

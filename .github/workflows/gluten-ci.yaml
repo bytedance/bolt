@@ -1,0 +1,399 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Gluten Bolt CI
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
+      bolt_sha:
+        type: string
+        required: true
+      gluten_sha:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [native, full]
+        default: native
+      bolt_sha:
+        description: Bolt commit (defaults to the selected workflow revision)
+        type: string
+      gluten_sha:
+        description: Apache Gluten ref
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BOLT_SHA: ${{ inputs.bolt_sha || github.sha }}
+  CI_NUM_THREADS: '16'
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      gluten_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: apache/gluten
+          ref: ${{ inputs.gluten_sha }}
+          persist-credentials: false
+      - id: source
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          [[ "$MODE" == native || "$MODE" == full ]]
+          [[ "$BOLT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Gluten Bolt native UT
+    needs: resolve
+    runs-on: [self-hosted, Linux, X64, medium]
+    timeout-minutes: 360
+    container:
+      image: bolt-registry:5000/bolt-ci:20260921
+      options: --user root --init
+      volumes:
+        - /data/ccache-data:/data/ccache-data:ro
+        - /opt/bolt-arrow-sources:/opt/bolt-arrow-sources:ro
+        - /opt/bolt-arrow-cache.py:/opt/bolt-arrow-cache.py:ro
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data:rw
+    env:
+      GLUTEN_SHA: ${{ needs.resolve.outputs.gluten_sha }}
+      CI_MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BOLT_SHA }}
+          path: bolt
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: apache/gluten
+          ref: ${{ env.GLUTEN_SHA }}
+          path: gluten
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build candidate package and run upstream native tests
+        run: |
+          work="$GITHUB_WORKSPACE"
+          rm -rf "${work:?}/reports" "$work/native" "${work:?}/home"
+          install -d -m 0755 -o 65534 -g 65534 "${work:?}/reports" "$work/native" "${work:?}/home"
+          chown -R 65534:65534 "$work/bolt" "$work/gluten"
+          setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs \
+            env HOME="${work:?}/home" BOLT_ROOT="$work/bolt" GLUTEN_ROOT="$work/gluten" \
+            REPORTS="$work/reports" ARTIFACT="$work/native" CONAN_HOME="$work/home/.conan2" \
+            CCACHE_DIR="$work/home/ccache" \
+            'CCACHE_SECONDARY_STORAGE=file:///data/ccache-data|layout=subdirs|read-only' \
+            bash -euo pipefail <<'BUILD'
+          export CC=clang-22 CXX=clang++-22 PATH="$HOME/miniconda3/bin:$PATH"
+          test "$(git -C "$BOLT_ROOT" rev-parse HEAD)" = "$BOLT_SHA"
+          test "$(git -C "$GLUTEN_ROOT" rev-parse HEAD)" = "$GLUTEN_SHA"
+          bash "$BOLT_ROOT/scripts/install-bolt-deps.sh"
+          if [[ -f /opt/bolt-arrow-cache.py ]]; then
+            python3 /opt/bolt-arrow-cache.py configure-local
+          fi
+          conan remote add ci http://conanserver:9300 --index 0
+          source "$BOLT_ROOT/scripts/gluten-ci.sh"
+          build_native "$BOLT_ROOT" "$GLUTEN_ROOT" "$REPORTS" "$CI_MODE"
+          cd "$GLUTEN_ROOT"
+          source cpp/build/Release/generators/conanrun.sh
+          export LD_LIBRARY_PATH="$GLUTEN_ROOT/cpp/build/package/bolt/linux/amd64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          libs=(cpp/build/package/bolt/linux/amd64/*.so* cpp/build/Release/bolt/udf/examples/libmyud{f,af}.so)
+          ldd "${libs[@]}" > "$REPORTS/linkage.txt"
+          if grep '=> not found' "$REPORTS/linkage.txt"; then exit 1; fi
+          ctest --test-dir cpp/build/Release --no-tests=error --timeout 7200 \
+            --output-on-failure --output-junit "$REPORTS/TEST-native.xml" -j "$CI_NUM_THREADS"
+          check_reports "$REPORTS"
+          mkdir -p "$ARTIFACT/bolt-runtime"
+          for lib in "${libs[@]}"; do
+            test -s "$lib"
+            mkdir -p "$ARTIFACT/$(dirname "$lib")"
+            cp -L "$lib" "$ARTIFACT/$lib"
+          done
+          while IFS= read -r lib; do
+            if [[ "$lib" == "$CONAN_HOME/"* ]]; then cp -L "$lib" "$ARTIFACT/bolt-runtime/"; fi
+          done < <(awk '$2 == "=>" {print $3}' "$REPORTS/linkage.txt" | sort -u)
+          cd "$ARTIFACT"
+          printf '%s\n%s\n' "$BOLT_SHA" "$GLUTEN_SHA" > revisions
+          find cpp bolt-runtime -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          BUILD
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gluten-native-reports-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: inputs.mode == 'full'
+        with:
+          name: gluten-native-${{ github.run_attempt }}
+          path: native/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  spark:
+    name: Gluten ${{ matrix.id }}
+    needs: [resolve, native]
+    if: inputs.mode == 'full'
+    runs-on: [self-hosted, Linux, X64, medium]
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - {"id": "package:spark35", "stage": "package", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,lance,celeborn,uniffle", "selector": ""}
+          - {"id": "package:spark35-scala213", "stage": "package", "spark": "3.5", "jdk": 17, "scala": "2.13", "profiles": "backends-bolt,spark-3.5,scala-2.13,java-17,iceberg,delta", "selector": ""}
+          - {"id": "package:spark35-java8", "stage": "package", "spark": "3.5", "jdk": 8, "scala": "2.12", "profiles": "backends-bolt,spark-3.5,scala-2.12,java-8", "selector": ""}
+          - {"id": "package:spark35-java11", "stage": "package", "spark": "3.5", "jdk": 11, "scala": "2.12", "profiles": "backends-bolt,spark-3.5,scala-2.12,java-11", "selector": ""}
+          - {"id": "package:spark40", "stage": "package", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,lance", "selector": ""}
+          - {"id": "package:spark40-fast-build", "stage": "package", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "backends-bolt,spark-4.0,scala-2.13,java-17,iceberg,delta,paimon,fast-build", "selector": ""}
+          - {"id": "package:spark41", "stage": "package", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "backends-bolt,spark-4.1,scala-2.13,java-17,delta", "selector": ""}
+          - {"id": "package:spark40-java21", "stage": "package", "spark": "4.0", "jdk": 21, "scala": "2.13", "profiles": "backends-bolt,spark-4.0,scala-2.13,java-21", "selector": ""}
+          - {"id": "package:spark40-java25", "stage": "package", "spark": "4.0", "jdk": 25, "scala": "2.13", "profiles": "backends-bolt,spark-4.0,scala-2.13,java-25", "selector": ""}
+          - {"id": "package:spark41-java21", "stage": "package", "spark": "4.1", "jdk": 21, "scala": "2.13", "profiles": "backends-bolt,spark-4.1,scala-2.13,java-21", "selector": ""}
+          - {"id": "package:spark41-java25", "stage": "package", "spark": "4.1", "jdk": 25, "scala": "2.13", "profiles": "backends-bolt,spark-4.1,scala-2.13,java-25", "selector": ""}
+          - {"id": "package:spark42", "stage": "package", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "backends-bolt,spark-4.2,scala-2.13,java-17,delta", "selector": ""}
+          - {"id": "spark:3.5:spark-1", "stage": "spark-1", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.spark.sql.streaming,org.apache.spark.GlutenSortShuffleSuite,org.apache.gluten"}
+          - {"id": "spark:3.5:spark-2", "stage": "spark-2", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.spark.sql.execution,org.apache.spark.sql.catalyst,org.apache.spark.sql.errors,org.apache.spark.sql.extension"}
+          - {"id": "spark:3.5:spark-3", "stage": "spark-3", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.spark.sql.GlutenSQL,org.apache.spark.sql.Gluten,org.apache.spark.sql.connector,org.apache.spark.sql.sources,org.apache.spark.sql.hive,org.apache.spark.sql.gluten,org.apache.spark.sql.shim"}
+          - {"id": "spark:3.5:extended", "stage": "extended", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.spark.tags.ExtendedSQLTest"}
+          - {"id": "spark:3.5:slow-hive", "stage": "slow-hive", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.spark.tags.SlowHiveTest"}
+          - {"id": "spark:4.0:spark-1", "stage": "spark-1", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,bolt-ut-delta,bolt-ut-paimon", "selector": "org.apache.spark.sql.streaming,org.apache.spark.GlutenSortShuffleSuite,org.apache.gluten"}
+          - {"id": "spark:4.0:spark-2", "stage": "spark-2", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,bolt-ut-delta,bolt-ut-paimon", "selector": "org.apache.spark.sql.execution,org.apache.spark.sql.catalyst,org.apache.spark.sql.errors,org.apache.spark.sql.extension"}
+          - {"id": "spark:4.0:spark-3", "stage": "spark-3", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,bolt-ut-delta,bolt-ut-paimon", "selector": "org.apache.spark.sql.GlutenSQL,org.apache.spark.sql.Gluten,org.apache.spark.sql.connector,org.apache.spark.sql.sources,org.apache.spark.sql.hive,org.apache.spark.sql.gluten,org.apache.spark.sql.shim"}
+          - {"id": "spark:4.0:extended", "stage": "extended", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,bolt-ut-delta,bolt-ut-paimon", "selector": "org.apache.spark.tags.ExtendedSQLTest"}
+          - {"id": "spark:4.0:slow-hive", "stage": "slow-hive", "spark": "4.0", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.0,scala-2.13,java-17,delta,paimon,bolt-ut-delta,bolt-ut-paimon", "selector": "org.apache.spark.tags.SlowHiveTest"}
+          - {"id": "spark:4.1:spark-1", "stage": "spark-1", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.1,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.streaming,org.apache.spark.GlutenSortShuffleSuite,org.apache.gluten"}
+          - {"id": "spark:4.1:spark-2", "stage": "spark-2", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.1,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.execution,org.apache.spark.sql.catalyst,org.apache.spark.sql.errors,org.apache.spark.sql.extension"}
+          - {"id": "spark:4.1:spark-3", "stage": "spark-3", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.1,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.GlutenSQL,org.apache.spark.sql.Gluten,org.apache.spark.sql.connector,org.apache.spark.sql.sources,org.apache.spark.sql.hive,org.apache.spark.sql.gluten,org.apache.spark.sql.shim"}
+          - {"id": "spark:4.1:extended", "stage": "extended", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.1,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.tags.ExtendedSQLTest"}
+          - {"id": "spark:4.1:slow-hive", "stage": "slow-hive", "spark": "4.1", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.1,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.tags.SlowHiveTest"}
+          - {"id": "spark:4.2:spark-1", "stage": "spark-1", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.2,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.streaming,org.apache.spark.GlutenSortShuffleSuite,org.apache.gluten"}
+          - {"id": "spark:4.2:spark-2", "stage": "spark-2", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.2,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.execution,org.apache.spark.sql.catalyst,org.apache.spark.sql.errors,org.apache.spark.sql.extension"}
+          - {"id": "spark:4.2:spark-3", "stage": "spark-3", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.2,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.sql.GlutenSQL,org.apache.spark.sql.Gluten,org.apache.spark.sql.connector,org.apache.spark.sql.sources,org.apache.spark.sql.hive,org.apache.spark.sql.gluten,org.apache.spark.sql.shim"}
+          - {"id": "spark:4.2:extended", "stage": "extended", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.2,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.tags.ExtendedSQLTest"}
+          - {"id": "spark:4.2:slow-hive", "stage": "slow-hive", "spark": "4.2", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-4.2,scala-2.13,java-17,delta,bolt-ut-delta", "selector": "org.apache.spark.tags.SlowHiveTest"}
+          - {"id": "spark:3.5:jvm", "stage": "jvm", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "jvm,delta"}
+          - {"id": "spark:3.5:tpc", "stage": "tpc", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "h,ds"}
+          - {"id": "spark:3.5-scala213:spark-1", "stage": "spark-1", "spark": "3.5", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.13,java-17,iceberg,delta,bolt-ut-delta,bolt-ut-iceberg", "selector": "org.apache.spark.sql.streaming,org.apache.spark.GlutenSortShuffleSuite,org.apache.gluten"}
+          - {"id": "spark:3.5-scala213:spark-2", "stage": "spark-2", "spark": "3.5", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.13,java-17,iceberg,delta,bolt-ut-delta,bolt-ut-iceberg", "selector": "org.apache.spark.sql.execution,org.apache.spark.sql.catalyst,org.apache.spark.sql.errors,org.apache.spark.sql.extension"}
+          - {"id": "spark:3.5-scala213:spark-3", "stage": "spark-3", "spark": "3.5", "jdk": 17, "scala": "2.13", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.13,java-17,iceberg,delta,bolt-ut-delta,bolt-ut-iceberg", "selector": "org.apache.spark.sql.GlutenSQL,org.apache.spark.sql.Gluten,org.apache.spark.sql.connector,org.apache.spark.sql.sources,org.apache.spark.sql.hive,org.apache.spark.sql.gluten,org.apache.spark.sql.shim"}
+          - {"id": "spark:3.5:udf", "stage": "udf", "spark": "3.5", "jdk": 17, "scala": "2.12", "profiles": "fast-build,backends-bolt,spark-3.5,scala-2.12,java-17,iceberg,delta,hudi,paimon,bolt-ut-delta,bolt-ut-hudi,bolt-ut-iceberg,bolt-ut-paimon", "selector": "org.apache.gluten.expression.BoltUdfSuiteLocal"}
+    container:
+      image: bolt-registry:5000/bolt-ci:20260921
+      options: --user root --init
+    env:
+      GLUTEN_SHA: ${{ needs.resolve.outputs.gluten_sha }}
+      SPARK_PROFILE: ${{ matrix.spark }}
+      SCALA_VERSION: ${{ matrix.scala }}
+      JDK_VERSION: ${{ matrix.jdk }}
+      PROFILES: ${{ matrix.profiles }}
+      STAGE: ${{ matrix.stage }}
+      SELECTOR: ${{ matrix.selector }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BOLT_SHA }}
+          path: bolt
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: apache/gluten
+          ref: ${{ env.GLUTEN_SHA }}
+          path: gluten
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.jdk }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: gluten-native-${{ github.run_attempt }}
+          path: native
+      - name: Restore this run's native libraries
+        run: |
+          cd native
+          cmp revisions <(printf '%s\n%s\n' "$BOLT_SHA" "$GLUTEN_SHA")
+          sha256sum -c SHA256SUMS
+          cp -a cpp bolt-runtime ../gluten/
+          cd ../gluten
+          mkdir -p ep/build-bolt/build
+          ln -s "$GITHUB_WORKSPACE/bolt" ep/build-bolt/build/bolt_ep
+      - name: Clear previous local dependency cache before restore
+        run: rm -rf -- "${GITHUB_WORKSPACE:?}/.gluten-cache"
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            .gluten-cache/maven
+            .gluten-cache/spark
+            .gluten-cache/pip
+          key: gluten-deps-v1-${{ matrix.stage == 'package' && 'package' || 'spark' }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.spark }}-${{ matrix.scala }}-${{ matrix.jdk }}-${{ hashFiles('gluten/**/pom.xml', 'gluten/.github/workflows/util/install-spark-resources.sh') }}
+      - name: Prepare runtime and upstream Spark resources
+        run: |
+          if ! command -v xmllint >/dev/null || ! command -v shasum >/dev/null || ! command -v unzip >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends libxml2-utils libdigest-sha-perl unzip
+          fi
+          root="$GITHUB_WORKSPACE"
+          rm -rf "$root/reports"
+          mkdir -p "$root/reports" "$root/.gluten-cache" "$root/gluten/.home"
+          for setting in "GLUTEN_ROOT=$root/gluten" "REPORTS=$root/reports" \
+            "GLUTEN_MAVEN_REPO=$root/.gluten-cache/maven" \
+            "GLUTEN_CACHE_ROOT=$root/.gluten-cache/spark" "PIP_CACHE_DIR=$root/.gluten-cache/pip"; do
+            printf '%s\n' "$setting" >> "$GITHUB_ENV"
+            export "${setting?}"
+          done
+          source "$root/bolt/scripts/gluten-ci.sh"
+          spark_environment
+          if [[ "$STAGE" != package ]]; then
+            resource="$SPARK_PROFILE"
+            if [[ "$resource/$SCALA_VERSION" == 3.5/2.13 ]]; then resource+=-scala2.13; fi
+            if [[ ! -f "$SPARK_HOME/.complete" ]]; then
+              mkdir -p "$GLUTEN_CACHE_ROOT"
+              (cd "$GLUTEN_CACHE_ROOT" && bash "$GLUTEN_ROOT/.github/workflows/util/install-spark-resources.sh" "$resource" "$GLUTEN_CACHE_ROOT")
+              ln -sfn "assembly/target/scala-$SCALA_VERSION/jars" "$SPARK_HOME/jars"
+              touch "$SPARK_HOME/.complete"
+            fi
+            test -x "$SPARK_HOME/bin/spark-submit"
+            test -f "$SPARK_HOME/jars/spark-core_${SCALA_VERSION}-${SPARK_VERSION}.jar"
+            virtualenv --system-site-packages "$GLUTEN_ROOT/.venv"
+            deps=("pyspark[sql]==$SPARK_VERSION")
+            if [[ "$SPARK_PROFILE" == 3.* ]]; then deps=("pyspark==$SPARK_VERSION" numpy==1.26.4 pandas==2.2.3 pyarrow==20.0.0); fi
+            "$GLUTEN_ROOT/.venv/bin/python3" -m pip install --cache-dir "$PIP_CACHE_DIR" \
+              --timeout 120 setuptools==77.0.3 Cython==3.3.0 "${deps[@]}"
+          fi
+          chown -R 65534:65534 "$root/bolt" "$GLUTEN_ROOT" "$REPORTS" "$root/.gluten-cache"
+      - name: Build with Apache Gluten Maven profiles
+        id: build
+        run: |
+          source "$GITHUB_WORKSPACE/bolt/scripts/gluten-ci.sh"
+          spark_environment
+          cd "$GLUTEN_ROOT"
+          if [[ "$STAGE" == package ]]; then
+            "${MVN[@]}" -T 4 clean install -DskipTests=true
+            bundles=(package/target/gluten-bolt-bundle-*.jar)
+            test "${#bundles[@]}" = 1
+            unzip -p "${bundles[0]}" gluten-build-info.properties | grep -Fx "bolt_revision=$BOLT_SHA"
+            for lib in libgluten.so libbolt_backend.so libglutenlibloader.so; do
+              expected=$(sha256sum "cpp/build/package/bolt/linux/amd64/$lib" | cut -d ' ' -f1)
+              test "$(unzip -p "${bundles[0]}" "linux/amd64/$lib" | sha256sum | cut -d ' ' -f1)" = "$expected"
+            done
+            { printf 'Verified Bolt revision: %s\n' "$BOLT_SHA"; sha256sum "${bundles[0]}"; } > "$REPORTS/package-verification.txt"
+          else
+            "${MVN[@]}" -T 4 install -Pspark-ut -DskipTests=true -pl '!package'
+            (cd "$GITHUB_WORKSPACE/native" && grep 'cpp/build/package/' SHA256SUMS) | \
+              sed "s@cpp/build/package/bolt/linux/amd64/@backends-bolt/target/scala-$SCALA_VERSION/classes/linux/amd64/@" | sha256sum -c -
+          fi
+      - name: Run upstream Spark and backend test commands
+        if: matrix.stage != 'package'
+        run: |
+          source "$GITHUB_WORKSPACE/bolt/scripts/gluten-ci.sh"
+          spark_environment
+          cd "$GLUTEN_ROOT"
+          excluded=org.apache.gluten.tags.UDFTest,org.apache.gluten.tags.EnhancedFeaturesTest,org.apache.gluten.tags.CudfTest,org.apache.gluten.tags.SkipTest
+          arg_line="-DargLine=-Xmx4g -Dspark.test.home=$SPARK_HOME"
+          module="gluten-ut/spark${SPARK_PROFILE/./}"
+          case "$STAGE" in
+            spark-*|extended|slow-hive)
+              "${MVN[@]}" test -Pspark-ut -pl "!backends-bolt,!$module" "$arg_line"
+              selection=("-DtagsToInclude=$SELECTOR")
+              if [[ "$STAGE" == spark-* ]]; then
+                selection=("-DwildcardSuites=$SELECTOR" "-DtagsToExclude=org.apache.spark.tags.ExtendedSQLTest,org.apache.spark.tags.SlowHiveTest,$excluded")
+              fi
+              "${MVN[@]}" test -Pspark-ut -pl "$module" "${selection[@]}" "$arg_line"
+              check_reports "$GLUTEN_ROOT/$module/target"
+              ;;
+            udf)
+              "${MVN[@]}" scalatest:test -pl backends-bolt "-Dsuites=$SELECTOR" \
+                -DtagsToInclude=org.apache.gluten.tags.UDFTest "$arg_line"
+              check_reports "$GLUTEN_ROOT/backends-bolt/target"
+              ;;
+            jvm)
+              MVN+=("-Dbolt.native.loader.path=$GLUTEN_ROOT/cpp/build/package/bolt/linux/amd64/libglutenlibloader.so")
+              "${MVN[@]}" dependency:build-classpath -pl backends-bolt -DincludeScope=test "-Dmdep.outputFile=$REPORTS/classpath.txt"
+              classes="$GLUTEN_ROOT/backends-bolt/target/scala-$SCALA_VERSION"
+              java --class-path "$classes/test-classes:$classes/classes:$(cat "$REPORTS/classpath.txt")" \
+                "$GITHUB_WORKSPACE/bolt/.github/scripts/DiscoverGlutenSuites.java" "$REPORTS/suites.txt" \
+                "$classes/test-classes" "$classes/classes"
+              loader=org.apache.gluten.jni.BoltNativeLoaderSuite
+              grep -Fxq "$loader" "$REPORTS/suites.txt"
+              ordinary=$(grep -vE '^org\.apache\.spark\.sql\.delta\.|^org\.apache\.gluten\.jni\.BoltNativeLoaderSuite$' "$REPORTS/suites.txt" | paste -sd, -)
+              test -n "$ordinary"
+              "${MVN[@]}" test -pl backends-bolt "-Dsuites=$ordinary" "-DtagsToExclude=$excluded" "$arg_line"
+              check_reports "$GLUTEN_ROOT/backends-bolt/target"
+              cp -a backends-bolt/target/surefire-reports "$REPORTS/ordinary"
+              { printf '%s\n' "$loader"; grep '^org\.apache\.spark\.sql\.delta\.' "$REPORTS/suites.txt"; } > "$REPORTS/isolated.txt"
+              while IFS= read -r suite; do
+                find backends-bolt/target -name 'TEST-*.xml' -delete
+                "${MVN[@]}" scalatest:test -pl backends-bolt "-Dsuites=$suite" "-DtagsToExclude=$excluded" "$arg_line"
+                check_reports "$GLUTEN_ROOT/backends-bolt/target"
+                cp -a backends-bolt/target/surefire-reports "$REPORTS/$suite"
+              done < "$REPORTS/isolated.txt"
+              ;;
+            tpc)
+              "${MVN[@]}" -T 4 install -DskipTests=true
+              cd tools/gluten-it
+              "$GLUTEN_ROOT/build/mvn" -ntp install "-Dmaven.repo.local=$GLUTEN_MAVEN_REPO" \
+                "-Pspark-$SPARK_PROFILE" "-Pjava-$JDK_VERSION"
+              for kind in h ds; do
+                GLUTEN_IT_JVM_ARGS=-Xmx6G bash sbin/gluten-it.sh queries-compare --local --preset=velox \
+                  --baseline-preset=vanilla "--benchmark-type=$kind" --error-on-memleak \
+                  --explain --off-heap-size=10g -s=1.0 --threads=16 --iterations=1 | tee "$REPORTS/tpc-$kind.log"
+                awk '/^Summary: [0-9]+ out of [0-9]+ queries passed\.$/ {n++; if ($2 != $5 || $5 == 0) bad=1} END {exit(n != 1 || bad)}' "$REPORTS/tpc-$kind.log"
+              done
+              ;;
+          esac
+      - uses: actions/cache/save@v4
+        if: ${{ always() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            .gluten-cache/maven
+            .gluten-cache/spark
+            .gluten-cache/pip
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gluten-${{ strategy.job-index }}-reports-${{ github.run_attempt }}
+          path: |
+            reports/
+            gluten/**/target/*reports/
+          if-no-files-found: error
+          retention-days: 7

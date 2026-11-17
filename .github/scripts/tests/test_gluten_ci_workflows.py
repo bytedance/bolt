@@ -36,7 +36,7 @@ from merge_queue_ci import make_fingerprint  # noqa: E402
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github/workflows"
 GLUTEN = "main"
-MIRROR = "bolt_backend_x86.yml"
+MIRROR = "gluten-ci.yaml"
 
 
 def workflow(name):
@@ -58,30 +58,33 @@ def condition(expression, context):
 
 
 class GlutenCIWorkflowsTest(unittest.TestCase):
-    def test_consolidated_branch_has_one_entry_point_and_its_own_driver(self):
-        self.assertFalse((WORKFLOWS / "gluten-bolt.yml").exists())
-        for name in ("gluten_ci.sh", "DiscoverGlutenSuites.java"):
-            self.assertTrue((ROOT / ".github/scripts" / name).is_file(), name)
-
     def assert_candidate_caller(self, job, mode):
         self.assertEqual(job["uses"], f"./.github/workflows/{MIRROR}")
-        helper = "${{ github.sha }}"
-        repository = "${{ github.repository }}"
-        if mode == "native":
-            gluten = "${{ needs.reuse-check.outputs.gluten_sha }}"
-        else:
-            gluten = GLUTEN
         self.assertNotIn("secrets", job)
-        inputs = job["with"]
-        self.assertEqual(inputs["mode"], mode)
-        self.assertEqual(inputs["bolt_repository"], "${{ github.repository }}")
-        self.assertEqual(inputs["bolt_sha"], "${{ github.sha }}")
-        self.assertEqual(inputs["gluten_repository"], "apache/gluten")
-        self.assertEqual(inputs["helper_repository"], repository)
-        self.assertEqual(inputs["gluten_sha"], gluten)
-        self.assertEqual(inputs["helper_sha"], helper)
-        self.assertEqual(inputs["driver_repository"], repository)
-        self.assertEqual(inputs["driver_sha"], helper)
+        self.assertEqual(
+            job["with"],
+            {
+                "mode": mode,
+                "bolt_sha": "${{ github.sha }}",
+                "gluten_sha": "${{ needs.reuse-check.outputs.gluten_sha }}"
+                if mode == "native"
+                else "main",
+            },
+        )
+
+    def test_nightly_matrix_preserves_all_38_downstream_tasks(self):
+        cells = workflow(MIRROR)["jobs"]["spark"]["strategy"]["matrix"]["include"]
+        self.assertEqual(len(cells), 38)
+        self.assertEqual(len({cell["id"] for cell in cells}), 38)
+        self.assertEqual(
+            {cell["spark"] for cell in cells}, {"3.5", "4.0", "4.1", "4.2"}
+        )
+        self.assertEqual(sum(c["stage"] == "package" for c in cells), 12)
+        for version in ("3.5", "4.0", "4.1", "4.2"):
+            stages = {c["stage"] for c in cells if c["spark"] == version}
+            self.assertTrue(
+                {"spark-1", "spark-2", "spark-3", "extended", "slow-hive"} <= stages
+            )
 
     def test_pr_compile_and_source_artifact_require_compile_or_verified_reuse(self):
         build = workflow("build-test.yml")
@@ -226,25 +229,31 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
             self.assertNotEqual(candidate, key(caller, mirror + b"\n"))
             self.assertNotEqual(candidate, key(caller, mirror, base="b" * 40))
 
-    def test_workflow_uses_only_bolt_owned_helpers(self):
+    def test_workflow_uses_candidate_checkout_and_persistent_dependency_cache(self):
         definition = workflow(MIRROR)
         self.assertEqual(set(definition["on"]), {"workflow_call", "workflow_dispatch"})
-        self.assertEqual(
-            definition["jobs"]["downstream"]["if"], "inputs.mode == 'full'"
+        self.assertEqual(definition["jobs"]["spark"]["if"], "inputs.mode == 'full'")
+        for name in ("native", "spark"):
+            checkouts = [
+                s["with"]
+                for s in definition["jobs"][name]["steps"]
+                if s.get("uses", "").startswith("actions/checkout@")
+            ]
+            self.assertEqual(len(checkouts), 2)
+            self.assertEqual(checkouts[0]["ref"], "${{ env.BOLT_SHA }}")
+            self.assertEqual(checkouts[1]["repository"], "apache/gluten")
+            self.assertEqual(checkouts[1]["ref"], "${{ env.GLUTEN_SHA }}")
+        cache = next(
+            s["with"]
+            for s in definition["jobs"]["spark"]["steps"]
+            if s.get("uses", "").startswith("actions/cache/restore@")
         )
-        for name in ("prepare", "native", "downstream"):
-            steps = definition["jobs"][name]["steps"]
-            checkout = next(
-                step["with"]
-                for step in steps
-                if step.get("uses", "").startswith("actions/checkout@")
-            )
-            self.assertEqual(checkout["repository"], "${{ inputs.helper_repository }}")
-            self.assertEqual(checkout["ref"], "${{ inputs.helper_sha }}")
-        prepare = definition["jobs"]["prepare"]["steps"][-1]["run"]
-        self.assertIn("scripts/gluten-ci/actions.py prepare", prepare)
-        self.assertTrue((ROOT / "scripts/gluten-ci/run.py").is_file())
-        self.assertTrue((ROOT / ".github/actions/bolt-ci-task/action.yml").is_file())
+        self.assertEqual(
+            cache["path"].split(),
+            [".gluten-cache/maven", ".gluten-cache/spark", ".gluten-cache/pip"],
+        )
+        self.assertIn("matrix.scala", cache["key"])
+        self.assertIn("hashFiles", cache["key"])
 
 
 class GlutenReuseEvidenceTest(unittest.TestCase):
