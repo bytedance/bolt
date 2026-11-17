@@ -699,6 +699,91 @@ TEST_P(HashTableTest, clear) {
       GetParam().jitRowEqVectors);
   table->setSimdEnabled(false);
   ASSERT_NO_THROW(table->clear());
+  ASSERT_NO_THROW(table->clear(/*freeTable=*/true));
+  EXPECT_EQ(nullptr, table->testingTable());
+  EXPECT_EQ(0, table->capacity());
+  ASSERT_NO_THROW(table->clear(/*freeTable=*/true));
+}
+
+TEST_P(HashTableTest, clearAndReuse) {
+  const std::vector<RowVectorPtr> inputs{
+      makeRowVector(
+          {makeFlatVector<int64_t>(128, [](auto row) { return row; })}),
+      makeRowVector({
+          makeFlatVector<int64_t>(
+              2'048,
+              [](auto row) {
+                return static_cast<int64_t>(row) * 1'000'000'007;
+              }),
+          makeFlatVector<int64_t>(
+              2'048,
+              [](auto row) {
+                return static_cast<int64_t>(row) * 1'000'000'009;
+              }),
+      }),
+      makeRowVector(
+          {makeFlatVector<double>(128, [](auto row) { return row; })}),
+  };
+  const std::vector<BaseHashTable::HashMode> modes{
+      BaseHashTable::HashMode::kArray,
+      BaseHashTable::HashMode::kNormalizedKey,
+      BaseHashTable::HashMode::kHash,
+  };
+  for (int32_t i = 0; i < inputs.size(); ++i) {
+    for (bool simdEnabled : {false, true}) {
+      for (bool freeTable : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "mode {}, simd {}, freeTable {}",
+            modes[i],
+            simdEnabled,
+            freeTable));
+        auto table = createHashTableForAggregation(
+            inputs[i]->type(),
+            inputs[i]->childrenSize(),
+            GetParam().jitRowEqVectors);
+        table->setSimdEnabled(simdEnabled);
+        HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+        SelectivityVector rows(inputs[i]->size());
+        for (int32_t round = 0; round < 3; ++round) {
+          table->prepareForGroupProbe(
+              lookup,
+              inputs[i],
+              rows,
+              false,
+              BaseHashTable::kNoSpillInputStartPartitionBit);
+          table->groupProbe(lookup);
+          EXPECT_EQ(modes[i], table->hashMode());
+          EXPECT_EQ(inputs[i]->size(), table->numDistinct());
+          table->prepareForGroupProbe(
+              lookup,
+              inputs[i],
+              rows,
+              false,
+              BaseHashTable::kNoSpillInputStartPartitionBit);
+          table->groupProbe(lookup);
+          EXPECT_TRUE(lookup.newGroups.empty());
+          table->checkConsistency();
+
+          const auto capacity = table->capacity();
+          auto* lookupTable = table->testingTable();
+          const auto usedBytes = pool()->currentBytes();
+          table->clear(freeTable);
+          EXPECT_EQ(0, table->rows()->numRows());
+          EXPECT_EQ(0, table->numDistinct());
+          if (freeTable) {
+            EXPECT_EQ(nullptr, table->testingTable());
+            EXPECT_EQ(0, table->capacity());
+            EXPECT_GE(
+                usedBytes - pool()->currentBytes(), capacity * sizeof(char*));
+          } else {
+            EXPECT_EQ(lookupTable, table->testingTable());
+            EXPECT_EQ(capacity, table->capacity());
+          }
+          table->clear(freeTable);
+        }
+      }
+    }
+  }
 }
 
 // Test a specific code path in HashTable::decodeHashMode where

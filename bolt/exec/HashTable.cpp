@@ -903,7 +903,7 @@ void HashTable<ignoreNullKeys>::allocateTables(uint64_t size) {
 }
 
 template <bool ignoreNullKeys>
-void HashTable<ignoreNullKeys>::clear() {
+void HashTable<ignoreNullKeys>::clear(bool freeTable) {
   if (hybridData_) {
     for (auto* hybridContainer : allHybridContainers()) {
       hybridContainer->clear();
@@ -914,8 +914,18 @@ void HashTable<ignoreNullKeys>::clear() {
     }
   }
   if (table_) {
-    // All modes have 8 bytes per slot.
-    memset(table_, 0, capacity_ * sizeof(char*));
+    if (freeTable) {
+      rows_->pool()->freeContiguous(tableAllocation_);
+      table_ = nullptr;
+      capacity_ = 0;
+      sizeMask_ = 0;
+      numBuckets_ = 0;
+      sizeBits_ = 0;
+      bucketOffsetMask_ = 0;
+    } else {
+      // All modes have 8 bytes per slot.
+      memset(table_, 0, capacity_ * sizeof(char*));
+    }
   }
   numDistinct_ = 0;
   numTombstones_ = 0;
