@@ -901,8 +901,19 @@ PYTHON
         self.assertEqual(result["status"], "failure")
         self.assertFalse((self.paths["source"] / NATIVE_LIBRARIES[0]).exists())
 
-    def test_default_driver_pin_rejects_mismatched_driver_before_sourcing_it(self):
+    def test_cli_uses_selected_driver_checkout_without_a_revision_override(self):
         del self.env["GLUTEN_CI_DRIVER_SHA"]
+        self.fake_maven_packages_jar()
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(result["status"], "success")
+        sources = json.loads((self.paths["reports"] / "sources.json").read_text())
+        self.assertEqual(sources["driver_sha"], run.git_sha(self.paths["driver"]))
+
+    def test_explicit_driver_revision_rejects_mismatched_driver_before_sourcing_it(
+        self,
+    ):
+        self.env["GLUTEN_CI_DRIVER_SHA"] = "0" * 40
         self.executable(
             self.paths["driver"] / ".github/scripts/gluten_ci.sh",
             'touch "$GLUTEN_REPORTS_DIR/driver-ran.txt"\nexit 37\n',

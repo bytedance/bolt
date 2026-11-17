@@ -36,7 +36,6 @@ from merge_queue_ci import make_fingerprint  # noqa: E402
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github/workflows"
 GLUTEN = "main"
-DRIVER = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
 MIRROR = "bolt_backend_x86.yml"
 
 
@@ -64,18 +63,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         for name in ("gluten_ci.sh", "DiscoverGlutenSuites.java"):
             self.assertTrue((ROOT / ".github/scripts" / name).is_file(), name)
 
-    def assert_pinned_caller(self, job, mode):
+    def assert_candidate_caller(self, job, mode):
         self.assertEqual(job["uses"], f"./.github/workflows/{MIRROR}")
+        helper = "${{ github.sha }}"
+        repository = "${{ github.repository }}"
         if mode == "native":
-            helper = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
-            repository = "bytedance/bolt"
             gluten = "${{ needs.reuse-check.outputs.gluten_sha }}"
         else:
-            helper, repository, gluten = (
-                "${{ github.sha }}",
-                "${{ github.repository }}",
-                GLUTEN,
-            )
+            gluten = GLUTEN
         self.assertNotIn("secrets", job)
         inputs = job["with"]
         self.assertEqual(inputs["mode"], mode)
@@ -86,14 +81,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         self.assertEqual(inputs["gluten_sha"], gluten)
         self.assertEqual(inputs["helper_sha"], helper)
         self.assertEqual(inputs["driver_repository"], repository)
-        self.assertEqual(inputs["driver_sha"], DRIVER if mode == "native" else helper)
+        self.assertEqual(inputs["driver_sha"], helper)
 
     def test_pr_compile_and_source_artifact_require_compile_or_verified_reuse(self):
         build = workflow("build-test.yml")
         self.assertEqual(set(build["on"]), {"pull_request", "merge_group"})
         jobs = build["jobs"]
         compile_job = jobs["gluten-backend-compile"]
-        self.assert_pinned_caller(compile_job, "native")
+        self.assert_candidate_caller(compile_job, "native")
         self.assertEqual(compile_job["needs"], "reuse-check")
         source = jobs["source-result"]
         self.assertIn("gluten-backend-compile", source["needs"])
@@ -177,7 +172,7 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
             workflow("build-test.yml")["concurrency"]["group"],
         )
         (job,) = nightly["jobs"].values()
-        self.assert_pinned_caller(job, "full")
+        self.assert_candidate_caller(job, "full")
         for event, repo, ref, expected in (
             ("schedule", "bytedance/bolt", "refs/heads/main", True),
             ("schedule", "contributor/bolt", "refs/heads/main", False),

@@ -39,7 +39,7 @@ on:
         required: true
         type: string
       helper_repository:
-        description: Repository containing the trusted Gluten CI helpers
+        description: Repository containing the Gluten CI helpers
         required: true
         type: string
       helper_sha:
@@ -47,15 +47,13 @@ on:
         required: true
         type: string
       driver_repository:
-        description: Repository containing the trusted Bolt Spark test driver
-        required: false
+        description: Repository containing the Bolt Spark test driver
+        required: true
         type: string
-        default: 'bytedance/bolt'
       driver_sha:
-        description: Exact trusted Bolt Spark test driver commit
-        required: false
+        description: Exact Bolt Spark test driver commit
+        required: true
         type: string
-        default: '1b92382a4c21a2da191d7fbad5a90306d75e7885'
       runner_labels:
         description: JSON array of Bolt self-hosted runner labels
         required: false
@@ -90,7 +88,7 @@ on:
         required: true
         type: string
       helper_repository:
-        description: Repository containing the trusted Gluten CI helpers
+        description: Repository containing the Gluten CI helpers
         required: true
         type: string
       helper_sha:
@@ -98,15 +96,13 @@ on:
         required: true
         type: string
       driver_repository:
-        description: Repository containing the trusted Bolt Spark test driver
-        required: false
+        description: Repository containing the Bolt Spark test driver
+        required: true
         type: string
-        default: 'bytedance/bolt'
       driver_sha:
-        description: Exact trusted Bolt Spark test driver commit
-        required: false
+        description: Exact Bolt Spark test driver commit
+        required: true
         type: string
-        default: '1b92382a4c21a2da191d7fbad5a90306d75e7885'
       runner_labels:
         description: JSON array of Bolt self-hosted runner labels
         required: false
@@ -201,7 +197,7 @@ jobs:
           ref: ${{ inputs.helper_sha }}
           path: bolt-ci-helpers
           persist-credentials: false
-      - name: Verify the trusted helper checkout
+      - name: Verify the selected helper checkout
         run: test "$(git -C bolt-ci-helpers rev-parse HEAD)" = "$HELPER_SHA"
       - id: task
         uses: ./bolt-ci-helpers/.github/actions/bolt-ci-task
@@ -232,7 +228,7 @@ jobs:
           ref: ${{ inputs.helper_sha }}
           path: bolt-ci-helpers
           persist-credentials: false
-      - name: Verify the trusted helper checkout
+      - name: Verify the selected helper checkout
         run: test "$(git -C bolt-ci-helpers rev-parse HEAD)" = "$HELPER_SHA"
       - uses: ./bolt-ci-helpers/.github/actions/bolt-ci-task
         with:

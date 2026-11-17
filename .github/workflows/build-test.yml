@@ -290,11 +290,10 @@ jobs:
       bolt_sha: ${{ github.sha }}
       gluten_repository: apache/gluten
       gluten_sha: ${{ needs.reuse-check.outputs.gluten_sha }}
-      # Pin privileged task helpers independently of the Bolt candidate.
-      helper_repository: bytedance/bolt
-      helper_sha: 1b92382a4c21a2da191d7fbad5a90306d75e7885
-      driver_repository: bytedance/bolt
-      driver_sha: 1b92382a4c21a2da191d7fbad5a90306d75e7885
+      helper_repository: ${{ github.repository }}
+      helper_sha: ${{ github.sha }}
+      driver_repository: ${{ github.repository }}
+      driver_sha: ${{ github.sha }}
 
   source-result:
     needs: [reuse-check, changes, build-test, build-only, python-check, gluten-backend-compile, gluten-ci-check]

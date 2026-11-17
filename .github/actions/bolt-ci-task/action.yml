@@ -15,7 +15,7 @@
 
 
 name: Gluten Bolt task
-description: Run a task from the pinned Gluten CI matrix
+description: Run a task from the selected Gluten CI matrix
 inputs:
   task:
     description: Canonical task ID
@@ -79,7 +79,7 @@ runs:
         name: ${{ inputs.native_artifact }}
         path: bolt-ci-work/native-input
     - id: task
-      name: Run the pinned task
+      name: Run the selected task
       shell: bash
       env:
         CI_TASK: ${{ inputs.task }}

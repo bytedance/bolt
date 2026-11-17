@@ -25,23 +25,20 @@ and 26 Spark/JVM/connector tasks. Spark 3.4 is intentionally outside this scope.
 ## Entry points
 
 The callable/manual workflow is `.github/workflows/bolt_backend_x86.yml`, called
-locally by Bolt's PR and nightly workflows. PRs load the composite action and
-helpers from a reviewed Bolt commit, independently of the candidate passed as
-build input. The same pinned revision contains the Spark driver; no separate
-PR branch is needed. Nightly uses the protected main revision for both helpers
-and driver. There is no fork workflow
-dependency or runtime patching of Apache Gluten source.
-
-The workflow definition follows Bolt's existing PR review model. Pinning helpers
-prevents candidate helper changes from running before privilege dropping; it does
-not isolate arbitrary modifications to the calling workflow or runner settings.
+locally by Bolt's PR and nightly workflows. PRs use the same candidate commit for
+the Bolt engine, composite action, helpers and Spark driver. Nightly uses the
+main commit for all four. There is no fork workflow dependency or runtime
+patching of Apache Gluten source. These workflows follow Bolt's existing PR
+review model.
 
 PRs resolve Apache main before checking merge-queue reuse. Reuse requires matching
 Gluten SHA evidence from the trusted gate; old records without it are misses.
 The gate begins preserving this evidence after this change reaches main.
 
-The CLI requires clean Gluten, Bolt and driver checkouts before building or
-consuming commit-keyed artifacts, including no untracked source files.
+The CLI uses the selected driver checkout; `GLUTEN_CI_DRIVER_SHA` can require an
+exact revision when reproducing a run. It requires clean Gluten, Bolt and driver
+checkouts before building or consuming commit-keyed artifacts, including no
+untracked source files.
 Each task uses separate writable caches and report directories. Native artifacts
 are checked before downstream reuse. Test mode requires nonzero passing evidence;
 compile mode explicitly records zero tests. PR artifacts cannot substitute for

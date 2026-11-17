@@ -32,7 +32,6 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_DRIVER_SHA = "1b92382a4c21a2da191d7fbad5a90306d75e7885"
 NATIVE_PACKAGE = PurePosixPath("cpp/build/package/bolt/linux/amd64")
 NATIVE_RUNTIME = PurePosixPath("bolt-runtime")
 UDF_EXAMPLES = PurePosixPath("cpp/build/Release/bolt/udf/examples")
@@ -93,12 +92,14 @@ def git_sha(checkout):
 
 
 def identity_for(args):
-    expected_driver = os.environ.get("GLUTEN_CI_DRIVER_SHA", DEFAULT_DRIVER_SHA)
+    driver = git_sha(args.driver)
+    expected_driver = os.environ.get("GLUTEN_CI_DRIVER_SHA", driver)
     if not re.fullmatch(r"[0-9a-f]{40}", expected_driver):
         raise ValueError("Invalid GLUTEN_CI_DRIVER_SHA")
-    driver = git_sha(args.driver)
     if driver != expected_driver:
-        raise ValueError("Bolt CI driver revision does not match the trusted pin")
+        raise ValueError(
+            "Bolt CI driver revision does not match the requested revision"
+        )
     for checkout in (args.source, args.bolt, args.driver):
         changes = subprocess.check_output(
             [
