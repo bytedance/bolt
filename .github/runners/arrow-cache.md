@@ -14,83 +14,68 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Arrow source cache
+# Conan source backups
 
-Seeds checksum-verified source archives from `arrow-cache-sources.json` (Arrow
-15.0.1 and Substrait 0.27.0 by default). Existing valid blobs in
-`conan-source-cache/s` are reused.
-No GitHub token or repository variable is needed. Source archives are separate
-from Conan binary packages: Gluten can request Arrow sources even when its
-binary package is already cached.
+The existing Conan server also serves read-only source archives on port 9301.
+Archives live in `${HOST_DATA_DIR}/conan-server-data/source-backup/s`, alongside
+binary storage but outside the package layout. CI already mounts this data into
+its `conanserver` service; no additional workflow service, host address or source
+cache image layer is needed.
 
-## Deploy
+## Deploy on each ECS
 
-Run as root in the ECS shell, using this PR's checkout:
+Use this PR's checkout and the current CI image available on the host:
 
 ```bash
 cd /root/projects/bolt/.github/runners
 export HOST_DATA_DIR=/data
-export BOLT_ARROW_CACHE_DIR="$HOST_DATA_DIR/conan-source-cache"
-# Use runners to replace an existing bolt-source-cache service in that project.
-# For a separate deployment, use bolt-arrow-cache instead.
-export ARROW_CACHE_PROJECT=runners
-python3 arrow-cache.py up
+export BOLT_CI_IMAGE=localhost:5000/bolt-ci:20260921
+python3 arrow-cache.py up --project runners \
+  --seed-dir "$HOST_DATA_DIR/conan-source-cache/s"
 ```
 
-Use `up --manifest /path/to/sources.json` for another source set. Each entry in
-`{"sources": [...]}` has a `name`, `sha256` and `urls` list. The manifest is
-installed both beside the helper and at `s/manifest.json`; deployed commands
-and CI jobs do not need the original checkout or manifest path.
+`up` uses `install-bolt-deps.sh` and `conan source` to prepare Arrow 15.0.1-oss,
+including the Substrait archive requested by that recipe. `--cci-ref` selects
+the recipe-index branch/tag used by CI; `--version` selects the Arrow version.
+Conan owns the URLs and checksums. Valid archives from `--seed-dir` are reused;
+omit it for a new deployment. `prepare` only warms the data, without deployment.
 
-`up` downloads missing/corrupt blobs atomically, checks their SHA-256 hashes,
-installs the helper, Nginx configuration and Compose file under `BOLT_ARROW_CACHE_DIR`, and starts
-only `bolt-source-cache`. It does not recreate runners, Conan or the registry.
-A conflicting port fails startup; it never stops an unrelated service.
+The command builds and pushes the existing `conan-server:latest` image through
+`docker-compose.yml`, then updates only `conan_server`. The registry must already
+be running, and the stack's `variables.env` must exist. It does not restart runners
+or change their registration. Run between jobs that use the host Conan server.
+Each ECS needs the source data; each registry used by runners needs the new server
+image. New Actions jobs pull that image automatically.
 
-The Nginx service defaults to `127.0.0.1:9301`; set `ARROW_CACHE_PORT` to change
-it. Use `ARROW_CACHE_BIND` only when explicitly exposing the mirror on another
-interface. Containers on the same Compose network can use
-`http://bolt-source-cache:8080/s/`. This hostname is not automatically available
-inside a runner's nested Docker daemon. GitHub jobs use the image layer below.
-Only the configured archive hashes and `/healthz` are served; there are no write or
-listing endpoints. `python3 arrow-cache.py stop` preserves all cached files.
-For a combined stack, include the installed `compose.arrow-cache.yml` with the
-existing Compose files. `prepare` installs the files without starting Docker.
+CI configures Conan's native source backup support through the generic job service
+URL `http://conanserver:9301/s/`. No ECS hostname, IP or source credentials are passed
+to the job or printed in its logs. If the endpoint is absent during setup, existing
+Conan settings are preserved. Once enabled, a service outage is a Conan error;
+a missing archive falls back to its original URL. Nginx permits only hash-named
+archive reads and synthetic empty Conan metadata; private metadata, directory
+listings and upload endpoints are unavailable.
+The port need not be published on the ECS host.
 
-## Enable automatic CI use
+The old standalone `bolt-source-cache` container can be stopped after migration;
+its data is retained. Arrow and Substrait no longer need to be baked into the CI
+image. Refresh sources with `prepare`; an archive refresh does not rebuild images.
 
-Build a cache layer on the **current** CI image; the original Dockerfile and
-compiler layers are unchanged. Use a distinct output tag to preserve the base image:
+## Optional Maven, Spark and pip seeds
+
+The separate `image` command still supports trusted HOME dependency seeds:
 
 ```bash
 python3 arrow-cache.py image \
   --image localhost:5000/bolt-ci:20260921 \
-  --output-image localhost:5000/bolt-ci:20260921-cache
+  --output-image localhost:5000/bolt-ci:20260921-home-cache \
+  --home-seed /path/to/trusted-prewarmed-home
 ```
 
-Optionally add `--home-seed /path/to/trusted-prewarmed-home`. Only `.m2/repository`,
-`.cache/pip` and `.cache/spark` are included; settings, credentials and job outputs
-are excluded. Spark archives belong under `.cache/spark/shims/` in the layout
-produced by Gluten's `install-spark-resources.sh`. Use trusted prewarming output,
-not dependencies modified by a PR. Missing packages still download normally.
-
-The layer uses `BASH_ENV` to populate each job's private HOME/CONAN_HOME silently.
-It supports the non-login Bash shells used by Actions and changed HOME after
-privilege dropping. Existing job files are preserved; tasks never write back to
-the seed. Missing or invalid optional seeds do not block shell startup. A base
-image already defining `BASH_ENV` is rejected rather than replacing its setup.
-Source hashes are verified before import. Internal download URLs are not copied
-into the image. The workflow needs no source-cache mounts or initialization step.
-
-Publish the image to the registry used by the runners. Keep the
-original image digest for rollback. Updating the existing CI tag requires no
-workflow change; using another tag requires changing the workflow image reference.
-For later refreshes, pass the original unmodified base digest to `--image`, not
-the tag that now points to the cache layer.
-Each ECS registry must receive the image. Do this between jobs; no runner
-re-registration is needed. Cache snapshots are refreshed by rebuilding this layer,
-not by saving untrusted job output. This trades automatic write-back for isolation.
-
-The standalone HTTP service remains optional and independent of the CI image.
-Updating Arrow's recipe version requires reviewing the URLs and hashes in
-`arrow-cache-sources.json`.
+Only `.m2/repository`, `.cache/pip` and `.cache/spark` are copied. Spark archives
+use the `.cache/spark/shims/` layout from Gluten's `install-spark-resources.sh`.
+Credentials and job outputs are excluded. `BASH_ENV` imports these into private
+job HOME directories without overwriting existing files or writing back to seeds.
+Missing seeds do not block startup. The original base must not define `BASH_ENV`;
+use its unmodified digest when refreshing this optional layer. Publish it to the
+runner registry separately. This command does not contain or configure Arrow
+source backups and is not required for the deployment above.

@@ -16,10 +16,11 @@ Nightly preserves 39 tasks: native UT, 12 package configurations and 26
 Spark/JVM/connector groups for Spark 3.5, 4.0, 4.1 and 4.2. Spark 3.4 is excluded.
 The loader and Delta backend suites use separate JVMs to avoid native conflicts.
 Conan server packages and shared read-only ccache reuse the existing ECS setup.
-[Cache deployment](../.github/runners/arrow-cache.md) can add verified source archives
-and trusted Maven/Spark/pip seeds to the CI image. Jobs use private copies
-automatically; without seeds, dependencies download normally. Only ccache has
-explicit cache configuration in the workflow. No cache service address is required.
+[Cache deployment](../.github/runners/arrow-cache.md) adds source backups to the
+existing Conan server. Conan retrieves them through the generic job service name;
+no source archives are baked into the CI image. Optional Maven/Spark/pip image
+seeds populate private job caches automatically. Only ccache has explicit cache
+configuration in the workflow. No ECS address or repository variable is required.
 
 Use the reusable workflow's manual `full` mode to validate the complete matrix.
 CI helpers and the engine use the same selected Bolt revision. Native artifacts

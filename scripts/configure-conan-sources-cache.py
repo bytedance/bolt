@@ -29,15 +29,24 @@ import os
 import secrets
 import subprocess
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True, help="Conan source repository URL")
-    parser.add_argument("--user", required=True, help="Conan source repository user")
+    parser.add_argument(
+        "--user", help="Conan source repository user (omit for public reads)"
+    )
+    parser.add_argument(
+        "--optional",
+        action="store_true",
+        help="Keep current settings if the URL is unavailable",
+    )
     args = parser.parse_args()
     args.password = os.environ.get("CONAN_SOURCE_PASSWORD")
-    if not args.password:
+    if args.user and not args.password:
         parser.error("CONAN_SOURCE_PASSWORD environment variable is required")
     return args
 
@@ -168,9 +177,16 @@ def secure_write(path: Path, text: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.optional:
+        try:
+            with urlopen(Request(args.url, method="HEAD"), timeout=3):
+                pass
+        except (OSError, URLError, ValueError):
+            return
     home = conan_home()
     configure_global_conf(home, args.url)
-    configure_source_credentials(home, args.url, args.user, args.password)
+    if args.user:
+        configure_source_credentials(home, args.url, args.user, args.password)
 
 
 if __name__ == "__main__":

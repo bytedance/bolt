@@ -130,6 +130,8 @@ build_native() (
   # Use Bolt's CI toolchain profile for both Bolt and Gluten.
   python "$BOLT_ROOT/scripts/configure-conan-profile.py" \
     --compiler "$CC" --libcxx libstdc++11 --linker mold --lto none
+  python "$BOLT_ROOT/scripts/configure-conan-sources-cache.py" \
+    --url http://conanserver:9301/s/ --optional
   git -C "$BOLT_ROOT" diff --exit-code HEAD --
   BOLT_SHA=$(git -C "$BOLT_ROOT" rev-parse HEAD)
   export BOLT_BUILD_VERSION="ci-$BOLT_SHA"

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     git \
     build-essential \
+    nginx \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up Python environment
@@ -33,12 +34,13 @@ RUN mkdir -p /var/conan/
 # Copy Conan server configuration and start script
 COPY conanserver/server.conf /var/conan/server.conf.base
 COPY conanserver/start-conan-server.sh /usr/local/bin/start-conan-server.sh
+COPY conanserver/source-cache.conf /etc/nginx/source-cache.conf
 
 # Make start script executable
 RUN chmod +x /usr/local/bin/start-conan-server.sh
 
 # Expose Conan server port
-EXPOSE 9300
+EXPOSE 9300 9301
 
 # Start Conan server using the custom script
 CMD ["/usr/local/bin/start-conan-server.sh"]

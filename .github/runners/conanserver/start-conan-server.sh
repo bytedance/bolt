@@ -40,5 +40,8 @@ else
 EOF
 fi
 
+# Serve source backups from the existing data mount; clients cannot upload here.
+nginx -c /etc/nginx/source-cache.conf
+
 # Start Conan server
 exec conan_server

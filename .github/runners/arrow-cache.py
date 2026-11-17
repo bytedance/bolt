@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Deploy an Arrow source mirror and seed job-private Conan download caches."""
+"""Prewarm Conan source backups and deploy the existing Conan server."""
 
 import argparse
 import hashlib
@@ -24,35 +24,6 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import urlopen
-
-
-def load_sources(manifest):
-    data = json.loads(manifest.read_text())
-    sources = data.get("sources") if isinstance(data, dict) else None
-    if not isinstance(sources, list) or not sources:
-        raise ValueError("Source manifest must contain a nonempty sources list")
-    seen = set()
-    for source in sources:
-        if not isinstance(source, dict):
-            raise ValueError("Source entry must be an object")
-        name, sha, urls = (source.get(key) for key in ("name", "sha256", "urls"))
-        if (
-            not isinstance(name, str)
-            or not name
-            or not isinstance(sha, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", sha)
-            or sha in seen
-            or not isinstance(urls, list)
-            or not urls
-            or not all(isinstance(url, str) and url for url in urls)
-        ):
-            raise ValueError(
-                "Source entry needs a name, unique SHA-256 and download URLs"
-            )
-        seen.add(sha)
-    return sources
 
 
 def digest(path):
@@ -79,68 +50,54 @@ def atomic_copy(source, destination):
             temporary.unlink(missing_ok=True)
 
 
-def check_seed(seed, sources):
-    for source in sources:
-        path = seed / source["sha256"]
-        if not path.is_file() or digest(path) != source["sha256"]:
-            raise ValueError(f"Missing or corrupt cache entry: {source['name']}")
-
-
-def warm(seed, sources):
-    seed.mkdir(parents=True, exist_ok=True)
-    seed.chmod(0o755)
-    for source in sources:
-        target = seed / source["sha256"]
-        if target.is_symlink():
-            raise ValueError("Refusing a symlink cache entry")
-        if target.is_file() and digest(target) == source["sha256"]:
-            target.chmod(0o644)
-            print(f"Cached: {source['name']}", flush=True)
-            continue
-        for url in source["urls"]:
-            print(f"Downloading: {source['name']}", flush=True)
-            with tempfile.NamedTemporaryFile(dir=seed, delete=False) as temp:
-                temporary = Path(temp.name)
-                try:
-                    with urlopen(url, timeout=60) as response:
-                        shutil.copyfileobj(response, temp)
-                    temp.flush()
-                    if digest(temporary) != source["sha256"]:
-                        raise ValueError("Source checksum mismatch")
-                    os.fchmod(temp.fileno(), 0o644)
-                    os.replace(temporary, target)
-                    break
-                except (OSError, URLError, ValueError):
-                    # Do not put operator URLs or machine details in CI logs.
-                    print(f"Download failed: {source['name']}", flush=True)
-                finally:
-                    temporary.unlink(missing_ok=True)
-        else:
-            raise ValueError(f"Unable to seed {source['name']}; no valid download")
-    check_seed(seed, sources)
-
-
-def configure_local(seed, home, sources, quiet=False):
-    """Copy blobs, never share Conan's writable metadata/locks with the seed."""
-    check_seed(seed, sources)
-    cache = home / "source-backup"
-    for source in sources:
-        target = cache / "s" / source["sha256"]
-        atomic_copy(seed / source["sha256"], target)
-        # Stale metadata/dirty markers could force an unnecessary re-download.
-        target.with_suffix(".json").unlink(missing_ok=True)
-        target.with_suffix(".dirty").unlink(missing_ok=True)
-    conf = home / "global.conf"
-    settings = {
-        "core.sources:download_cache": str(cache),
-        "core.sources:download_urls": '["origin"]',
-    }
-    lines = conf.read_text().splitlines() if conf.exists() else []
-    lines = [line for line in lines if line.partition("=")[0].strip() not in settings]
-    lines.extend(f"{key}={value}" for key, value in settings.items())
-    conf.write_text("\n".join(lines) + "\n")
-    if not quiet:
-        print("Source archives configured in the private Conan source cache")
+def prepare(root, image, version, cci_ref, seed_dir):
+    cache = root / "conan-server-data/source-backup"
+    cache.mkdir(parents=True, exist_ok=True)
+    # Reuse verified archives from older ECS deployments, without their metadata.
+    if seed_dir and seed_dir.is_dir():
+        for source in seed_dir.iterdir():
+            if re.fullmatch(r"[0-9a-f]{64}", source.name) and source.is_file():
+                if digest(source) == source.name:
+                    atomic_copy(source, cache / "s" / source.name)
+    installer = Path(__file__).resolve().parents[2] / "scripts/install-bolt-deps.sh"
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "root",
+            "-e",
+            "BASH_ENV=",
+            "-e",
+            "CONAN_HOME=/tmp/conan",
+            "-v",
+            f"{cache}:/source-cache",
+            "-v",
+            f"{installer}:/opt/install-bolt-deps.sh:ro",
+            "--entrypoint",
+            "/bin/bash",
+            image,
+            "-euc",
+            "mkdir -p /tmp/bolt/scripts; git init -q /tmp/bolt; "
+            "cp /opt/install-bolt-deps.sh /tmp/bolt/scripts/; "
+            'bash /tmp/bolt/scripts/install-bolt-deps.sh --branch "$1"; '
+            'conan source "$CONAN_HOME/conan-center-index/recipes/arrow/all" '
+            '--version="$2" -cc core.sources:download_cache=/source-cache',
+            "prewarm",
+            cci_ref,
+            version,
+        ],
+        check=True,
+    )
+    # Only content-addressed archives are exposed by Nginx.
+    for directory in (cache, cache / "s"):
+        directory.chmod(0o755)
+    for archive in (cache / "s").iterdir():
+        if re.fullmatch(r"[0-9a-f]{64}", archive.name) and archive.is_file():
+            if digest(archive) != archive.name:
+                raise ValueError("Source backup checksum mismatch")
+            archive.chmod(0o644)
 
 
 def copy_home_cache(source, destination):
@@ -176,15 +133,6 @@ def copy_home_cache(source, destination):
 def auto_configure(root):
     """Optional image bootstrap; unavailable caches must not break a build."""
     home = Path(os.environ["HOME"])
-    conan = Path(os.environ.get("CONAN_HOME", str(home / ".conan2")))
-    try:
-        marker = conan / ".bolt-source-cache-ready"
-        if not marker.exists():
-            sources = load_sources(root / "s/manifest.json")
-            configure_local(root / "s", conan, sources, quiet=True)
-            marker.touch()
-    except (OSError, ValueError):
-        pass
     try:
         marker = home / ".cache/.bolt-home-cache-ready"
         if (root / "home").is_dir() and not marker.exists():
@@ -195,12 +143,11 @@ def auto_configure(root):
         pass
 
 
-def build_image(root, image, output, home_seed, sources):
+def build_image(image, output, home_seed):
     if not output or output == image:
         raise ValueError(
             "Use --output-image with a distinct tag to preserve the base image"
         )
-    check_seed(root / "s", sources)
     config = json.loads(subprocess.check_output(["docker", "image", "inspect", image]))[
         0
     ]["Config"]
@@ -215,23 +162,6 @@ def build_image(root, image, output, home_seed, sources):
         context = Path(directory)
         seed = context / "cache"
         seed.mkdir()
-        for source in sources:
-            atomic_copy(root / "s" / source["sha256"], seed / "s" / source["sha256"])
-        # The image contains no operator download URLs.
-        (seed / "s/manifest.json").write_text(
-            json.dumps(
-                {
-                    "sources": [
-                        {
-                            "name": source["sha256"],
-                            "sha256": source["sha256"],
-                            "urls": ["https://invalid.invalid/"],
-                        }
-                        for source in sources
-                    ]
-                }
-            )
-        )
         if home_seed:
             copy_home_cache(home_seed, seed / "home")
         atomic_copy(Path(__file__), seed / "arrow-cache.py")
@@ -258,131 +188,60 @@ def build_image(root, image, output, home_seed, sources):
         )
 
 
-def prepare(root, manifest, sources):
-    root.mkdir(parents=True, exist_ok=True)
-    root.chmod(0o755)
-    warm(root / "s", sources)
-    atomic_copy(manifest, root / "s" / "manifest.json")
-    atomic_copy(manifest, root / "arrow-cache-sources.json")
-    locations = "\n".join(
-        f"location = /s/{entry['sha256']} {{ alias /sources/{entry['sha256']}; }}"
-        for entry in sources
-    )
-    (root / "nginx.conf").write_text(
-        "worker_processes 1;\npid /tmp/nginx.pid;\nerror_log /dev/stderr warn;\n"
-        "events {}\nhttp { access_log off; sendfile on; server_tokens off;\n"
-        "server { listen 8080; disable_symlinks on;\n"
-        "location = /healthz { return 200; }\n"
-        "location / { return 404; }\n" + locations + "\n} }\n"
-    )
-    (root / "nginx.conf").chmod(0o644)
-    directory = Path(__file__).resolve().parent
-    for name in (
-        "arrow-cache.py",
-        "compose.arrow-cache.yml",
+def deploy(root, project):
+    compose = [
+        "docker",
+        "compose",
+        "--project-name",
+        project,
+        "--file",
+        str(Path(__file__).with_name("docker-compose.yml")),
+    ]
+    env = {**os.environ, "HOST_DATA_DIR": str(root), "COMPOSE_REMOVE_ORPHANS": "false"}
+    for command in (
+        ["build", "conan_server"],
+        ["push", "conan_server"],
+        ["up", "-d", "--no-deps", "conan_server"],
     ):
-        source = directory / name
-        if source.resolve() != (root / name).resolve():
-            atomic_copy(source, root / name)
-
-
-def compose(root, *arguments):
-    # Explicit project/file ignore stale COMPOSE_FILE settings in a web shell.
-    subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--project-name",
-            os.environ.get("ARROW_CACHE_PROJECT", "bolt-arrow-cache"),
-            "--file",
-            str(root / "compose.arrow-cache.yml"),
-            *arguments,
-        ],
-        env={
-            **os.environ,
-            "BOLT_ARROW_CACHE_DIR": str(root),
-            "COMPOSE_REMOVE_ORPHANS": "false",
-            "COMPOSE_IGNORE_ORPHANS": "true",
-        },
-        check=True,
-    )
+        subprocess.run([*compose, *command], env=env, check=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "command",
-        choices=(
-            "prepare",
-            "up",
-            "stop",
-            "configure-local",
-            "auto-configure",
-            "image",
-        ),
-    )
+    parser.add_argument("command", choices=("prepare", "up", "image", "auto-configure"))
     parser.add_argument(
         "--image",
         default=os.environ.get("BOLT_CI_IMAGE", "localhost:5000/bolt-ci:20260921"),
     )
+    parser.add_argument("--version", default="15.0.1-oss", help="Arrow recipe version")
     parser.add_argument(
-        "--source-dir", type=Path, default=Path("/opt/bolt-arrow-sources")
+        "--cci-ref", default="main", help="Recipe index branch or tag used by CI"
+    )
+    parser.add_argument("--project", default="runners", help="Existing Compose project")
+    parser.add_argument(
+        "--seed-dir", type=Path, help="Existing source-backup/s to migrate"
     )
     parser.add_argument(
-        "--manifest",
-        type=Path,
-        help="Source archive manifest (defaults to the shipped or deployed manifest)",
+        "--output-image", help="Optional HOME dependency cache image tag"
     )
     parser.add_argument(
-        "--output-image", help="New cache image tag; never overwrites the base"
+        "--home-seed", type=Path, help="Trusted prewarmed HOME (no Arrow sources)"
     )
-    parser.add_argument(
-        "--home-seed",
-        type=Path,
-        help="Trusted prewarmed HOME (dependency directories only)",
-    )
+    parser.add_argument("--source-dir", type=Path, default=Path("/opt/bolt-ci-cache"))
     args = parser.parse_args()
     if args.command == "auto-configure":
         auto_configure(args.source_dir)
-        return
-    root = Path(
-        os.environ.get(
-            "BOLT_ARROW_CACHE_DIR",
-            str(Path(os.environ.get("HOST_DATA_DIR", "/data")) / "conan-source-cache"),
-        )
-    ).resolve()
-    if args.command == "stop":
-        compose(root, "stop", "bolt-source-cache")
-        return
-    manifest = args.manifest
-    if manifest is None:
-        if args.command in ("prepare", "up"):
-            manifest = Path(__file__).with_name("arrow-cache-sources.json")
-        elif args.command == "image":
-            manifest = root / "s" / "manifest.json"
-        else:
-            manifest = args.source_dir / "manifest.json"
-    sources = load_sources(manifest)
-    if args.command in ("prepare", "up"):
-        prepare(root, manifest, sources)
-        if args.command == "up":
-            compose(
-                root,
-                "up",
-                "-d",
-                "--wait",
-                "--wait-timeout",
-                "90",
-                "--force-recreate",
-                "bolt-source-cache",
-            )
-        print("Cache prepared; use image to enable automatic CI cache consumption")
     elif args.command == "image":
-        build_image(root, args.image, args.output_image, args.home_seed, sources)
-    elif args.command == "configure-local":
-        configure_local(
-            args.source_dir, Path(os.environ["CONAN_HOME"]).resolve(), sources
-        )
+        if not args.home_seed or not args.home_seed.is_dir():
+            parser.error(
+                "image requires --home-seed; Arrow sources are served by Conan server"
+            )
+        build_image(args.image, args.output_image, args.home_seed)
+    else:
+        root = Path(os.environ.get("HOST_DATA_DIR", "/data")).resolve()
+        prepare(root, args.image, args.version, args.cci_ref, args.seed_dir)
+        if args.command == "up":
+            deploy(root, args.project)
 
 
 if __name__ == "__main__":
