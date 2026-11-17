@@ -13,20 +13,24 @@
 
 services:
   bolt-source-cache:
-    image: python:3.11-alpine
+    image: nginx:stable-alpine
     restart: unless-stopped
     user: '65534:65534'
     read_only: true
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
-    command: [python3, /app/arrow-cache.py, serve, --source-dir, /sources]
+    entrypoint: [nginx]
+    command: [-c, /etc/nginx/source-cache.conf, -g, "daemon off;"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m,uid=65534,gid=65534
     volumes:
       - ${BOLT_ARROW_CACHE_DIR:-${HOST_DATA_DIR:-/data}/conan-source-cache}/s:/sources:ro
-      - ${BOLT_ARROW_CACHE_DIR:-${HOST_DATA_DIR:-/data}/conan-source-cache}/arrow-cache.py:/app/arrow-cache.py:ro
+      - ${BOLT_ARROW_CACHE_DIR:-${HOST_DATA_DIR:-/data}/conan-source-cache}/nginx.conf:/etc/nginx/source-cache.conf:ro
     ports:
       - '${ARROW_CACHE_BIND:-127.0.0.1}:${ARROW_CACHE_PORT:-9301}:8080'
     healthcheck:
-      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2).close()']
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:8080/healthz]
       interval: 5s
       timeout: 3s
       retries: 12

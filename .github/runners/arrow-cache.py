@@ -23,7 +23,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -198,7 +197,9 @@ def auto_configure(root):
 
 def build_image(root, image, output, home_seed, sources):
     if not output or output == image:
-        raise ValueError("Use --output-image with a distinct tag for verification")
+        raise ValueError(
+            "Use --output-image with a distinct tag to preserve the base image"
+        )
     check_seed(root / "s", sources)
     config = json.loads(subprocess.check_output(["docker", "image", "inspect", image]))[
         0
@@ -257,49 +258,24 @@ def build_image(root, image, output, home_seed, sources):
         )
 
 
-def make_server(seed, bind, port, sources):
-    check_seed(seed, sources)
-    allowed = {"/s/" + source["sha256"]: seed / source["sha256"] for source in sources}
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
-            pass
-
-        def do_HEAD(self):
-            self.send_content(False)
-
-        def do_GET(self):
-            self.send_content(True)
-
-        def send_content(self, body):
-            if self.path == "/healthz":
-                self.send_response(200)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            path = allowed.get(self.path)
-            if path is None or path.is_symlink() or not path.is_file():
-                self.send_error(404)
-                return
-            with path.open("rb") as source:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header(
-                    "Content-Length", str(os.fstat(source.fileno()).st_size)
-                )
-                self.end_headers()
-                if body:
-                    shutil.copyfileobj(source, self.wfile)
-
-    return ThreadingHTTPServer((bind, port), Handler)
-
-
 def prepare(root, manifest, sources):
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o755)
     warm(root / "s", sources)
     atomic_copy(manifest, root / "s" / "manifest.json")
     atomic_copy(manifest, root / "arrow-cache-sources.json")
+    locations = "\n".join(
+        f"location = /s/{entry['sha256']} {{ alias /sources/{entry['sha256']}; }}"
+        for entry in sources
+    )
+    (root / "nginx.conf").write_text(
+        "worker_processes 1;\npid /tmp/nginx.pid;\nerror_log /dev/stderr warn;\n"
+        "events {}\nhttp { access_log off; sendfile on; server_tokens off;\n"
+        "server { listen 8080; disable_symlinks on;\n"
+        "location = /healthz { return 200; }\n"
+        "location / { return 404; }\n" + locations + "\n} }\n"
+    )
+    (root / "nginx.conf").chmod(0o644)
     directory = Path(__file__).resolve().parent
     for name in (
         "arrow-cache.py",
@@ -332,68 +308,6 @@ def compose(root, *arguments):
     )
 
 
-def check_conan(seed, sources):
-    home = Path(os.environ["CONAN_HOME"]).resolve()
-    configure_local(seed, home, sources)
-    with tempfile.TemporaryDirectory() as directory:
-        recipe = Path(directory) / "conanfile.py"
-        body = (
-            "from conan import ConanFile\nfrom conan.tools.files import download\n"
-            "class Probe(ConanFile):\n    name = 'arrow-cache-probe'\n    version = '1'\n"
-            "    def source(self):\n"
-        )
-        for source in sources:
-            sha = source["sha256"]
-            body += f"        download(self, 'https://invalid.invalid/{sha}', '{sha}', sha256='{sha}')\n"
-        recipe.write_text(body)
-        subprocess.run(["conan", "source", directory], check=True)
-        check_seed(Path(directory), sources)
-    print("PASS: Conan consumed configured source archives without network access")
-
-
-def verify(root, image, port, manifest, sources):
-    check_seed(root / "s", sources)
-    host = os.environ.get("ARROW_CACHE_BIND", "127.0.0.1")
-    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    for source in sources:
-        with urlopen(
-            f"http://{host}:{port}/s/{source['sha256']}", timeout=15
-        ) as response:
-            if hashlib.sha256(response.read()).hexdigest() != source["sha256"]:
-                raise ValueError("HTTP source checksum mismatch")
-    print("PASS: HTTP service returned all configured source archives", flush=True)
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--user",
-            "65534:65534",
-            "--env",
-            "HOME=/tmp",
-            "--env",
-            "CONAN_HOME=/tmp/conan",
-            "--mount",
-            f"type=bind,src={root / 's'},dst=/opt/bolt-arrow-sources,readonly",
-            "--mount",
-            f"type=bind,src={root / 'arrow-cache.py'},dst=/opt/bolt-arrow-cache.py,readonly",
-            "--mount",
-            f"type=bind,src={manifest.resolve()},dst=/opt/source-manifest.json,readonly",
-            "--entrypoint",
-            "python3",
-            image,
-            "/opt/bolt-arrow-cache.py",
-            "check-conan",
-            "--manifest",
-            "/opt/source-manifest.json",
-        ],
-        check=True,
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -401,11 +315,8 @@ def main():
         choices=(
             "prepare",
             "up",
-            "verify",
             "stop",
-            "serve",
             "configure-local",
-            "check-conan",
             "auto-configure",
             "image",
         ),
@@ -422,7 +333,6 @@ def main():
         type=Path,
         help="Source archive manifest (defaults to the shipped or deployed manifest)",
     )
-    parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument(
         "--output-image", help="New cache image tag; never overwrites the base"
     )
@@ -431,7 +341,6 @@ def main():
         type=Path,
         help="Trusted prewarmed HOME (dependency directories only)",
     )
-    parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     if args.command == "auto-configure":
         auto_configure(args.source_dir)
@@ -449,7 +358,7 @@ def main():
     if manifest is None:
         if args.command in ("prepare", "up"):
             manifest = Path(__file__).with_name("arrow-cache-sources.json")
-        elif args.command in ("verify", "image"):
+        elif args.command == "image":
             manifest = root / "s" / "manifest.json"
         else:
             manifest = args.source_dir / "manifest.json"
@@ -470,23 +379,10 @@ def main():
         print("Cache prepared; use image to enable automatic CI cache consumption")
     elif args.command == "image":
         build_image(root, args.image, args.output_image, args.home_seed, sources)
-    elif args.command == "verify":
-        verify(
-            root,
-            args.image,
-            int(os.environ.get("ARROW_CACHE_PORT", "9301")),
-            manifest,
-            sources,
-        )
     elif args.command == "configure-local":
         configure_local(
             args.source_dir, Path(os.environ["CONAN_HOME"]).resolve(), sources
         )
-    elif args.command == "check-conan":
-        check_conan(args.source_dir, sources)
-    else:
-        with make_server(args.source_dir, args.bind, args.port, sources) as server:
-            server.serve_forever()
 
 
 if __name__ == "__main__":

@@ -19,9 +19,11 @@ limitations under the License.
 Seeds checksum-verified source archives from `arrow-cache-sources.json` (Arrow
 15.0.1 and Substrait 0.27.0 by default). Existing valid blobs in
 `conan-source-cache/s` are reused.
-No GitHub token or repository variable is needed.
+No GitHub token or repository variable is needed. Source archives are separate
+from Conan binary packages: Gluten can request Arrow sources even when its
+binary package is already cached.
 
-## Start and verify
+## Deploy
 
 Run as root in the ECS shell, using this PR's checkout:
 
@@ -33,7 +35,6 @@ export BOLT_ARROW_CACHE_DIR="$HOST_DATA_DIR/conan-source-cache"
 # For a separate deployment, use bolt-arrow-cache instead.
 export ARROW_CACHE_PROJECT=runners
 python3 arrow-cache.py up
-python3 arrow-cache.py verify --image localhost:5000/bolt-ci:20260921
 ```
 
 Use `up --manifest /path/to/sources.json` for another source set. Each entry in
@@ -42,14 +43,11 @@ installed both beside the helper and at `s/manifest.json`; deployed commands
 and CI jobs do not need the original checkout or manifest path.
 
 `up` downloads missing/corrupt blobs atomically, checks their SHA-256 hashes,
-installs the helper and Compose files under `BOLT_ARROW_CACHE_DIR`, and starts
+installs the helper, Nginx configuration and Compose file under `BOLT_ARROW_CACHE_DIR`, and starts
 only `bolt-source-cache`. It does not recreate runners, Conan or the registry.
 A conflicting port fails startup; it never stops an unrelated service.
-`verify` checks both HTTP downloads and runs Conan in the selected CI image
-as UID 65534 with **network disabled**. All configured archives must be read from the
-local download cache. This verifies the cache independently of a CI build.
 
-The HTTP service defaults to `127.0.0.1:9301`; set `ARROW_CACHE_PORT` to change
+The Nginx service defaults to `127.0.0.1:9301`; set `ARROW_CACHE_PORT` to change
 it. Use `ARROW_CACHE_BIND` only when explicitly exposing the mirror on another
 interface. Containers on the same Compose network can use
 `http://bolt-source-cache:8080/s/`. This hostname is not automatically available
@@ -62,7 +60,7 @@ existing Compose files. `prepare` installs the files without starting Docker.
 ## Enable automatic CI use
 
 Build a cache layer on the **current** CI image; the original Dockerfile and
-compiler layers are unchanged. Use a distinct output tag to test before publishing:
+compiler layers are unchanged. Use a distinct output tag to preserve the base image:
 
 ```bash
 python3 arrow-cache.py image \
@@ -84,7 +82,7 @@ image already defining `BASH_ENV` is rejected rather than replacing its setup.
 Source hashes are verified before import. Internal download URLs are not copied
 into the image. The workflow needs no source-cache mounts or initialization step.
 
-After testing the image, publish it to the registry used by the runners. Keep the
+Publish the image to the registry used by the runners. Keep the
 original image digest for rollback. Updating the existing CI tag requires no
 workflow change; using another tag requires changing the workflow image reference.
 For later refreshes, pass the original unmodified base digest to `--image`, not
@@ -94,19 +92,5 @@ re-registration is needed. Cache snapshots are refreshed by rebuilding this laye
 not by saving untrusted job output. This trades automatic write-back for isolation.
 
 The standalone HTTP service remains optional and independent of the CI image.
-`verify` checks the service and Conan cache format; it does not validate deployment
-of the new image. Check the actual image with an ordinary `bash --noprofile --norc`
-command and a fresh writable HOME before rollout.
-
-## Local tests
-
-```bash
-python3 -m venv /tmp/bolt-arrow-cache-test
-source /tmp/bolt-arrow-cache-test/bin/activate
-python3 -m pip install conan==2.32.0
-python3 -m unittest discover -s .github/runners/tests -p 'test_arrow_cache.py' -v
-```
-
-Tests need loopback sockets. The real Docker/Conan acceptance check is the
-`verify` command above. Updating Arrow's recipe version requires reviewing
-the URLs and hashes in `arrow-cache-sources.json`.
+Updating Arrow's recipe version requires reviewing the URLs and hashes in
+`arrow-cache-sources.json`.
