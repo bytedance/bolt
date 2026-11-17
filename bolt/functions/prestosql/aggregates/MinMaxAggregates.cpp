@@ -925,8 +925,9 @@ class MinMaxNAggregateBase : public exec::Aggregate {
     const auto* values = result.flatValues;
     auto* rawValues = values->rawValues();
 
-    const auto numValues = valueArray->sizeAt(decodedIndex);
-    const auto valueOffset = valueArray->offsetAt(decodedIndex);
+    const auto valueIndex = decodedValue_.index(decodedIndex);
+    const auto numValues = valueArray->sizeAt(valueIndex);
+    const auto valueOffset = valueArray->offsetAt(valueIndex);
 
     auto tracker = trackRowSize(group);
     for (auto i = 0; i < numValues; ++i) {
@@ -943,8 +944,9 @@ class MinMaxNAggregateBase : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediates_.base());
 
-    decodedN_.decode(*baseRowVector->childAt(0), rows);
-    decodedValue_.decode(*baseRowVector->childAt(1), rows);
+    // Fields are accessed using base row indices, not input row indices.
+    decodedN_.decode(*baseRowVector->childAt(0));
+    decodedValue_.decode(*baseRowVector->childAt(1));
 
     IntermediateResult result{};
     result.valueArray = decodedValue_.base()->template as<ArrayVector>();

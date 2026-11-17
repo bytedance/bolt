@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <fmt/format.h>
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -263,6 +264,125 @@ TEST_F(FirstAggregateTest, toIntermediateMarksEveryRowAsValueSet) {
   // The recorded values round-trip, including the null one.
   ASSERT_EQ(42, row->childAt(0)->asFlatVector<int64_t>()->valueAt(0));
   ASSERT_TRUE(row->childAt(0)->isNullAt(1));
+}
+
+TEST_F(FirstAggregateTest, encodedIntermediateRows) {
+  auto values = BaseVector::wrapInDictionary(
+      nullptr,
+      makeIndices({3, 2, 1, 0}),
+      4,
+      makeFlatVector<int64_t>({10, 20, 30, 40}));
+  auto intermediate = makeRowVector({
+      BaseVector::wrapInDictionary(
+          nullptr, makeIndices({0, 1, 2, 3}), 4, values),
+      makeFlatVector<bool>({true, true, true, true}),
+  });
+
+  auto testInput = [&](const VectorPtr& encoded,
+                       int64_t expectedFirst,
+                       int64_t expectedLast) {
+    for (bool sparse : {false, true}) {
+      auto input = makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 0, 0}),
+          encoded,
+          makeFlatVector<bool>({true, !sparse, !sparse, true}),
+      });
+      for (bool grouped : {false, true}) {
+        SCOPED_TRACE(fmt::format("sparse={}, grouped={}", sparse, grouped));
+        const std::vector<std::string> keys = grouped
+            ? std::vector<std::string>{"c0"}
+            : std::vector<std::string>{};
+        // Direct final input preserves both the parent encoding and the
+        // nested dictionary on its value field.
+        auto plan = PlanBuilder()
+                        .values({input})
+                        .finalAggregation(
+                            keys,
+                            {"spark_first(c1) FILTER (WHERE c2)",
+                             "spark_last(c1) FILTER (WHERE c2)",
+                             "spark_first_ignore_null(c1) FILTER (WHERE c2)",
+                             "spark_last_ignore_null(c1) FILTER (WHERE c2)"},
+                            {{BIGINT()}, {BIGINT()}, {BIGINT()}, {BIGINT()}})
+                        .planNode();
+        std::vector<VectorPtr> expected;
+        if (grouped) {
+          expected.push_back(makeFlatVector<int32_t>({0}));
+        }
+        for (auto value :
+             {expectedFirst, expectedLast, expectedFirst, expectedLast}) {
+          expected.push_back(makeFlatVector<int64_t>({value}));
+        }
+        AssertQueryBuilder(plan).maxDrivers(1).assertResults(
+            makeRowVector(expected));
+      }
+    }
+  };
+
+  testInput(intermediate, 40, 10);
+  testInput(
+      BaseVector::wrapInDictionary(
+          nullptr, makeIndices({2, 0, 3, 1}), 4, intermediate),
+      20,
+      30);
+  testInput(BaseVector::wrapInConstant(4, 1, intermediate), 30, 30);
+}
+
+TEST_F(FirstAggregateTest, encodedIntermediateValueSet) {
+  for (bool recordedNull : {false, true}) {
+    auto valueSet = BaseVector::wrapInDictionary(
+        nullptr,
+        makeIndices({0, 1, 2, 3}),
+        4,
+        makeFlatVector<bool>({!recordedNull, true, recordedNull, true}));
+    auto intermediate = makeRowVector({
+        makeNullableFlatVector<int64_t>({7, 42, std::nullopt, 8}),
+        BaseVector::wrapInDictionary(
+            nullptr, makeIndices({0, 1, 2, 3}), 4, valueSet),
+    });
+    for (bool first : {false, true}) {
+      // Put the null state first for first(), and last for last(), so its
+      // valueSet field decides whether it wins over the non-null value.
+      auto encoded = BaseVector::wrapInDictionary(
+          nullptr,
+          first ? makeIndices({2, 0, 3, 1}) : makeIndices({1, 0, 3, 2}),
+          4,
+          intermediate);
+      auto input = makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 0, 0}),
+          encoded,
+          makeFlatVector<bool>({true, false, false, true}),
+      });
+      for (bool grouped : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "recordedNull={}, first={}, grouped={}",
+            recordedNull,
+            first,
+            grouped));
+        const std::vector<std::string> keys = grouped
+            ? std::vector<std::string>{"c0"}
+            : std::vector<std::string>{};
+        const auto name = first ? "spark_first" : "spark_last";
+        auto plan =
+            PlanBuilder()
+                .values({input})
+                .finalAggregation(
+                    keys,
+                    {fmt::format("{}(c1) FILTER (WHERE c2)", name),
+                     fmt::format("{}_ignore_null(c1) FILTER (WHERE c2)", name)},
+                    {{BIGINT()}, {BIGINT()}})
+                .planNode();
+        std::vector<VectorPtr> expected;
+        if (grouped) {
+          expected.push_back(makeFlatVector<int32_t>({0}));
+        }
+        expected.push_back(makeNullableFlatVector<int64_t>(
+            {recordedNull ? std::nullopt : std::optional<int64_t>{42}}));
+        expected.push_back(makeFlatVector<int64_t>({42}));
+        AssertQueryBuilder(plan).maxDrivers(1).assertResults(
+            makeRowVector(expected));
+      }
+    }
+  }
 }
 
 TEST_F(FirstAggregateTest, boolean) {

@@ -79,6 +79,28 @@ TEST_F(ArrayCountAggregateTest, mask) {
   assertQuery(plan, "VALUES (10, [2, 2]), (20, [1, 1])");
 }
 
+TEST_F(ArrayCountAggregateTest, sparseMask) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({10, 10, 10, 20, 20, 20}),
+      makeArrayVector<int32_t>(
+          {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}}),
+      makeNullableFlatVector<bool>(
+          {true, std::nullopt, true, false, true, false}),
+  });
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation({}, {"array_count(c1)"}, {"c2"})
+                  .planNode();
+  assertQuery(plan, "SELECT [3, 3]");
+
+  plan = PlanBuilder()
+             .values({data})
+             .singleAggregation({"c0"}, {"array_count(c1)"}, {"c2"})
+             .planNode();
+  assertQuery(plan, "VALUES (10, [2, 2]), (20, [1, 1])");
+}
+
 TEST_F(ArrayCountAggregateTest, multiArrayTest) {
   auto data = makeRowVector(
       {makeFlatVector<int64_t>({10, 20, 10, 20, 20}),

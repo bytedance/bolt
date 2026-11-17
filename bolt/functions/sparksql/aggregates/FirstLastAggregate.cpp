@@ -188,9 +188,10 @@ class FirstLastAggregateBase
         rowVector->childrenSize(),
         2,
         "intermediate results must have 2 children");
-    this->decodedValue_.decode(*rowVector->childAt(0), rows);
+    // Fields are accessed using base row indices, not input row indices.
+    this->decodedValue_.decode(*rowVector->childAt(0));
     if constexpr (decodeIgnoreNullVector) {
-      this->decodedIgnoreNull_.decode(*rowVector->childAt(1), rows);
+      this->decodedIgnoreNull_.decode(*rowVector->childAt(1));
     }
   }
 

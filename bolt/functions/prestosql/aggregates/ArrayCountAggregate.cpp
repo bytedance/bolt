@@ -165,10 +165,7 @@ class ArrayCountAggregate : public exec::Aggregate {
     auto arrayVector = decoded.base()->as<ArrayVector>();
     auto elements = arrayVector->elements();
 
-    auto begin = rows.begin();
-    auto end = rows.end();
-
-    for (vector_size_t row = begin; row < end; ++row) {
+    rows.applyToSelected([&](vector_size_t row) {
       if (!decoded.isNullAt(row)) {
         auto group = groups[row];
         auto aggregatedArraySize =
@@ -182,7 +179,7 @@ class ArrayCountAggregate : public exec::Aggregate {
         }
         addToAggregatedArray<TData, TValue>(group, offset, size, elements);
       }
-    }
+    });
   }
 
   template <typename TData, typename TValue = TInput>
@@ -196,10 +193,7 @@ class ArrayCountAggregate : public exec::Aggregate {
     auto arrayVector = decoded.base()->as<ArrayVector>();
     auto elements = arrayVector->elements();
 
-    auto begin = rows.begin();
-    auto end = rows.end();
-
-    for (vector_size_t row = begin; row < end; ++row) {
+    rows.applyToSelected([&](vector_size_t row) {
       if (!decodedElements_.isNullAt(row)) {
         auto decodedRow = decodedElements_.index(row);
         auto aggregatedArraySize =
@@ -212,7 +206,7 @@ class ArrayCountAggregate : public exec::Aggregate {
         }
         addToAggregatedArray<TData, TValue>(group, offset, size, elements);
       }
-    }
+    });
   }
 
   template <typename TData, typename TValue = TInput>
