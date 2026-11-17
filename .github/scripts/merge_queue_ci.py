@@ -4,7 +4,6 @@
 import argparse
 import datetime as dt
 import hashlib
-import io
 import json
 import os
 import re
@@ -13,7 +12,6 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path
 
 
@@ -40,15 +38,6 @@ class GitHubApiError(RuntimeError):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
-
-
-class ArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme != "https":
-            raise ValueError("Artifact download must use HTTPS")
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        redirected.remove_header("Authorization")
-        return redirected
 
 
 class GitHubApi:
@@ -91,33 +80,6 @@ class GitHubApi:
             ) from error
 
         return json.loads(body) if body else None
-
-    def artifact_json(self, repository, artifact_id):
-        request = urllib.request.Request(
-            f"{self.base_url}/repos/{repository}/actions/artifacts/{int(artifact_id)}/zip",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "X-GitHub-Api-Version": API_VERSION,
-            },
-        )
-        opener = urllib.request.build_opener(ArtifactRedirectHandler())
-        maximum = 64 * 1024
-        with opener.open(request, timeout=30) as response:
-            data = response.read(maximum + 1)
-        if len(data) > maximum:
-            raise ValueError("Oversized CI evidence archive")
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            members = archive.infolist()
-            if (
-                len(members) != 1
-                or members[0].filename != "result.json"
-                or members[0].file_size > maximum
-            ):
-                raise ValueError("Unexpected CI evidence archive")
-            result = json.loads(archive.read(members[0]))
-        if not isinstance(result, dict):
-            raise ValueError("Expected a CI evidence object")
-        return result
 
 
 def parse_github_time(value):
@@ -263,10 +225,7 @@ def find_reusable_result(
     max_age_hours,
     current_run_id=None,
     now=None,
-    gluten_sha=None,
 ):
-    if gluten_sha is not None:
-        validate_sha(gluten_sha, "Gluten SHA")
     repository = validate_repository(repository)
     now = now or utc_now()
     cutoff = now - dt.timedelta(hours=max_age_hours)
@@ -299,11 +258,6 @@ def find_reusable_result(
         run_repository = (run.get("repository") or {}).get("full_name", "")
         if run_repository.lower() != repository.lower():
             continue
-
-        if gluten_sha is not None:
-            evidence = api.artifact_json(repository, artifact["id"])
-            if evidence.get("gluten_sha") != gluten_sha:
-                continue
 
         return {
             "hit": True,
@@ -548,22 +502,7 @@ def find_source_evidence(api, repository, run, accepted_configs):
             f"{evidence_config} not in {sorted(accepted_configs)}"
         )
     validate_config_hash(evidence_config)
-    gluten_sha = None
-    if workflow == "build-test.yml":
-        payload = api.artifact_json(repository, matches[0]["id"])
-        expected = {
-            "workflow": workflow,
-            "source_run_id": str(run["id"]),
-            "source_run_attempt": run.get("run_attempt", 1),
-            "merge_sha": merge_sha,
-            "config_hash": evidence_config,
-        }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise ValueError("Build source evidence does not match its run")
-        if payload.get("gluten_sha") is not None:
-            gluten_sha = validate_sha(payload["gluten_sha"], "Gluten SHA")
     return {
-        "gluten_sha": gluten_sha,
         "artifact_id": matches[0]["id"],
         "merge_sha": merge_sha,
         "config_hash": evidence_config,
@@ -600,9 +539,6 @@ def reusable_pr_result(api, repository, runs, salt, accepted_salts=()):
     base_sha = validate_sha(parents[0], "base SHA")
     tree_sha = validate_sha((commit.get("tree") or {}).get("sha"), "tree SHA")
     result = make_fingerprint(tree_sha, base_sha, tested_salt)
-    gluten_sha = evidences["build-test.yml"].get("gluten_sha")
-    if gluten_sha is not None:
-        result["gluten_sha"] = validate_sha(gluten_sha, "Gluten SHA")
     result.update(
         {
             "event": "pull_request",
@@ -837,11 +773,9 @@ def command_find_reuse(args):
             args.workflow_path,
             args.max_age_hours,
             current_run_id=args.current_run_id,
-            gluten_sha=args.gluten_sha,
         )
     except (
         GitHubApiError,
-        zipfile.BadZipFile,
         KeyError,
         OSError,
         RuntimeError,
@@ -877,8 +811,6 @@ def command_record_source(args):
         "config_hash": validate_config_hash(args.config_hash),
         "created_at": github_time(),
     }
-    if args.gluten_sha is not None:
-        payload["gluten_sha"] = validate_sha(args.gluten_sha, "Gluten SHA")
     artifact_name = source_artifact_name(
         args.workflow,
         args.run_id,
@@ -940,7 +872,6 @@ def build_parser():
     reuse.add_argument("--tree-sha", required=True)
     reuse.add_argument("--base-sha", required=True)
     reuse.add_argument("--salt", required=True)
-    reuse.add_argument("--gluten-sha")
     reuse.add_argument("--workflow-path", default=GATE_WORKFLOW_PATH)
     reuse.add_argument("--max-age-hours", type=int, default=24)
     reuse.add_argument("--current-run-id", default=os.environ.get("GITHUB_RUN_ID"))
@@ -956,7 +887,6 @@ def build_parser():
     source.add_argument("--tree-sha", required=True)
     source.add_argument("--base-sha", required=True)
     source.add_argument("--config-hash", required=True)
-    source.add_argument("--gluten-sha")
     source.add_argument("--output", required=True)
     source.add_argument("--github-output")
     source.set_defaults(func=command_record_source)

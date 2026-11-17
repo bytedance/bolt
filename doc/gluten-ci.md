@@ -3,7 +3,8 @@
 PR checks build the candidate Bolt as a local Conan package, compile
 `apache/gluten` main with it, and run native CTest. Nightly runs at 02:00
 Asia/Shanghai with Bolt main and Apache Gluten main. Each run resolves the
-Gluten revision once; merge-queue reuse requires that same revision.
+Gluten revision once. Gluten native checks run again in the merge queue, even
+when Bolt-only results are reused.
 
 `.github/workflows/gluten-ci.yaml` owns checkouts, matrices, caches and artifacts.
 `scripts/gluten-ci.sh` adapts Bolt packaging/runtime setup and checks fresh test
@@ -26,5 +27,5 @@ are downloaded only from the current run and checked against both source SHAs.
 python3 -m unittest discover -s .github/scripts/tests -p 'test_gluten*.py' -v
 ```
 
-Set `GLUTEN_TEST_SOURCE` to an Apache checkout to include suite-selection checks.
+Suite selection and Maven source-profile checks belong to the Gluten repository.
 Fixture tests do not establish successful native or full Spark execution.

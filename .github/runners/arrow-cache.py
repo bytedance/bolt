@@ -17,7 +17,9 @@
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,26 +29,31 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
-# Checksums from bytedance/conan-center-index at
-# 50b9807d8c919306824fbb3f4dc444d3b62f01b2, recipes/arrow/all/conandata.yml.
-SOURCES = (
-    {
-        "name": "Arrow 15.0.1",
-        "sha256": "55db63ed9fd6917b7abfe5d4186c9f532cbe48aa53f4040d57e7c29ad70bcefa",
-        "urls": [
-            "https://archive.apache.org/dist/arrow/arrow-15.0.1/apache-arrow-15.0.1.tar.gz",
-            "https://www.apache.org/dyn/closer.lua/arrow/arrow-15.0.1/apache-arrow-15.0.1.tar.gz?action=download",
-        ],
-    },
-    {
-        "name": "Substrait 0.27.0",
-        "sha256": "4ed375f69d972a57fdc5ec406c17003a111831d8640d3f1733eccd4b3ff45628",
-        "urls": [
-            "https://codeload.github.com/substrait-io/substrait/tar.gz/refs/tags/v0.27.0",
-            "https://github.com/substrait-io/substrait/archive/v0.27.0.tar.gz",
-        ],
-    },
-)
+def load_sources(manifest):
+    data = json.loads(manifest.read_text())
+    sources = data.get("sources") if isinstance(data, dict) else None
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("Source manifest must contain a nonempty sources list")
+    seen = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError("Source entry must be an object")
+        name, sha, urls = (source.get(key) for key in ("name", "sha256", "urls"))
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(sha, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha)
+            or sha in seen
+            or not isinstance(urls, list)
+            or not urls
+            or not all(isinstance(url, str) and url for url in urls)
+        ):
+            raise ValueError(
+                "Source entry needs a name, unique SHA-256 and download URLs"
+            )
+        seen.add(sha)
+    return sources
 
 
 def digest(path):
@@ -73,14 +80,14 @@ def atomic_copy(source, destination):
             temporary.unlink(missing_ok=True)
 
 
-def check_seed(seed, sources=SOURCES):
+def check_seed(seed, sources):
     for source in sources:
         path = seed / source["sha256"]
         if not path.is_file() or digest(path) != source["sha256"]:
             raise ValueError(f"Missing or corrupt cache entry: {source['name']}")
 
 
-def warm(seed, sources=SOURCES):
+def warm(seed, sources):
     seed.mkdir(parents=True, exist_ok=True)
     seed.chmod(0o755)
     for source in sources:
@@ -114,7 +121,7 @@ def warm(seed, sources=SOURCES):
     check_seed(seed, sources)
 
 
-def configure_local(seed, home, sources=SOURCES):
+def configure_local(seed, home, sources):
     """Copy blobs, never share Conan's writable metadata/locks with the seed."""
     check_seed(seed, sources)
     cache = home / "source-backup"
@@ -133,10 +140,10 @@ def configure_local(seed, home, sources=SOURCES):
     lines = [line for line in lines if line.partition("=")[0].strip() not in settings]
     lines.extend(f"{key}={value}" for key, value in settings.items())
     conf.write_text("\n".join(lines) + "\n")
-    print("Arrow and Substrait configured in the private Conan source cache")
+    print("Source archives configured in the private Conan source cache")
 
 
-def make_server(seed, bind, port, sources=SOURCES):
+def make_server(seed, bind, port, sources):
     check_seed(seed, sources)
     allowed = {"/s/" + source["sha256"]: seed / source["sha256"] for source in sources}
 
@@ -173,10 +180,12 @@ def make_server(seed, bind, port, sources=SOURCES):
     return ThreadingHTTPServer((bind, port), Handler)
 
 
-def prepare(root):
+def prepare(root, manifest, sources):
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o755)
-    warm(root / "s")
+    warm(root / "s", sources)
+    atomic_copy(manifest, root / "s" / "manifest.json")
+    atomic_copy(manifest, root / "arrow-cache-sources.json")
     directory = Path(__file__).resolve().parent
     for name in (
         "arrow-cache.py",
@@ -210,9 +219,9 @@ def compose(root, *arguments):
     )
 
 
-def check_conan(seed):
+def check_conan(seed, sources):
     home = Path(os.environ["CONAN_HOME"]).resolve()
-    configure_local(seed, home)
+    configure_local(seed, home, sources)
     with tempfile.TemporaryDirectory() as directory:
         recipe = Path(directory) / "conanfile.py"
         body = (
@@ -220,28 +229,28 @@ def check_conan(seed):
             "class Probe(ConanFile):\n    name = 'arrow-cache-probe'\n    version = '1'\n"
             "    def source(self):\n"
         )
-        for source in SOURCES:
+        for source in sources:
             sha = source["sha256"]
             body += f"        download(self, 'https://invalid.invalid/{sha}', '{sha}', sha256='{sha}')\n"
         recipe.write_text(body)
         subprocess.run(["conan", "source", directory], check=True)
-        check_seed(Path(directory))
-    print("PASS: Conan consumed both source archives without network access")
+        check_seed(Path(directory), sources)
+    print("PASS: Conan consumed configured source archives without network access")
 
 
-def verify(root, image, port):
-    check_seed(root / "s")
+def verify(root, image, port, manifest, sources):
+    check_seed(root / "s", sources)
     host = os.environ.get("ARROW_CACHE_BIND", "127.0.0.1")
     host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    for source in SOURCES:
+    for source in sources:
         with urlopen(
             f"http://{host}:{port}/s/{source['sha256']}", timeout=15
         ) as response:
             if hashlib.sha256(response.read()).hexdigest() != source["sha256"]:
                 raise ValueError("HTTP source checksum mismatch")
-    print("PASS: HTTP service returned both verified source archives", flush=True)
+    print("PASS: HTTP service returned all configured source archives", flush=True)
     subprocess.run(
         [
             "docker",
@@ -258,11 +267,15 @@ def verify(root, image, port):
             f"type=bind,src={root / 's'},dst=/opt/bolt-arrow-sources,readonly",
             "--mount",
             f"type=bind,src={root / 'arrow-cache.py'},dst=/opt/bolt-arrow-cache.py,readonly",
+            "--mount",
+            f"type=bind,src={manifest.resolve()},dst=/opt/source-manifest.json,readonly",
             "--entrypoint",
             "python3",
             image,
             "/opt/bolt-arrow-cache.py",
             "check-conan",
+            "--manifest",
+            "/opt/source-manifest.json",
         ],
         check=True,
     )
@@ -289,6 +302,11 @@ def main():
     parser.add_argument(
         "--source-dir", type=Path, default=Path("/opt/bolt-arrow-sources")
     )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Source archive manifest (defaults to the shipped or deployed manifest)",
+    )
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -298,8 +316,20 @@ def main():
             str(Path(os.environ.get("HOST_DATA_DIR", "/data")) / "conan-source-cache"),
         )
     ).resolve()
+    if args.command == "stop":
+        compose(root, "stop", "bolt-source-cache")
+        return
+    manifest = args.manifest
+    if manifest is None:
+        if args.command in ("prepare", "up"):
+            manifest = Path(__file__).with_name("arrow-cache-sources.json")
+        elif args.command == "verify":
+            manifest = root / "s" / "manifest.json"
+        else:
+            manifest = args.source_dir / "manifest.json"
+    sources = load_sources(manifest)
     if args.command in ("prepare", "up"):
-        prepare(root)
+        prepare(root, manifest, sources)
         if args.command == "up":
             compose(
                 root,
@@ -314,16 +344,22 @@ def main():
         print(
             "Cache prepared; apply compose.arrow-cache-runners.yml to idle runners to enable CI mounts"
         )
-    elif args.command == "stop":
-        compose(root, "stop", "bolt-source-cache")
     elif args.command == "verify":
-        verify(root, args.image, int(os.environ.get("ARROW_CACHE_PORT", "9301")))
+        verify(
+            root,
+            args.image,
+            int(os.environ.get("ARROW_CACHE_PORT", "9301")),
+            manifest,
+            sources,
+        )
     elif args.command == "configure-local":
-        configure_local(args.source_dir, Path(os.environ["CONAN_HOME"]).resolve())
+        configure_local(
+            args.source_dir, Path(os.environ["CONAN_HOME"]).resolve(), sources
+        )
     elif args.command == "check-conan":
-        check_conan(args.source_dir)
+        check_conan(args.source_dir, sources)
     else:
-        with make_server(args.source_dir, args.bind, args.port) as server:
+        with make_server(args.source_dir, args.bind, args.port, sources) as server:
             server.serve_forever()
 
 

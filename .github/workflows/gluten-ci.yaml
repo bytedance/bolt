@@ -74,6 +74,8 @@ jobs:
   native:
     name: Gluten Bolt native UT
     needs: resolve
+    outputs:
+      native_artifact: ${{ steps.native-artifact.outputs.artifact-id }}
     runs-on: [self-hosted, Linux, X64, medium]
     timeout-minutes: 360
     container:
@@ -158,6 +160,7 @@ jobs:
           path: reports/
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
+        id: native-artifact
         if: inputs.mode == 'full'
         with:
           name: gluten-native-${{ github.run_attempt }}
@@ -244,7 +247,8 @@ jobs:
           java-version: ${{ matrix.jdk }}
       - uses: actions/download-artifact@v8
         with:
-          name: gluten-native-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.native.outputs.native_artifact }}
+          merge-multiple: true
           path: native
       - name: Restore this run's native libraries
         run: |

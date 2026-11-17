@@ -16,8 +16,9 @@ limitations under the License.
 
 # Arrow source cache
 
-Seeds checksum-verified Arrow 15.0.1 and Substrait 0.27.0 archives for
-`arrow/15.0.1-oss`. Existing valid blobs in `conan-source-cache/s` are reused.
+Seeds checksum-verified source archives from `arrow-cache-sources.json` (Arrow
+15.0.1 and Substrait 0.27.0 by default). Existing valid blobs in
+`conan-source-cache/s` are reused.
 No CI image rebuild, GitHub token or repository variable is needed.
 
 ## Start and verify
@@ -35,12 +36,17 @@ python3 arrow-cache.py up
 python3 arrow-cache.py verify --image localhost:5000/bolt-ci:20260921
 ```
 
-`up` downloads missing/corrupt blobs atomically, checks both SHA-256 hashes,
+Use `up --manifest /path/to/sources.json` for another source set. Each entry in
+`{"sources": [...]}` has a `name`, `sha256` and `urls` list. The manifest is
+installed both beside the helper and at `s/manifest.json`; deployed commands
+and CI jobs do not need the original checkout or manifest path.
+
+`up` downloads missing/corrupt blobs atomically, checks their SHA-256 hashes,
 installs the helper and Compose files under `BOLT_ARROW_CACHE_DIR`, and starts
 only `bolt-source-cache`. It does not recreate runners, Conan or the registry.
 A conflicting port fails startup; it never stops an unrelated service.
 `verify` checks both HTTP downloads and runs Conan in the selected CI image
-as UID 65534 with **network disabled**. Both archives must be read from the
+as UID 65534 with **network disabled**. All configured archives must be read from the
 local download cache. This verifies the cache independently of a CI build.
 
 The HTTP service defaults to `127.0.0.1:9301`; set `ARROW_CACHE_PORT` to change
@@ -48,7 +54,7 @@ it. Use `ARROW_CACHE_BIND` only when explicitly exposing the mirror on another
 interface. Containers on the same Compose network can use
 `http://bolt-source-cache:8080/s/`. This hostname is not automatically available
 inside a runner's nested Docker daemon. GitHub jobs use the mounts below.
-Only the two archive hashes and `/healthz` are served; there are no write or
+Only the configured archive hashes and `/healthz` are served; there are no write or
 listing endpoints. `python3 arrow-cache.py stop` preserves all cached files.
 For a combined stack, include the installed `compose.arrow-cache.yml` with the
 existing Compose files. `prepare` installs the files without starting Docker.
@@ -62,8 +68,12 @@ to create them. Append this override to that existing invocation:
 docker compose -p runners \
   -f docker-compose.yml \
   -f "$BOLT_ARROW_CACHE_DIR/compose.arrow-cache-runners.yml" \
-  up -d --no-deps runner-medium runner-small
+  up -d --no-deps --force-recreate runner-medium runner-small
 ```
+
+Recreation is also needed when upgrading the helper: an existing file bind
+mount can retain the old script after an atomic replacement. Updating only the
+source manifest later does not require recreation because `s` is a directory mount.
 
 The example assumes only the base file; keep any existing runner overrides
 before the cache override and retain it in future startup commands. Never omit
@@ -75,7 +85,7 @@ The override adds only these read-only mounts to both runner sizes:
 
 The existing Gluten workflow forwards them into each job and calls
 `configure-local` after setting its private `CONAN_HOME`. The helper verifies
-and copies both blobs into that home's writable `source-backup/s` directory,
+and copies the configured blobs into that home's writable `source-backup/s` directory,
 so Conan's locks, metadata and dirty markers never modify the shared seed.
 It replaces source-mirror URLs with `origin` fallback and preserves Conan
 package remotes and unrelated configuration. No ECS IP/hostname is added to
@@ -92,4 +102,4 @@ python3 -m unittest discover -s .github/runners/tests -p 'test_arrow_cache.py' -
 
 Tests need loopback sockets. The real Docker/Conan acceptance check is the
 `verify` command above. Updating Arrow's recipe version requires reviewing
-both pinned source hashes in `arrow-cache.py`.
+the URLs and hashes in `arrow-cache-sources.json`.

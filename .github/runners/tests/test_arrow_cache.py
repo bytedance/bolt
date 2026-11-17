@@ -16,9 +16,11 @@
 
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -48,6 +50,52 @@ class ArrowCacheTest(unittest.TestCase):
             {"name": "fixture", "sha256": self.sha, "urls": [self.origin.as_uri()]},
         )
         self.seed = self.root / "seed"
+
+    def test_custom_manifest_survives_installation_without_source_checkout(self):
+        manifest = self.root / "resources.json"
+        manifest.write_text(json.dumps({"sources": self.sources}))
+        deployed = self.root / "installed"
+        env = os.environ | {"BOLT_ARROW_CACHE_DIR": str(deployed)}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "prepare", "--manifest", str(manifest)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest.unlink()
+        self.origin.unlink()
+        home = self.root / "job-conan"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(deployed / "arrow-cache.py"),
+                "configure-local",
+                "--source-dir",
+                str(deployed / "s"),
+            ],
+            env=env | {"CONAN_HOME": str(home)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((home / "source-backup/s" / self.sha).read_bytes(), self.body)
+        self.assertEqual(
+            self.cache.load_sources(deployed / "s/manifest.json"), list(self.sources)
+        )
+
+    def test_invalid_manifest_cannot_create_cache_paths(self):
+        manifest = self.root / "resources.json"
+        for sources in (
+            [],
+            [dict(self.sources[0], sha256="../outside")],
+            [dict(self.sources[0], urls=[])],
+            [self.sources[0]] * 2,
+        ):
+            with self.subTest(sources=sources):
+                manifest.write_text(json.dumps({"sources": sources}))
+                with self.assertRaises(ValueError):
+                    self.cache.load_sources(manifest)
 
     def test_warm_reuses_valid_content_and_repairs_corruption(self):
         self.cache.warm(self.seed, self.sources)

@@ -1,0 +1,21 @@
+{
+  "_comment": "Checksums from bytedance/conan-center-index at 50b9807d8c919306824fbb3f4dc444d3b62f01b2, recipes/arrow/all/conandata.yml.",
+  "sources": [
+    {
+      "name": "Arrow 15.0.1",
+      "sha256": "55db63ed9fd6917b7abfe5d4186c9f532cbe48aa53f4040d57e7c29ad70bcefa",
+      "urls": [
+        "https://archive.apache.org/dist/arrow/arrow-15.0.1/apache-arrow-15.0.1.tar.gz",
+        "https://www.apache.org/dyn/closer.lua/arrow/arrow-15.0.1/apache-arrow-15.0.1.tar.gz?action=download"
+      ]
+    },
+    {
+      "name": "Substrait 0.27.0",
+      "sha256": "4ed375f69d972a57fdc5ec406c17003a111831d8640d3f1733eccd4b3ff45628",
+      "urls": [
+        "https://codeload.github.com/substrait-io/substrait/tar.gz/refs/tags/v0.27.0",
+        "https://github.com/substrait-io/substrait/archive/v0.27.0.tar.gz"
+      ]
+    }
+  ]
+}

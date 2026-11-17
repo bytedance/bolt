@@ -79,16 +79,9 @@ jobs:
       tree_sha: ${{ steps.fingerprint.outputs.tree_sha }}
       base_sha: ${{ steps.fingerprint.outputs.base_sha }}
       config_hash: ${{ steps.fingerprint.outputs.config_hash }}
-      gluten_sha: ${{ steps.gluten.outputs.sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-      - name: Resolve Apache Gluten before reuse lookup
-        id: gluten
-        run: |
-          sha="$(git ls-remote https://github.com/apache/gluten.git refs/heads/main | awk '{print $1}')"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
       - name: Compute CI fingerprint
         id: fingerprint
         run: |
@@ -103,7 +96,6 @@ jobs:
         run: |
           python3 .github/scripts/merge_queue_ci.py find-reuse \
             --event "${{ github.event_name }}" \
-            --gluten-sha "${{ steps.gluten.outputs.sha }}" \
             --tree-sha "${{ steps.fingerprint.outputs.tree_sha }}" \
             --base-sha "${{ steps.fingerprint.outputs.base_sha }}" \
             --salt "${CI_REUSE_SALT}" \
@@ -281,13 +273,11 @@ jobs:
 
   gluten-backend-compile:
     name: Compile and test Gluten Bolt backend
-    needs: reuse-check
-    if: ${{ needs.reuse-check.outputs.hit != 'true' }}
     uses: ./.github/workflows/gluten-ci.yaml
     with:
       mode: native
       bolt_sha: ${{ github.sha }}
-      gluten_sha: ${{ needs.reuse-check.outputs.gluten_sha }}
+      gluten_sha: main
 
   source-result:
     needs: [reuse-check, changes, build-test, build-only, python-check, gluten-backend-compile, gluten-ci-check]
@@ -296,9 +286,7 @@ jobs:
           needs.reuse-check.result == 'success' &&
           needs.changes.result == 'success' &&
           needs.gluten-ci-check.result == 'success' &&
-          (needs.gluten-backend-compile.result == 'success' ||
-           (needs.gluten-backend-compile.result == 'skipped' &&
-            needs.reuse-check.outputs.hit == 'true')) &&
+          needs.gluten-backend-compile.result == 'success' &&
           (needs.build-test.result == 'success' ||
            needs.build-test.result == 'skipped') &&
           (needs.build-only.result == 'success' ||
@@ -326,7 +314,6 @@ jobs:
             --tree-sha "${{ needs.reuse-check.outputs.tree_sha }}" \
             --base-sha "${{ needs.reuse-check.outputs.base_sha }}" \
             --config-hash "${{ needs.reuse-check.outputs.config_hash }}" \
-            --gluten-sha "${{ needs.reuse-check.outputs.gluten_sha }}" \
             --output ci-source/result.json \
             --github-output "${GITHUB_OUTPUT}"
       - name: Upload tested source

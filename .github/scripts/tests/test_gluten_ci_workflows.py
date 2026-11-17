@@ -14,28 +14,14 @@
 
 """Check the compile gate and nightly workflow against their GitHub contracts."""
 
-import datetime as dt
-import io
-import json
 import re
-import subprocess
-import sys
-import tempfile
 import unittest
-from unittest import mock
-import urllib.request
-import zipfile
 from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import merge_queue_ci as queue  # noqa: E402
-from merge_queue_ci import make_fingerprint  # noqa: E402
-
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github/workflows"
-GLUTEN = "main"
 MIRROR = "gluten-ci.yaml"
 
 
@@ -66,9 +52,7 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
             {
                 "mode": mode,
                 "bolt_sha": "${{ github.sha }}",
-                "gluten_sha": "${{ needs.reuse-check.outputs.gluten_sha }}"
-                if mode == "native"
-                else "main",
+                "gluten_sha": "main",
             },
         )
 
@@ -86,13 +70,14 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
                 {"spark-1", "spark-2", "spark-3", "extended", "slow-hive"} <= stages
             )
 
-    def test_pr_compile_and_source_artifact_require_compile_or_verified_reuse(self):
+    def test_gluten_runs_and_must_pass_even_when_bolt_results_are_reused(self):
         build = workflow("build-test.yml")
         self.assertEqual(set(build["on"]), {"pull_request", "merge_group"})
         jobs = build["jobs"]
         compile_job = jobs["gluten-backend-compile"]
         self.assert_candidate_caller(compile_job, "native")
-        self.assertEqual(compile_job["needs"], "reuse-check")
+        self.assertNotIn("needs", compile_job)
+        self.assertNotIn("if", compile_job)
         source = jobs["source-result"]
         self.assertIn("gluten-backend-compile", source["needs"])
         self.assertIn("gluten-ci-check", source["needs"])
@@ -105,20 +90,21 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
             "needs.build-only.result": "skipped",
             "needs.changes.outputs.source_code": "false",
         }
-        for reused, result, launch, publish in (
-            ("false", "success", True, True),
-            ("false", "skipped", True, False),
-            ("false", "failure", True, False),
-            ("false", "cancelled", True, False),
-            ("true", "skipped", False, True),
-            ("true", "failure", False, False),
+        for reused, result, publish in (
+            ("false", "success", True),
+            ("false", "skipped", False),
+            ("false", "failure", False),
+            ("false", "cancelled", False),
+            ("true", "success", True),
+            ("true", "skipped", False),
+            ("true", "failure", False),
+            ("true", "cancelled", False),
         ):
             with self.subTest(reused=reused, result=result):
                 status = context | {
                     "needs.reuse-check.outputs.hit": reused,
                     "needs.gluten-backend-compile.result": result,
                 }
-                self.assertEqual(condition(compile_job["if"], status), launch)
                 self.assertEqual(condition(source["if"], status), publish)
                 self.assertFalse(
                     condition(
@@ -132,29 +118,6 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
                             status | {"needs.gluten-ci-check.result": check_result},
                         )
                     )
-
-    def test_gluten_is_resolved_before_reuse_and_recorded_after_testing(self):
-        jobs = workflow("build-test.yml")["jobs"]
-        reuse = jobs["reuse-check"]
-        steps = reuse["steps"]
-        resolver = next(i for i, step in enumerate(steps) if step.get("id") == "gluten")
-        lookup = next(i for i, step in enumerate(steps) if step.get("id") == "reuse")
-        self.assertLess(resolver, lookup)
-        self.assertIn("apache/gluten", steps[resolver]["run"])
-        self.assertEqual(
-            reuse["outputs"]["gluten_sha"], "${{ steps.gluten.outputs.sha }}"
-        )
-        self.assertIn(
-            '--gluten-sha "${{ steps.gluten.outputs.sha }}"', steps[lookup]["run"]
-        )
-        record = next(
-            step["run"]
-            for step in jobs["source-result"]["steps"]
-            if step.get("id") == "source"
-        )
-        self.assertIn(
-            '--gluten-sha "${{ needs.reuse-check.outputs.gluten_sha }}"', record
-        )
 
     def test_compile_prerequisite_scripts_exist(self):
         steps = workflow("build-test.yml")["jobs"]["reuse-check"]["steps"]
@@ -195,39 +158,39 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
                     expected,
                 )
 
-    def test_current_gate_salt_reuses_only_the_same_candidate_tree_and_base(self):
-        salt, lint, gate = (
-            workflow(name)["env"]["CI_REUSE_SALT"]
-            for name in (
-                "build-test.yml",
-                "pre-commit-checks.yml",
-                "merge-queue-gate.yml",
-            )
+    def test_partial_nightly_retry_downloads_successful_native_artifact(self):
+        jobs = workflow(MIRROR)["jobs"]
+        upload = next(
+            s for s in jobs["native"]["steps"] if s.get("if") == "inputs.mode == 'full'"
         )
-        self.assertEqual(salt, "bolt-ci:20260921|conan-server:latest|build-test-v2")
-        self.assertEqual((lint, gate), (salt, salt))
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            subprocess.run(["git", "init", "-q", work], check=True)
+        download = next(
+            s["with"]
+            for s in jobs["spark"]["steps"]
+            if s.get("uses", "").startswith("actions/download-artifact@")
+        )
 
-            def key(caller, mirror, base="a" * 40):
-                (work / "build-test.yml").write_bytes(caller)
-                (work / MIRROR).write_bytes(mirror)
-                subprocess.run(["git", "-C", work, "add", "."], check=True)
-                tree = subprocess.check_output(
-                    ["git", "-C", work, "write-tree"], text=True
-                ).strip()
-                return make_fingerprint(tree, base, salt)["artifact_name"]
+        def render(value, context):
+            return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: context[m[1]], value)
 
-            caller = (WORKFLOWS / "build-test.yml").read_bytes()
-            mirror = (WORKFLOWS / MIRROR).read_bytes()
-            candidate = key(caller, mirror)
-            self.assertEqual(candidate, key(caller, mirror))
-            self.assertNotEqual(
-                candidate, key(caller.replace(GLUTEN.encode(), b"b" * 40), mirror)
-            )
-            self.assertNotEqual(candidate, key(caller, mirror + b"\n"))
-            self.assertNotEqual(candidate, key(caller, mirror, base="b" * 40))
+        # Native completed in attempt 1; only the failed downstream job reruns.
+        native_context = {
+            "github.run_attempt": "1",
+            f"steps.{upload.get('id')}.outputs.artifact-id": "101",
+        }
+        retry_context = {"github.run_attempt": "2"}
+        retry_context.update(
+            {
+                f"needs.native.outputs.{key}": render(value, native_context)
+                for key, value in jobs["native"].get("outputs", {}).items()
+            }
+        )
+        requested = render(
+            download.get("artifact-ids", download.get("name", "")), retry_context
+        )
+        self.assertEqual(requested, "101")
+        self.assertEqual(download["merge-multiple"], "true")
+        self.assertNotIn("run-id", download)
+        self.assertNotIn("repository", download)
 
     def test_workflow_uses_candidate_checkout_and_persistent_dependency_cache(self):
         definition = workflow(MIRROR)
@@ -254,175 +217,3 @@ class GlutenCIWorkflowsTest(unittest.TestCase):
         )
         self.assertIn("matrix.scala", cache["key"])
         self.assertIn("hashFiles", cache["key"])
-
-
-class GlutenReuseEvidenceTest(unittest.TestCase):
-    def test_reuse_requires_the_resolved_gluten_revision(self):
-        now = dt.datetime.now(dt.timezone.utc)
-        name = make_fingerprint("a" * 40, "b" * 40, "test")["artifact_name"]
-        artifact = {
-            "id": 11,
-            "name": name,
-            "created_at": queue.github_time(now),
-            "workflow_run": {"id": 12},
-        }
-        run = {
-            "status": "completed",
-            "conclusion": "success",
-            "event": "workflow_run",
-            "path": queue.GATE_WORKFLOW_PATH,
-            "repository": {"full_name": "bytedance/bolt"},
-        }
-        for evidence, expected in (
-            ({}, False),
-            ({"gluten_sha": "c" * 40}, True),
-            ({"gluten_sha": "d" * 40}, False),
-        ):
-            with self.subTest(evidence=evidence):
-                api = mock.Mock()
-                api.request.side_effect = [{"artifacts": [artifact]}, run]
-                api.artifact_json.return_value = evidence
-                result = queue.find_reusable_result(
-                    api,
-                    "bytedance/bolt",
-                    name,
-                    queue.GATE_WORKFLOW_PATH,
-                    24,
-                    now=now,
-                    gluten_sha="c" * 40,
-                )
-                self.assertEqual(result["hit"], expected)
-
-    def test_gate_carries_tested_gluten_sha_without_resolving_main_again(self):
-        merge, head, base, tree, gluten = (c * 40 for c in "abcde")
-        config = queue.config_hash("test")
-        runs = {
-            name: {"id": i, "head_sha": head}
-            for i, name in enumerate(queue.REQUIRED_WORKFLOWS, 1)
-        }
-        api = mock.Mock()
-        api.request.return_value = {
-            "parents": [{"sha": base}, {"sha": head}],
-            "tree": {"sha": tree},
-        }
-        with mock.patch.object(
-            queue,
-            "find_source_evidence",
-            side_effect=[
-                {"merge_sha": merge, "config_hash": config, "gluten_sha": gluten},
-                {"merge_sha": merge, "config_hash": config},
-            ],
-        ):
-            result = queue.reusable_pr_result(api, "bytedance/bolt", runs, "test")
-        self.assertEqual(result["gluten_sha"], gluten)
-        api.request.assert_called_once_with(
-            f"/repos/bytedance/bolt/git/commits/{merge}"
-        )
-
-    def test_build_source_evidence_loads_validated_gluten_revision(self):
-        merge, gluten = "a" * 40, "b" * 40
-        config = queue.config_hash("test")
-        run = {"id": 10, "run_attempt": 2, "path": ".github/workflows/build-test.yml"}
-        api = mock.Mock()
-        api.request.return_value = {
-            "artifacts": [
-                {
-                    "id": 11,
-                    "name": queue.source_artifact_name(
-                        "build-test.yml", 10, 2, merge, config
-                    ),
-                }
-            ]
-        }
-        evidence = {
-            "workflow": "build-test.yml",
-            "source_run_id": "10",
-            "source_run_attempt": 2,
-            "merge_sha": merge,
-            "config_hash": config,
-            "gluten_sha": gluten,
-        }
-        api.artifact_json.return_value = evidence
-        result = queue.find_source_evidence(api, "bytedance/bolt", run, {config})
-        self.assertEqual(result["gluten_sha"], gluten)
-        for field, value in (
-            ("gluten_sha", "main"),
-            ("merge_sha", "c" * 40),
-            ("source_run_id", "99"),
-            ("source_run_attempt", 1),
-        ):
-            api.artifact_json.return_value = evidence | {field: value}
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                queue.find_source_evidence(api, "bytedance/bolt", run, {config})
-
-    def test_record_source_persists_gluten_sha_and_legacy_calls_still_work(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "result.json"
-            command = [
-                sys.executable,
-                str(ROOT / ".github/scripts/merge_queue_ci.py"),
-                "record-source",
-                "--workflow",
-                "build-test.yml",
-                "--event",
-                "pull_request",
-                "--run-id",
-                "10",
-                "--run-attempt",
-                "2",
-                "--merge-sha",
-                "a" * 40,
-                "--tree-sha",
-                "b" * 40,
-                "--base-sha",
-                "c" * 40,
-                "--config-hash",
-                queue.config_hash("test"),
-                "--output",
-                str(output),
-            ]
-            subprocess.run(
-                command + ["--gluten-sha", "d" * 40], check=True, capture_output=True
-            )
-            self.assertEqual(json.loads(output.read_text())["gluten_sha"], "d" * 40)
-            subprocess.run(command, check=True, capture_output=True)
-            self.assertNotIn("gluten_sha", json.loads(output.read_text()))
-
-    def test_artifact_reader_bounds_and_parses_only_result_json(self):
-        api = queue.GitHubApi("fixture")
-        for name, body, success in (
-            ("result.json", '{"gluten_sha":"abc"}', True),
-            ("elsewhere/result.json", "{}", False),
-            ("result.json", "[]", False),
-            ("result.json", "x" * 65537, False),
-        ):
-            data = io.BytesIO()
-            with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr(name, body)
-            with (
-                self.subTest(name=name, success=success),
-                mock.patch.object(queue.urllib.request, "build_opener") as opener,
-            ):
-                opener.return_value.open.return_value.__enter__.return_value.read.return_value = data.getvalue()
-                if success:
-                    self.assertEqual(
-                        api.artifact_json("bytedance/bolt", 11), json.loads(body)
-                    )
-                else:
-                    with self.assertRaises(ValueError):
-                        api.artifact_json("bytedance/bolt", 11)
-
-    def test_artifact_redirect_drops_token_and_rejects_plain_http(self):
-        request = urllib.request.Request(
-            "https://api.github.com/repos/bytedance/bolt/actions/artifacts/11/zip",
-            headers={"Authorization": "Bearer fixture"},
-        )
-        handler = queue.ArtifactRedirectHandler()
-        redirected = handler.redirect_request(
-            request, None, 302, "Found", {}, "https://blob.example/result.zip"
-        )
-        self.assertFalse(redirected.has_header("Authorization"))
-        with self.assertRaises(ValueError):
-            handler.redirect_request(
-                request, None, 302, "Found", {}, "http://blob.example/result.zip"
-            )
