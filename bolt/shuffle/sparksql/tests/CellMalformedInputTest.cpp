@@ -19,6 +19,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -226,6 +227,68 @@ class CellStreamCursorTest : public testing::Test {
 
 using CellStreamCursorTypes = testing::Types<int16_t, int32_t, int64_t>;
 TYPED_TEST_SUITE(CellStreamCursorTest, CellStreamCursorTypes);
+
+TYPED_TEST(CellStreamCursorTest, fullBlocksKeepGenericEncoding) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  alignas(kCacheLineBytes) std::array<T, kBlockValues> values{};
+  const auto check = [&]() {
+    uint8_t full[kMaxBlockBytes];
+    uint8_t generic[kMaxBlockBytes];
+    const auto fullBytes = encodeBlockFull(values.data(), full);
+    // Runtime Count retains the generic selection and extrema reduction.
+    const auto genericBytes = encodeBlock(values.data(), kBlockValues, generic);
+    ASSERT_EQ(fullBytes, genericBytes);
+    EXPECT_EQ(::memcmp(full, generic, fullBytes), 0);
+    std::array<T, kBlockValues> decoded{};
+    ASSERT_EQ(
+        decodeBlock(full, fullBytes, kBlockValues, decoded.data()), fullBytes);
+    EXPECT_EQ(decoded, values);
+  };
+
+  for (const T value :
+       {std::numeric_limits<T>::min(),
+        std::numeric_limits<T>::max(),
+        T{0},
+        T{-1},
+        T{1}}) {
+    SCOPED_TRACE(value);
+    values.fill(value);
+    check();
+  }
+
+  // Both sides of every signed-width transition, including the wide pack
+  // and plain thresholds. Also mix each boundary value with zero.
+  for (uint32_t bit = 0; bit < sizeof(T) * 8 - 1; ++bit) {
+    const int64_t boundary = int64_t{1} << bit;
+    for (const int64_t value :
+         {-boundary - 1, -boundary, boundary - 1, boundary}) {
+      SCOPED_TRACE(value);
+      values.fill(static_cast<T>(value));
+      check();
+      values.back() = 0;
+      check();
+    }
+  }
+
+  // Every pair of extrema positions exercises all branches of the tree.
+  for (uint32_t minLane = 0; minLane < kBlockValues; ++minLane) {
+    for (uint32_t maxLane = 0; maxLane < kBlockValues; ++maxLane) {
+      if (minLane == maxLane) {
+        continue;
+      }
+      SCOPED_TRACE(fmt::format("minLane={}, maxLane={}", minLane, maxLane));
+      values.fill(0);
+      values[minLane] = std::numeric_limits<T>::min();
+      values[maxLane] = std::numeric_limits<T>::max();
+      check();
+      values.fill(T{4099});
+      values[minLane] = T{4096};
+      values[maxLane] = T{4103};
+      check();
+    }
+  }
+}
 
 TYPED_TEST(CellStreamCursorTest, blockReadsKeepNaturalBoundaries) {
   using T = TypeParam;
