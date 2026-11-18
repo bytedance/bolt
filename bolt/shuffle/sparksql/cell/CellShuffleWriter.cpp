@@ -702,7 +702,7 @@ void CellShuffleWriter::sealWindow(SealReason reason) {
     SCOPE_EXIT {
       sealing_ = false;
     };
-    splitter_->sealWindow();
+    splitter_->sealWindow(columnPositionCounts());
   }
   sealRequested_ = false;
   // A sealed window is a batch boundary: drop reservation slack.
@@ -750,7 +750,8 @@ void CellShuffleWriter::maybeSeal() {
       sealing_ = false;
     };
     const uint32_t sealed = splitter_->sealPartitionsOver(
-        static_cast<uint64_t>(cellOpts.partitionSealBytes));
+        static_cast<uint64_t>(cellOpts.partitionSealBytes),
+        columnPositionCounts());
     pressure_.partitionSeals += sealed > 0;
     pressure_.partitionsSealed += sealed;
   }
@@ -931,7 +932,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   stopped_ = true;
   if (initialized_) {
     try {
-      splitter_->finish(metrics_);
+      splitter_->finish(metrics_, columnPositionCounts());
     } catch (...) {
       // A failed merge needs the pressure line most: what memory pressure
       // made the writer do.

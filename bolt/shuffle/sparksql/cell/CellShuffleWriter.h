@@ -196,6 +196,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// recycled cells. Remotely, a window is released only whole at a batch
   /// boundary, so it requests that and lets this growth proceed.
   void reserveChunk();
+  ColumnPositionCounts columnPositionCounts() const {
+    return shredder_ != nullptr ? shredder_->columnPositionCounts()
+                                : ColumnPositionCounts{};
+  }
   void sealWindow(SealReason reason);
   /// Seals the whole window - on a remote shuffle, pushes it - and returns
   /// its memory; returns the chunk bytes freed.
