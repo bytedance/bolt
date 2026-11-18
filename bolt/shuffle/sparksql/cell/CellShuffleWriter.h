@@ -31,6 +31,8 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
+class CellShuffleCheck;
+
 /// Prepares decoded and partitioned input batches and schedules spills,
 /// window seals and final output through CellSplitter.
 ///
@@ -260,6 +262,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<PartitionBlockOutput> blocks_;
   std::unique_ptr<CellOutput> output_;
   std::unique_ptr<CellSplitter> splitter_;
+  std::unique_ptr<CellShuffleCheck> shuffleCheck_;
   std::unique_ptr<CellNestedShredder> shredder_;
 
   /// Per row, its index among the batch's rows of its partition, for null

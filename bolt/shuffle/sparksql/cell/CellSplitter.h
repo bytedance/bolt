@@ -26,6 +26,8 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
+class CellShuffleCheck;
+
 /// One decoded input batch, pid column already excluded. Borrowed for the
 /// duration of a split call.
 struct SplitBatch {
@@ -49,6 +51,8 @@ struct SplitBatch {
   /// before this batch. nullptr: the window's rows, which split() then
   /// advances by partition2RowCount; otherwise the caller advances its own.
   const uint32_t* positionBase = nullptr;
+  /// Borrowed checker for a selected task; null for the ordinary path.
+  CellShuffleCheck* check = nullptr;
 
   uint32_t numRows() const {
     return static_cast<uint32_t>(row2Partition.size());
@@ -82,6 +86,11 @@ class CellSplitter {
       bool enableNonTemporalStores);
 
   BOLT_CELL_KERNEL void split(const SplitBatch& batch);
+
+  /// Borrowed through finish; selected tasks check all partitions and batches.
+  void setStreamCheck(CellShuffleCheck* check) {
+    streamCheck_ = check;
+  }
 
   /// Writes and recycles the linked cells, retaining caches and window state.
   /// Safe during a split or cache flush; nested output calls are suppressed.
@@ -252,10 +261,15 @@ class CellSplitter {
     }
   }
 
-  template <typename T, bool kHasNulls, InputMapping kMapping>
+  template <typename T, bool kHasNulls, InputMapping kMapping, bool kCheck>
   BOLT_CELL_KERNEL void splitFixed(uint32_t col, const SplitBatch& batch);
 
-  template <typename T, bool kHasNulls, InputMapping kMapping, bool kStreaming>
+  template <
+      typename T,
+      bool kHasNulls,
+      InputMapping kMapping,
+      bool kStreaming,
+      bool kCheck>
   BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
   template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
@@ -351,6 +365,7 @@ class CellSplitter {
   DataCells cells_;
   NullCells nulls_;
   bool writingOutput_{false};
+  CellShuffleCheck* streamCheck_{nullptr};
 
   /// Rows committed per partition in the current window, updated after split.
   std::vector<uint32_t> windowRowCounts_;
