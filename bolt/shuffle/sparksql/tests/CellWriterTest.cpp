@@ -2445,7 +2445,7 @@ TEST_F(CellWriterTest, checkedBatchesPreserveSpillAndSealBoundaries) {
       auto options = writerOptions(kPartitions, rss);
       options.shuffleCheckRatio = checkRatio;
       options.shuffleCheckMaxColumns = 2;
-      options.taskAttemptId = 0;
+      options.taskAttemptId = 25;
       // RSS reclaim requires two live chunks. A 4 MiB cap would seal the
       // large batch at its second chunk, before the reclaim can observe it.
       options.cellOptions.partitionSealBytes = (rss ? 8 : 1) << 20;

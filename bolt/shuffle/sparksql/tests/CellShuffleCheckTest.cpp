@@ -550,12 +550,17 @@ TEST_F(CellShuffleCheckTest, selectsSupportedLogicalColumnsInSchemaOrder) {
 TEST_F(CellShuffleCheckTest, taskSamplingIsStableAndIndependentOfPartitions) {
   const auto type = ROW({"a", "b"}, {INTEGER(), DOUBLE()});
   const std::vector<std::pair<int64_t, bool>> cases{
-      {0, false},
-      {1, false},
-      {3, true},
-      {7, false},
-      {(int64_t{1} << 40) + 7, true},
-      {std::numeric_limits<int64_t>::max(), false}};
+      {0, true},
+      {24, true},
+      {25, false},
+      {99, false},
+      {100, true},
+      {124, true},
+      {125, false},
+      {-1, true},
+      {std::numeric_limits<int64_t>::min(), true},
+      {(int64_t{1} << 40) + 7, false},
+      {std::numeric_limits<int64_t>::max(), true}};
   for (const auto& [taskId, expected] : cases) {
     for (const uint32_t partitions : {1, 16, 1024}) {
       CellShuffleCheck check(*type, partitions, 0.25, 2, pool(), taskId);
@@ -578,7 +583,7 @@ TEST_F(CellShuffleCheckTest, taskSamplingIsStableAndIndependentOfPartitions) {
 
 TEST_F(CellShuffleCheckTest, taskSamplingIncreasingRatios) {
   const auto type = ROW({"a"}, {INTEGER()});
-  for (const int64_t taskId : {0, 3, 7, 42}) {
+  for (const int64_t taskId : {0, 24, 25, 74, 75, 99}) {
     CellShuffleCheck task(*type, 32, 0.25, 1, pool(), taskId);
     CellShuffleCheck more(*type, 32, 0.75, 1, pool(), taskId);
     if (task.enabled()) {
@@ -587,11 +592,24 @@ TEST_F(CellShuffleCheckTest, taskSamplingIncreasingRatios) {
   }
 }
 
+TEST_F(CellShuffleCheckTest, fractionalPercentUsesWholeRemainderBuckets) {
+  const auto type = ROW({"a"}, {INTEGER()});
+  for (const auto& [ratio, expected] :
+       std::vector<std::pair<double, uint32_t>>{{0.005, 1}, {0.255, 26}}) {
+    uint32_t selected = 0;
+    for (int64_t taskId = 0; taskId < 100; ++taskId) {
+      CellShuffleCheck check(*type, 1, ratio, 1, pool(), taskId);
+      selected += check.enabled();
+    }
+    EXPECT_EQ(selected, expected);
+  }
+}
+
 TEST_F(CellShuffleCheckTest, factoryOmitsUnselectedAndUnsupportedWriters) {
   const auto type = ROW({"a"}, {INTEGER()});
   ShuffleWriterOptions options;
   options.shuffleCheckRatio = 0.1;
-  options.taskAttemptId = 0;
+  options.taskAttemptId = 10;
   EXPECT_EQ(
       CellShuffleCheck::create(*type, 16, options, true, pool()), nullptr);
   options.taskAttemptId = 3;
@@ -619,9 +637,8 @@ TEST_F(CellShuffleCheckTest, singlePartitionCanBeSelectedOrSkipped) {
     CellShuffleCheck check(input_->type()->asRow(), 1, 0.1, 1, pool(), taskId);
     selected += check.enabled();
   }
-  EXPECT_GT(selected, 700);
-  EXPECT_LT(selected, 1300);
-  CellShuffleCheck skip(input_->type()->asRow(), 1, 0.1, 1, pool(), 0);
+  EXPECT_EQ(selected, 1000);
+  CellShuffleCheck skip(input_->type()->asRow(), 1, 0.1, 1, pool(), 10);
   EXPECT_FALSE(skip.enabled());
   const auto before = pool()->usedBytes();
   EXPECT_FALSE(skip.beginBatch(batch));
@@ -1010,7 +1027,7 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
   }
   for (const bool streaming : {false, true}) {
     SCOPED_TRACE(streaming);
-    for (const int64_t taskId : {0, 1, 7}) {
+    for (const int64_t taskId : {0, 49, 50}) {
       auto batch = prepare(fixedColumns(kRows, true), pids);
       const auto layout = CellLayout::create(asRowType(input_->type()));
       CountingOutput output;
@@ -1020,7 +1037,7 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
       CellShuffleCheck check(
           *layout.rowType(), kPartitions, 0.5, 6, pool(), taskId);
       splitter.setStreamCheck(check.enabled() ? &check : nullptr);
-      ASSERT_EQ(check.enabled(), taskId != 7);
+      ASSERT_EQ(check.enabled(), taskId != 50);
       for (uint32_t b = 0; b < 5; ++b) {
         auto columns = fixedColumns(kRows, b % 2 != 0);
         for (auto& column : columns) {
@@ -1045,7 +1062,7 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
         const auto source = withPartitionColumn();
         check.prepareInput(*source, true);
         const bool selected = check.beginBatch(batch);
-        ASSERT_EQ(selected, taskId != 7);
+        ASSERT_EQ(selected, taskId != 50);
         if (selected) {
           batch.check = &check;
         }

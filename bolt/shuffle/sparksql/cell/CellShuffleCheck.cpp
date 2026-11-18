@@ -24,11 +24,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <random>
 #include <type_traits>
 
 #include <folly/ScopeGuard.h>
-#include <folly/hash/Hash.h>
 
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 #include "bolt/vector/ComplexVector.h"
@@ -232,13 +230,7 @@ CellShuffleCheck::CellShuffleCheck(
   if (ratio == 0.0 || maxColumns <= 0) {
     return;
   }
-  const uint64_t samplingKey = taskAttemptId >= 0
-      ? static_cast<uint64_t>(taskAttemptId)
-      : std::random_device{}();
-  // Use all task-id bits and an exactly representable draw in [0, 1).
-  const auto hash = folly::hash::twang_mix64(samplingKey);
-  const double draw = static_cast<double>(hash >> 11) * 0x1.0p-53;
-  if (draw >= ratio) {
+  if (taskAttemptId % 100 >= 100 * ratio) {
     return;
   }
   for (uint32_t col = 0; col < type.size() &&
