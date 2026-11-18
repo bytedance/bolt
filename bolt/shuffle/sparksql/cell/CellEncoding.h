@@ -105,6 +105,43 @@ inline void storeLowBytes(uint8_t* out, uint64_t value, uint32_t bytes) {
   ::memcpy(out, &value, bytes);
 }
 
+template <typename T, typename Count>
+inline constexpr bool kFullBigintBlock = std::is_same_v<T, int64_t>&&
+    std::is_same_v<Count, std::integral_constant<uint32_t, 8>>;
+
+template <typename T>
+struct BlockMinMax {
+  T min;
+  T max;
+};
+
+/// Reduces a nonempty block, preserving Count's compile-time full-block size.
+template <typename T, typename Count>
+FOLLY_ALWAYS_INLINE BlockMinMax<T> blockMinMax(const T* values, Count count) {
+  if constexpr (kFullBigintBlock<T, Count>) {
+    // Pairwise reductions shorten the full-block dependency chains.
+    const T min01 = std::min(values[0], values[1]);
+    const T min23 = std::min(values[2], values[3]);
+    const T min45 = std::min(values[4], values[5]);
+    const T min67 = std::min(values[6], values[7]);
+    const T max01 = std::max(values[0], values[1]);
+    const T max23 = std::max(values[2], values[3]);
+    const T max45 = std::max(values[4], values[5]);
+    const T max67 = std::max(values[6], values[7]);
+    return {
+        std::min(std::min(min01, min23), std::min(min45, min67)),
+        std::max(std::max(max01, max23), std::max(max45, max67))};
+  } else {
+    BlockMinMax<T> result{values[0], values[0]};
+    for (uint32_t i = 1; i < count; ++i) {
+      const T value = values[i];
+      result.min = value < result.min ? value : result.min;
+      result.max = value > result.max ? value : result.max;
+    }
+    return result;
+  }
+}
+
 /// Encodes one block of `count` values at `out`, which must hold
 /// kMaxBlockBytes: the kConstNarrow body and the packed tail go out as whole
 /// 8-byte stores past the block's end. A kind is chosen only when strictly
@@ -125,53 +162,28 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       kWidth == 8 ? kBigintPlainMinBits : kMaxPackBits + 1;
   const uint32_t sourceBytes = count * kWidth;
 
-  T minValue = values[0];
-  T maxValue = values[0];
-  if constexpr (
-      std::is_same_v<T, int64_t> &&
-      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
-    // Pairwise reductions shorten the full-block dependency chains.
-    const T min01 = std::min(values[0], values[1]);
-    const T min23 = std::min(values[2], values[3]);
-    const T min45 = std::min(values[4], values[5]);
-    const T min67 = std::min(values[6], values[7]);
-    const T max01 = std::max(values[0], values[1]);
-    const T max23 = std::max(values[2], values[3]);
-    const T max45 = std::max(values[4], values[5]);
-    const T max67 = std::max(values[6], values[7]);
-    minValue = std::min(std::min(min01, min23), std::min(min45, min67));
-    maxValue = std::max(std::max(max01, max23), std::max(max45, max67));
-  } else {
-    for (uint32_t i = 1; i < count; ++i) {
-      const T value = values[i];
-      minValue = value < minValue ? value : minValue;
-      maxValue = value > maxValue ? value : maxValue;
-    }
-  }
-  const bool allEqual = minValue == maxValue;
-  if constexpr (
-      std::is_same_v<T, int64_t> &&
-      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
-    // A constant full BIGINT block always beats its 64-byte plain body.
-    if (allEqual) {
-      const uint32_t bytes = narrowBytesFor(values[0], kWidth);
+  const auto [minValue, maxValue] = blockMinMax(values, count);
+  if (minValue == maxValue) {
+    const uint32_t bytes =
+        narrowBytesFor(static_cast<int64_t>(minValue), kWidth);
+    if (bytes < sourceBytes) {
       out[0] = makeEncodingByte(EncodingKind::kConstNarrow, bytes);
       folly::storeUnaligned<uint64_t>(
-          out + 1, static_cast<uint64_t>(values[0]));
+          out + 1, static_cast<uint64_t>(static_cast<int64_t>(minValue)));
       return 1 + bytes;
     }
+    // A single full-width tail value ties kPlain; retain the original choice.
+    out[0] = makeEncodingByte(EncodingKind::kPlain, 0);
+    ::memcpy(out + 1, values, sourceBytes);
+    return 1 + sourceBytes;
   }
 
   // The kinds' parameters and body sizes, from the minimum and maximum
   // alone. Widths past kExactPackMaxBits are whole bytes (packWidth), and
   // packSize is kBitPack's, or kPlain's from kPlainFromBits; it is never
   // above kPlain's.
-  const uint32_t constBytes =
-      allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
   uint32_t exactWidth;
-  if constexpr (
-      std::is_same_v<T, int64_t> &&
-      std::is_same_v<Count, std::integral_constant<uint32_t, 8>>) {
+  if constexpr (kFullBigintBlock<T, Count>) {
     // OR the sign-normalized extrema to compute their maximum signed width.
     const uint64_t minSign = uint64_t{0} - static_cast<uint64_t>(minValue < 0);
     const uint64_t maxSign = uint64_t{0} - static_cast<uint64_t>(maxValue < 0);
@@ -193,63 +205,37 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       bitWidth < kPlainFromBits ? (count * bitWidth + 7) / 8 : sourceBytes;
   const uint32_t forSize = kWidth + (count * deltaBits + 7) / 8;
 
-  // Equal values take kConstNarrow when it is smaller than they are.
-  // Otherwise kForBitPack takes a block it makes smaller than packSize - a
-  // wide one only below three quarters of it, a tie going to the
-  // alternative, as a base per block scatters a recurring value's bytes
+  // kForBitPack takes a block it makes smaller than packSize - a wide one
+  // only below three quarters of it, a tie going to the alternative, as a
+  // base per block scatters a recurring value's bytes
   // from block to block - and else kBitPack one it makes strictly smaller
   // than the values.
   const bool forWins = wide ? 4 * forSize < 3 * packSize : forSize < packSize;
-  EncodingKind bestKind = EncodingKind::kPlain;
-  if (packSize < sourceBytes) {
-    bestKind = EncodingKind::kBitPack;
-  }
-  if (deltaBits <= 63 && forWins) {
-    bestKind = EncodingKind::kForBitPack;
-  }
-  if (constBytes != 0 && constBytes < sourceBytes) {
-    bestKind = EncodingKind::kConstNarrow;
-  }
-
   uint8_t* pos = out;
-  switch (bestKind) {
-    case EncodingKind::kConstNarrow:
-      *pos++ = makeEncodingByte(EncodingKind::kConstNarrow, constBytes);
-      folly::storeUnaligned<uint64_t>(
-          pos, static_cast<uint64_t>(static_cast<int64_t>(values[0])));
-      pos += constBytes;
-      break;
-    case EncodingKind::kBitPack: {
-      *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
-      const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
-      uint64_t staged[kMaxBlockValues];
-      for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
-        staged[i] =
-            static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
-      }
-      pos = packBits(staged, count, bitWidth, pos);
-      break;
+  if (deltaBits <= 63 && forWins) {
+    *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
+    storeLowBytes(
+        pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
+    pos += kWidth;
+    // Constant blocks returned above, so deltaBits is nonzero.
+    const uint64_t base = static_cast<uint64_t>(minValue);
+    uint64_t staged[kMaxBlockValues];
+    for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
+      staged[i] = static_cast<uint64_t>(values[i]) - base;
     }
-    case EncodingKind::kForBitPack: {
-      *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
-      storeLowBytes(
-          pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
-      pos += kWidth;
-      if (deltaBits > 0) {
-        const uint64_t base = static_cast<uint64_t>(minValue);
-        uint64_t staged[kMaxBlockValues];
-        for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
-          staged[i] = static_cast<uint64_t>(values[i]) - base;
-        }
-        pos = packBits(staged, count, deltaBits, pos);
-      }
-      break;
+    pos = packBits(staged, count, deltaBits, pos);
+  } else if (packSize < sourceBytes) {
+    *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
+    const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
+    uint64_t staged[kMaxBlockValues];
+    for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
+      staged[i] = static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
     }
-    case EncodingKind::kPlain:
-      *pos++ = makeEncodingByte(EncodingKind::kPlain, 0);
-      ::memcpy(pos, values, sourceBytes);
-      pos += sourceBytes;
-      break;
+    pos = packBits(staged, count, bitWidth, pos);
+  } else {
+    *pos++ = makeEncodingByte(EncodingKind::kPlain, 0);
+    ::memcpy(pos, values, sourceBytes);
+    pos += sourceBytes;
   }
   return static_cast<uint32_t>(pos - out);
 }

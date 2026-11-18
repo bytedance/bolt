@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
@@ -286,6 +287,78 @@ TYPED_TEST(CellStreamCursorTest, fullBlocksKeepGenericEncoding) {
       values[minLane] = T{4096};
       values[maxLane] = T{4103};
       check();
+    }
+  }
+}
+
+TYPED_TEST(CellStreamCursorTest, constantBlocksKeepWireEncodingForEveryCount) {
+  using T = TypeParam;
+  constexpr uint32_t kBlockValues = TestFixture::kBlockValues;
+  // Explicit signed-byte boundaries, independent of the encoder's width
+  // selection. The full-width singleton must retain the plain encoding.
+  const std::pair<int64_t, uint32_t> cases[] = {
+      {0, 1},
+      {-1, 1},
+      {0x7f, 1},
+      {-0x80, 1},
+      {0x80, 2},
+      {-0x81, 2},
+      {0x7fff, 2},
+      {-0x8000, 2},
+      {0x8000, 3},
+      {-0x8001, 3},
+      {0x7fffff, 3},
+      {-0x800000, 3},
+      {0x800000, 4},
+      {-0x800001, 4},
+      {0x7fffffff, 4},
+      {-0x80000000LL, 4},
+      {0x80000000LL, 5},
+      {-0x80000001LL, 5},
+      {0x7fffffffffLL, 5},
+      {-0x8000000000LL, 5},
+      {0x8000000000LL, 6},
+      {-0x8000000001LL, 6},
+      {0x7fffffffffffLL, 6},
+      {-0x800000000000LL, 6},
+      {0x800000000000LL, 7},
+      {-0x800000000001LL, 7},
+      {0x7fffffffffffffLL, 7},
+      {-0x80000000000000LL, 7},
+      {0x80000000000000LL, 8},
+      {-0x80000000000001LL, 8},
+      {std::numeric_limits<int64_t>::min(), 8},
+      {std::numeric_limits<int64_t>::max(), 8}};
+  for (const auto& [value, width] : cases) {
+    if (value < std::numeric_limits<T>::min() ||
+        value > std::numeric_limits<T>::max()) {
+      continue;
+    }
+    for (uint32_t count = 1; count <= kBlockValues; ++count) {
+      SCOPED_TRACE(fmt::format("value={}, count={}", value, count));
+      alignas(kCacheLineBytes) std::array<T, kBlockValues> values;
+      values.fill(static_cast<T>(value));
+      if (count < kBlockValues) {
+        values[count] = value == 0 ? T{1} : T{0};
+      }
+      const auto body = bytesOf<T>({static_cast<T>(value)}).substr(0, width);
+      const auto expected = count == 1 && width == sizeof(T)
+          ? block(EncodingKind::kPlain, 0, body)
+          : block(EncodingKind::kConstNarrow, width, body);
+      uint8_t encoded[kMaxBlockBytes];
+      const auto bytes = encodeBlock(values.data(), count, encoded);
+      ASSERT_EQ(bytes, expected.size());
+      EXPECT_EQ(::memcmp(encoded, expected.data(), bytes), 0);
+      std::array<T, kBlockValues> decoded;
+      ASSERT_EQ(decodeBlock(encoded, bytes, count, decoded.data()), bytes);
+      EXPECT_EQ(
+          std::vector<T>(decoded.begin(), decoded.begin() + count),
+          std::vector<T>(count, static_cast<T>(value)));
+      if (count == kBlockValues) {
+        const auto fullBytes = encodeBlockFull(values.data(), encoded);
+        ASSERT_EQ(fullBytes, expected.size());
+        EXPECT_EQ(::memcmp(encoded, expected.data(), fullBytes), 0);
+      }
     }
   }
 }
