@@ -40,7 +40,11 @@ if(BOLT_BUILD_TESTING OR BOLT_BUILD_RADIX_SORT_TEST)
   )
 
   if(NOT BOLT_TEST_LINKAGE STREQUAL "shared")
-    target_sources(bolt_radix_sort_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tests/utils/TempDirectoryPath.cpp)
+    target_sources(
+      bolt_radix_sort_test
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/utils/TempDirectoryPath.cpp
+    )
   endif()
 
   target_link_libraries(bolt_radix_sort_test bolt_gtest_main)
