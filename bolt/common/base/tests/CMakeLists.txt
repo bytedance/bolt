@@ -34,6 +34,7 @@ add_executable(
   ConcurrentCounterTest.cpp
   ExceptionTest.cpp
   FsTest.cpp
+  MemoryCopyTest.cpp
   RangeTest.cpp
   RuntimeMetricsTest.cpp
   NumberParsingTest.cpp

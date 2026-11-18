@@ -231,6 +231,12 @@ class CellSplitter {
   /// Flushes a raw stream's staged cache line `line` bytes as they are.
   void flushRaw(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
 
+  /// Full raw numeric lines keep the destination aligned until the stream
+  /// closes. Partial lines still use flushRaw and ordinary stores.
+  template <bool kStreaming>
+  FOLLY_ALWAYS_INLINE void
+  flushRawFull(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
+
   /// Both paths pack bytes into full cache lines. Only ordinary string streams
   /// request streaming stores; dictionary fallback keeps ordinary copies.
   template <bool kStreaming>
@@ -251,7 +257,7 @@ class CellSplitter {
   template <typename T, bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitFixed(uint32_t col, const SplitBatch& batch);
 
-  template <typename T, bool kHasNulls, InputMapping kMapping>
+  template <typename T, bool kHasNulls, InputMapping kMapping, bool kStreaming>
   BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
   template <bool kHasNulls, InputMapping kMapping, bool kStreaming>

@@ -26,6 +26,7 @@
 #include <emmintrin.h>
 #endif
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -37,33 +38,6 @@ namespace {
 /// line reads up to 15 bytes past it: into the neighbouring line, or for
 /// the very last line into this padding rather than past the allocation.
 constexpr size_t kCacheTailPadding = 16;
-
-template <uint32_t kWidth>
-FOLLY_ALWAYS_INLINE void
-copyStringEnds(char* dst, const char* src, uint32_t bytes) {
-  ::memcpy(dst, src, kWidth);
-  ::memcpy(dst + bytes - kWidth, src + bytes - kWidth, kWidth);
-}
-
-/// Copies fewer than 64 bytes without reading or writing outside the range.
-/// Source and destination must not overlap. The two destination writes may
-/// overlap each other, but reproduce the same bytes.
-FOLLY_ALWAYS_INLINE void
-copyStringUnder64(char* dst, const char* src, uint32_t bytes) {
-  if (bytes >= 32) {
-    copyStringEnds<32>(dst, src, bytes);
-  } else if (bytes >= 16) {
-    copyStringEnds<16>(dst, src, bytes);
-  } else if (bytes >= 8) {
-    copyStringEnds<8>(dst, src, bytes);
-  } else if (bytes >= 4) {
-    copyStringEnds<4>(dst, src, bytes);
-  } else if (bytes >= 2) {
-    copyStringEnds<2>(dst, src, bytes);
-  } else if (bytes != 0) {
-    *dst = *src;
-  }
-}
 
 #if defined(__SSE2__)
 /// The 16-byte probe needle of a value of 8 to 12 characters, inline in its
@@ -167,6 +141,22 @@ void CellSplitter::flushRaw(
 }
 
 template <bool kStreaming>
+FOLLY_ALWAYS_INLINE void CellSplitter::flushRawFull(
+    uint32_t stream,
+    uint32_t pid,
+    const char* line,
+    uint8_t* cur) {
+  BOLT_DCHECK_EQ(cur[pid], kCacheLineBytes);
+  if constexpr (kStreaming) {
+    cells_.appendStreamingAligned(pid, stream, line);
+  } else {
+    cells_.append(pid, stream, line, kCacheLineBytes);
+  }
+  bumpPartitionBytes(pid, kCacheLineBytes);
+  cur[pid] = 0;
+}
+
+template <bool kStreaming>
 FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     uint32_t stream,
     uint32_t pid,
@@ -176,7 +166,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
   char* line = cacheLine(stream, pid);
   if (cur[pid] != 0 && bytes != 0) {
     const uint32_t take = std::min<uint32_t>(bytes, kCacheLineBytes - cur[pid]);
-    copyStringUnder64(line + cur[pid], data, take);
+    memory::copyUnder64(line + cur[pid], data, take);
     cur[pid] += take;
     data += take;
     bytes -= take;
@@ -185,7 +175,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     }
 
     if constexpr (kStreaming) {
-      cells_.appendStreamingAligned(pid, stream, line, kCacheLineBytes);
+      cells_.appendStreamingAligned(pid, stream, line);
     } else {
       cells_.append(pid, stream, line, kCacheLineBytes);
     }
@@ -211,7 +201,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
     }
   }
   if (bytes != 0) {
-    copyStringUnder64(line, data, bytes);
+    memory::copyUnder64(line, data, bytes);
     cur[pid] = static_cast<uint8_t>(bytes);
   }
 }
@@ -269,7 +259,11 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
+template <
+    typename T,
+    bool kHasNulls,
+    CellSplitter::InputMapping kMapping,
+    bool kStreaming>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -316,7 +310,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
-      flushRaw(
+      flushRawFull<kStreaming>(
           stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
     }
   }
@@ -403,10 +397,17 @@ void CellSplitter::dispatchRaw(
     uint32_t col,
     const SplitBatch& batch,
     bool hasNulls) {
-  dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
-    hasNulls ? splitRawFixed<T, true, kMapping>(col, batch)
-             : splitRawFixed<T, false, kMapping>(col, batch);
-  });
+  const auto split = [&]<bool kStreaming>() {
+    dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+      hasNulls ? splitRawFixed<T, true, kMapping, kStreaming>(col, batch)
+               : splitRawFixed<T, false, kMapping, kStreaming>(col, batch);
+    });
+  };
+  if (enableNonTemporalStores_) {
+    split.template operator()<true>();
+  } else {
+    split.template operator()<false>();
+  }
 }
 
 template <bool kHasNulls>
@@ -476,11 +477,12 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
     const int64_t seconds = value.getSeconds();
     const int64_t nanos = static_cast<int64_t>(value.getNanos());
     // Both streams hold one 8-byte value per row, so the two cursors are
-    // always equal and both lines fill on the same row.
+    // always equal and both lines fill on the same row. The 64-byte-aligned
+    // lines and 8-byte cursor steps align both stores for int64_t.
     const size_t line = static_cast<size_t>(pid) << 6;
     const size_t at = line + secondsCur[pid];
-    folly::storeUnaligned<int64_t>(secondsBase + at, seconds);
-    folly::storeUnaligned<int64_t>(nanosBase + at, nanos);
+    *reinterpret_cast<int64_t*>(secondsBase + at) = seconds;
+    *reinterpret_cast<int64_t*>(nanosBase + at) = nanos;
     secondsCur[pid] += sizeof(int64_t);
     nanosCur[pid] += sizeof(int64_t);
     if (FOLLY_UNLIKELY(secondsCur[pid] == kCacheLineBytes)) {
@@ -1113,7 +1115,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     if (FOLLY_UNLIKELY(++lengthCur[pid] == kCacheLineBytes)) {
       if constexpr (kStreaming) {
         cells_.appendStreamingAligned(
-            pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);
+            pid, lengthStream, cacheLine(lengthStream, pid));
       } else {
         cells_.append(
             pid, lengthStream, cacheLine(lengthStream, pid), kCacheLineBytes);

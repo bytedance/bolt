@@ -266,7 +266,6 @@ DataCells::DataCells(
 }
 
 DataCells::~DataCells() {
-  completeStreamingWrites();
   const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
   if (infos_ != nullptr) {
     pool_->free(infos_, numChains * sizeof(ChainInfo));
@@ -308,9 +307,6 @@ void DataCells::appendWithAllocation(
   if (bytes == 0) {
     return;
   }
-  // Allocating a cell or growing next_ can re-enter the writer to spill or
-  // compact previously appended data.
-  completeStreamingWrites();
   const uint32_t cellBytes = allocator_->cellBytes();
   // Phase 1: allocate every cell this append could need, before touching the
   // chain or copying a byte. The allocator's reserveChunk or pool arbitration
@@ -376,7 +372,7 @@ void DataCells::appendWithAllocation(
     }
     const uint32_t copy = bytes < info.tailLeft ? bytes : info.tailLeft;
     if (streaming) {
-      copyStreaming(info.tail, src, copy);
+      memory::copyNonTemporal(info.tail, src, copy);
     } else {
       ::memcpy(info.tail, src, copy);
     }
@@ -397,7 +393,6 @@ void DataCells::releaseAll() {
 }
 
 uint64_t DataCells::compact(uint64_t targetBytes) {
-  completeStreamingWrites();
   const uint32_t numChunks = allocator_->numChunkSlots();
   if (numChunks < 2 || targetBytes == 0) {
     return 0;
@@ -503,7 +498,6 @@ uint64_t DataCells::compact(uint64_t targetBytes) {
 }
 
 void DataCells::releasePartition(uint32_t pid) {
-  completeStreamingWrites();
   for (uint32_t stream = 0; stream < numStreams_; ++stream) {
     auto& info = infos_[chainIndex(pid, stream)];
     uint32_t id = info.firstCell;
