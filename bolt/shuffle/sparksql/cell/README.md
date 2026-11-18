@@ -94,11 +94,14 @@ them:
 
 ### Optional shuffle check
 
-`shuffleCheckRatio` selects whole task attempts by hashing `taskAttemptId` once;
-0 disables and 1 checks every task. A negative task ID uses a random key.
+`shuffleCheckRatio` selects whole task attempts using
+`taskAttemptId % 100 < 100 * shuffleCheckRatio`; 0 disables and 1 checks every
+task. For nonnegative IDs, selection repeats every 100 tasks, with 1% granularity
+(positive ratios below 1% select remainder 0). Negative task IDs are selected
+whenever the ratio is positive, following signed remainder semantics.
 Selected writers check the first `shuffleCheckMaxColumns` supported columns
-across all partitions and batches. The ratio describes expected task coverage,
-not an exact row/byte quota. Unselected writers have no checker attached.
+across all partitions and batches. Coverage depends on the task ID remainders,
+not row/byte counts. Unselected writers have no checker attached.
 
 `CellShuffleCheck.h/.cpp` contain the check implementation. Integer, REAL and
 DOUBLE non-null values use ordered CRC32C and exact counts per column/partition.
