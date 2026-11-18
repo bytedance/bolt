@@ -26,8 +26,6 @@
 #include <limits>
 #include <type_traits>
 
-#include <folly/ScopeGuard.h>
-
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -267,20 +265,6 @@ CellShuffleCheck::CellShuffleCheck(
     columns_[col].select = select;
     columns_[col].streamIndex = selectedColumns_++;
   }
-}
-
-void CellShuffleCheck::split(
-    CellSplitter& splitter,
-    SplitBatch& batch,
-    const RowVector& input,
-    bool isHash) {
-  auto cleanup = folly::makeGuard([&]() noexcept {
-    batch.check = nullptr;
-    endBatch();
-  });
-  prepareInput(input, isHash);
-  batch.check = beginBatch(batch) ? this : nullptr;
-  splitter.split(batch);
 }
 
 void CellShuffleCheck::prepareInput(const RowVector& input, bool isHash) {

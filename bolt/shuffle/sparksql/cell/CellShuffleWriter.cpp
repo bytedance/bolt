@@ -453,8 +453,15 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     batch.rowIndexInPid = rowIndexInPid_;
   }
   if (shuffleCheck_ != nullptr) {
-    shuffleCheck_->split(
-        *splitter_, batch, *rv, options_.partitioning == Partitioning::kHash);
+    auto cleanup = folly::makeGuard([&]() noexcept {
+      batch.check = nullptr;
+      shuffleCheck_->endBatch();
+    });
+    shuffleCheck_->prepareInput(
+        *rv, options_.partitioning == Partitioning::kHash);
+    batch.check =
+        shuffleCheck_->beginBatch(batch) ? shuffleCheck_.get() : nullptr;
+    splitter_->split(batch);
   } else {
     splitter_->split(batch);
   }

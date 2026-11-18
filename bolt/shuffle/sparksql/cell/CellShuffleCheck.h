@@ -46,7 +46,6 @@ struct ShuffleWriterOptions;
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 struct SplitBatch;
-class CellSplitter;
 
 /// Samples task attempts once per writer and checks their non-null cache values
 /// with per-partition ordered CRC32C and exact counts across all batches.
@@ -65,8 +64,8 @@ class CellShuffleCheck {
       bool supportedSchema,
       memory::MemoryPool* pool);
 
-  /// Hashes taskAttemptId once against ratio, independently of partition count.
-  /// A negative task id uses one random key for this writer.
+  /// Selects by taskAttemptId % 100 < 100 * ratio, independently of partitions.
+  /// Negative task IDs are selected whenever ratio is positive.
   /// Selected writers check the first maxColumns supported columns in every
   /// partition across all batches and seals.
   CellShuffleCheck(
@@ -76,13 +75,6 @@ class CellShuffleCheck {
       int32_t maxColumns,
       memory::MemoryPool* pool,
       int64_t taskAttemptId = -1);
-
-  /// Runs one split and releases borrowed input on success or exception.
-  void split(
-      CellSplitter& splitter,
-      SplitBatch& batch,
-      const RowVector& input,
-      bool isHash);
 
   /// Borrows validated, normalized original hash pids independently of the
   /// producer's mapping. Does not change partitioning or allocate row buffers.
