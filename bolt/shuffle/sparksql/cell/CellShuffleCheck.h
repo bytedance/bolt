@@ -83,6 +83,9 @@ class CellShuffleCheck {
   /// Returns false for an empty batch or an unselected writer.
   bool beginBatch(const SplitBatch& batch);
   bool checksColumn(uint32_t col) const;
+  bool checksBatchColumn(uint32_t col) const {
+    return batch_ != nullptr && checksColumn(col);
+  }
   bool enabled() const {
     return selectedColumns_ != 0;
   }

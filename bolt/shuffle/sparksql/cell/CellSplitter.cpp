@@ -207,12 +207,11 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
   }
 }
 
-template <
-    typename T,
-    bool kHasNulls,
-    CellSplitter::InputMapping kMapping,
-    bool kCheck>
+template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+      ? streamCheck_
+      : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
@@ -258,8 +257,8 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
-      if constexpr (kCheck) {
-        batch.check->beforeFullFlush<T>(
+      if (check != nullptr) {
+        check->beforeFullFlush<T>(
             pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
       }
       flushEncoded<T>(
@@ -272,9 +271,11 @@ template <
     typename T,
     bool kHasNulls,
     CellSplitter::InputMapping kMapping,
-    bool kStreaming,
-    bool kCheck>
+    bool kStreaming>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+      ? streamCheck_
+      : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
@@ -320,9 +321,11 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
-      if constexpr (kCheck) {
-        batch.check->beforeFullFlush<T>(
-            pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+      if constexpr (sizeof(T) != 16) { // HUGEINT is outside the check scope.
+        if (check != nullptr) {
+          check->beforeFullFlush<T>(
+              pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+        }
       }
       flushRawFull<kStreaming>(
           stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
@@ -400,15 +403,10 @@ void CellSplitter::dispatchEncoded(
     uint32_t col,
     const SplitBatch& batch,
     bool hasNulls) {
-  const bool checked = batch.check != nullptr && batch.check->checksColumn(col);
-  const auto split = [&]<bool kCheck>() {
-    dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
-      hasNulls ? splitFixed<T, true, kMapping, kCheck>(col, batch)
-               : splitFixed<T, false, kMapping, kCheck>(col, batch);
-    });
-  };
-  checked ? split.template operator()<true>()
-          : split.template operator()<false>();
+  dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+    hasNulls ? splitFixed<T, true, kMapping>(col, batch)
+             : splitFixed<T, false, kMapping>(col, batch);
+  });
 }
 
 template <typename T>
@@ -416,23 +414,16 @@ void CellSplitter::dispatchRaw(
     uint32_t col,
     const SplitBatch& batch,
     bool hasNulls) {
-  const bool checked = batch.check != nullptr && batch.check->checksColumn(col);
-  const auto split = [&]<bool kCheck>() {
-    const auto stream = [&]<bool kStreaming>() {
-      dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
-        hasNulls
-            ? splitRawFixed<T, true, kMapping, kStreaming, kCheck>(col, batch)
-            : splitRawFixed<T, false, kMapping, kStreaming, kCheck>(col, batch);
-      });
-    };
-    enableNonTemporalStores_ ? stream.template operator()<true>()
-                             : stream.template operator()<false>();
+  const auto split = [&]<bool kStreaming>() {
+    dispatchInputMapping(batch.decoded[col], [&]<InputMapping kMapping>() {
+      hasNulls ? splitRawFixed<T, true, kMapping, kStreaming>(col, batch)
+               : splitRawFixed<T, false, kMapping, kStreaming>(col, batch);
+    });
   };
-  if constexpr (sizeof(T) == 16) {
-    split.template operator()<false>(); // HUGEINT is outside the check scope.
+  if (enableNonTemporalStores_) {
+    split.template operator()<true>();
   } else {
-    checked ? split.template operator()<true>()
-            : split.template operator()<false>();
+    split.template operator()<false>();
   }
 }
 
@@ -532,10 +523,10 @@ void CellSplitter::split(const SplitBatch& batch) {
     const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
     const bool checked =
-        batch.check != nullptr && batch.check->checksColumn(col);
+        streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col);
     if (checked) {
       const auto stream = layout_.firstStream(col);
-      batch.check->beginColumn(col, cacheLine(stream, 0));
+      streamCheck_->beginColumn(col, cacheLine(stream, 0));
     }
     const bool recordNulls = nulls_.observeBatch(nullColumn, klass, positions);
     if (klass == NullClass::kAllNull) {

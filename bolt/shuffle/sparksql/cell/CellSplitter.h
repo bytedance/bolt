@@ -51,8 +51,6 @@ struct SplitBatch {
   /// before this batch. nullptr: the window's rows, which split() then
   /// advances by partition2RowCount; otherwise the caller advances its own.
   const uint32_t* positionBase = nullptr;
-  /// Borrowed checker for a selected task; null for the ordinary path.
-  CellShuffleCheck* check = nullptr;
 
   uint32_t numRows() const {
     return static_cast<uint32_t>(row2Partition.size());
@@ -261,15 +259,10 @@ class CellSplitter {
     }
   }
 
-  template <typename T, bool kHasNulls, InputMapping kMapping, bool kCheck>
+  template <typename T, bool kHasNulls, InputMapping kMapping>
   BOLT_CELL_KERNEL void splitFixed(uint32_t col, const SplitBatch& batch);
 
-  template <
-      typename T,
-      bool kHasNulls,
-      InputMapping kMapping,
-      bool kStreaming,
-      bool kCheck>
+  template <typename T, bool kHasNulls, InputMapping kMapping, bool kStreaming>
   BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
   template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
