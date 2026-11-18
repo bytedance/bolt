@@ -280,7 +280,7 @@ TEST_F(CellShuffleCheckTest, streamingSplitterSealsAndMappedNulls) {
   EXPECT_GT(output.calls, 0);
 }
 
-TEST_F(CellShuffleCheckTest, splitScopeClearsBorrowedInputOnFailure) {
+TEST_F(CellShuffleCheckTest, endBatchClearsBorrowedInputOnFailure) {
   auto batch = prepare({makeFlatVector<int64_t>({11, 22})}, {0, 1});
   const auto source = withPartitionColumn();
   const auto layout = CellLayout::create(asRowType(input_->type()));
@@ -290,12 +290,16 @@ TEST_F(CellShuffleCheckTest, splitScopeClearsBorrowedInputOnFailure) {
   CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 1, pool());
   splitter.setStreamCheck(&check);
   counts_[0] = 0;
-  BOLT_ASSERT_THROW(
-      check.split(splitter, batch, *source, true), "invalid partition counts");
-  EXPECT_EQ(batch.check, nullptr);
+  check.prepareInput(*source, true);
+  BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition counts");
+  EXPECT_NO_THROW(check.endBatch());
   counts_[0] = 1;
-  EXPECT_NO_THROW(check.split(splitter, batch, *source, true));
-  EXPECT_EQ(batch.check, nullptr);
+  check.prepareInput(*source, true);
+  ASSERT_TRUE(check.beginBatch(batch));
+  batch.check = &check;
+  EXPECT_NO_THROW(splitter.split(batch));
+  check.endBatch();
+  batch.check = nullptr;
   ShuffleWriterMetrics metrics;
   EXPECT_NO_THROW(splitter.finish(metrics, {}));
 }
