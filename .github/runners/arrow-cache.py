@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prewarm Conan source backups and deploy the existing Conan server."""
+"""Prewarm local source archives and mount them into runner tool caches."""
 
 import argparse
 import hashlib
@@ -51,7 +51,7 @@ def atomic_copy(source, destination):
 
 
 def prepare(root, image, version, cci_ref, seed_dir):
-    cache = root / "conan-server-data/source-backup"
+    cache = root / "conan-source-cache"
     cache.mkdir(parents=True, exist_ok=True)
     # Reuse verified archives from older ECS deployments, without their metadata.
     if seed_dir and seed_dir.is_dir():
@@ -90,7 +90,10 @@ def prepare(root, image, version, cci_ref, seed_dir):
         ],
         check=True,
     )
-    # Only content-addressed archives are exposed by Nginx.
+    # Publish only verified blobs, never Conan metadata, URLs or lock files.
+    published = cache / "archives"
+    published.mkdir(exist_ok=True)
+    published.chmod(0o755)
     for directory in (cache, cache / "s"):
         directory.chmod(0o755)
     for archive in (cache / "s").iterdir():
@@ -98,6 +101,11 @@ def prepare(root, image, version, cci_ref, seed_dir):
             if digest(archive) != archive.name:
                 raise ValueError("Source backup checksum mismatch")
             archive.chmod(0o644)
+            atomic_copy(archive, published / archive.name)
+    atomic_copy(
+        Path(__file__).with_name("compose.local-sources.yml"),
+        cache / "compose.local-sources.yml",
+    )
 
 
 def copy_home_cache(source, destination):
@@ -188,22 +196,29 @@ def build_image(image, output, home_seed):
         )
 
 
-def deploy(root, project):
-    compose = [
-        "docker",
-        "compose",
-        "--project-name",
-        project,
-        "--file",
-        str(Path(__file__).with_name("docker-compose.yml")),
-    ]
+def deploy(root, project, compose_files):
+    compose = ["docker", "compose", "--project-name", project]
+    for name in compose_files:
+        compose.extend(["--file", str(name.resolve(strict=True))])
+    compose.extend(
+        ["--file", str(root / "conan-source-cache/compose.local-sources.yml")]
+    )
     env = {**os.environ, "HOST_DATA_DIR": str(root), "COMPOSE_REMOVE_ORPHANS": "false"}
-    for command in (
-        ["build", "conan_server"],
-        ["push", "conan_server"],
-        ["up", "-d", "--no-deps", "conan_server"],
-    ):
-        subprocess.run([*compose, *command], env=env, check=True)
+    subprocess.run(
+        [
+            *compose,
+            "up",
+            "-d",
+            "--no-deps",
+            "--no-build",
+            "--pull",
+            "never",
+            "runner-medium",
+            "runner-small",
+        ],
+        env=env,
+        check=True,
+    )
 
 
 def main():
@@ -218,6 +233,12 @@ def main():
         "--cci-ref", default="main", help="Recipe index branch or tag used by CI"
     )
     parser.add_argument("--project", default="runners", help="Existing Compose project")
+    parser.add_argument(
+        "--compose-file",
+        action="append",
+        type=Path,
+        help="Original Compose file; repeat for every existing override, in order",
+    )
     parser.add_argument(
         "--seed-dir", type=Path, help="Existing source-backup/s to migrate"
     )
@@ -234,14 +255,16 @@ def main():
     elif args.command == "image":
         if not args.home_seed or not args.home_seed.is_dir():
             parser.error(
-                "image requires --home-seed; Arrow sources are served by Conan server"
+                "image requires --home-seed; Arrow sources use the local runner mount"
             )
         build_image(args.image, args.output_image, args.home_seed)
     else:
+        if args.command == "up" and not args.compose_file:
+            parser.error("up requires --compose-file with the original stack files")
         root = Path(os.environ.get("HOST_DATA_DIR", "/data")).resolve()
         prepare(root, args.image, args.version, args.cci_ref, args.seed_dir)
         if args.command == "up":
-            deploy(root, args.project)
+            deploy(root, args.project, args.compose_file)
 
 
 if __name__ == "__main__":

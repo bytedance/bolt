@@ -24,30 +24,30 @@ python scripts/configure-conan-sources-cache.py \
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
+import tempfile
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Conan source repository URL")
-    parser.add_argument(
-        "--user", help="Conan source repository user (omit for public reads)"
-    )
-    parser.add_argument(
-        "--optional",
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--url", help="Conan source repository URL")
+    source.add_argument(
+        "--local",
         action="store_true",
-        help="Keep current settings if the URL is unavailable",
+        help="Import optional runner-local source archives",
     )
+    parser.add_argument("--user", help="Conan source repository user")
     args = parser.parse_args()
     args.password = os.environ.get("CONAN_SOURCE_PASSWORD")
-    if args.user and not args.password:
-        parser.error("CONAN_SOURCE_PASSWORD environment variable is required")
+    if args.url and (not args.user or not args.password):
+        parser.error("--user and CONAN_SOURCE_PASSWORD are required with --url")
     return args
 
 
@@ -61,16 +61,63 @@ def conan_home() -> Path:
     return Path(result.stdout.strip())
 
 
-def configure_global_conf(home: Path, url: str) -> None:
+def configure_global_conf(home: Path, url: str | None) -> None:
     global_conf = home / "global.conf"
     settings = {
         "core.sources:download_cache": str(home / "source-backup"),
-        "core.sources:download_urls": json.dumps([url, "origin"]),
+        "core.sources:download_urls": json.dumps(
+            [url, "origin"] if url else ["origin"]
+        ),
     }
     lines = global_conf.read_text().splitlines() if global_conf.exists() else []
     lines = [line for line in lines if line.partition("=")[0].strip() not in settings]
     lines.extend(f"{key}={value}" for key, value in settings.items())
     global_conf.write_text("\n".join(lines) + "\n")
+
+
+def import_local_sources() -> None:
+    tools = os.environ.get("RUNNER_TOOL_CACHE")
+    if not tools:
+        return
+    seed = Path(tools) / "bolt-source-cache"
+    try:
+        archives = list(seed.iterdir())
+    except OSError:
+        return
+    home = conan_home()
+    destination = home / "source-backup/s"
+    destination.mkdir(parents=True, exist_ok=True)
+    imported = 0
+    for archive in archives:
+        if not re.fullmatch(r"[0-9a-f]{64}", archive.name) or archive.is_symlink():
+            continue
+        temporary = None
+        try:
+            with (
+                archive.open("rb") as source,
+                tempfile.NamedTemporaryFile(dir=destination, delete=False) as output,
+            ):
+                temporary = Path(output.name)
+                digest = hashlib.sha256()
+                while block := source.read(1024 * 1024):
+                    output.write(block)
+                    digest.update(block)
+            if digest.hexdigest() != archive.name:
+                continue
+            target = destination / archive.name
+            os.replace(temporary, target)
+            # Do not share writable metadata or retain stale dirty markers.
+            target.with_suffix(".json").unlink(missing_ok=True)
+            target.with_suffix(".dirty").unlink(missing_ok=True)
+            imported += 1
+        except OSError:
+            continue
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+    if imported:
+        configure_global_conf(home, None)
+        print(f"Imported {imported} local source archives")
 
 
 def configure_source_credentials(
@@ -177,16 +224,12 @@ def secure_write(path: Path, text: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.optional:
-        try:
-            with urlopen(Request(args.url, method="HEAD"), timeout=3):
-                pass
-        except (OSError, URLError, ValueError):
-            return
+    if args.local:
+        import_local_sources()
+        return
     home = conan_home()
     configure_global_conf(home, args.url)
-    if args.user:
-        configure_source_credentials(home, args.url, args.user, args.password)
+    configure_source_credentials(home, args.url, args.user, args.password)
 
 
 if __name__ == "__main__":

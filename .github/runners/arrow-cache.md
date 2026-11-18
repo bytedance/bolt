@@ -14,15 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Conan source backups
+# Local Conan source cache
 
-The existing Conan server also serves read-only source archives on port 9301.
-Archives live in `${HOST_DATA_DIR}/conan-server-data/source-backup/s`, alongside
-binary storage but outside the package layout. CI already mounts this data into
-its `conanserver` service; no additional workflow service, host address or source
-cache image layer is needed.
+Each ECS prewarms its own archives. No HTTP service, cross-ECS connection, Conan
+server change or source-cache image layer is required. CI imports verified files
+into its private Conan cache; writable metadata and locks are never shared.
 
-## Deploy on each ECS
+## Prepare on each ECS
 
 Use this PR's checkout and the current CI image available on the host:
 
@@ -30,35 +28,52 @@ Use this PR's checkout and the current CI image available on the host:
 cd /root/projects/bolt/.github/runners
 export HOST_DATA_DIR=/data
 export BOLT_CI_IMAGE=localhost:5000/bolt-ci:20260921
-python3 arrow-cache.py up --project runners \
-  --seed-dir "$HOST_DATA_DIR/conan-source-cache/s"
+python3 arrow-cache.py prepare
 ```
 
-`up` uses `install-bolt-deps.sh` and `conan source` to prepare Arrow 15.0.1-oss,
-including the Substrait archive requested by that recipe. `--cci-ref` selects
+This runs the existing `install-bolt-deps.sh` and `conan source` for Arrow
+15.0.1-oss, including Substrait as required by the recipe. `--cci-ref` selects
 the recipe-index branch/tag used by CI; `--version` selects the Arrow version.
-Conan owns the URLs and checksums. Valid archives from `--seed-dir` are reused;
-omit it for a new deployment. `prepare` only warms the data, without deployment.
+Conan owns the download URLs and checksums. Existing archives under
+`$HOST_DATA_DIR/conan-source-cache/s` are reused. To migrate the previous HTTP
+layout, add `--seed-dir "$HOST_DATA_DIR/conan-server-data/source-backup/s"`.
 
-The command builds and pushes the existing `conan-server:latest` image through
-`docker-compose.yml`, then updates only `conan_server`. The registry must already
-be running, and the stack's `variables.env` must exist. It does not restart runners
-or change their registration. Run between jobs that use the host Conan server.
-Each ECS needs the source data; each registry used by runners needs the new server
-image. New Actions jobs pull that image automatically.
+Only verified hash-named archives are published under
+`$HOST_DATA_DIR/conan-source-cache/archives`. The script also installs
+`compose.local-sources.yml` next to that directory. Refresh with `prepare`;
+no image rebuild or runner restart is needed for later archive updates.
 
-CI configures Conan's native source backup support through the generic job service
-URL `http://conanserver:9301/s/`. No ECS hostname, IP or source credentials are passed
-to the job or printed in its logs. If the endpoint is absent during setup, existing
-Conan settings are preserved. Once enabled, a service outage is a Conan error;
-a missing archive falls back to its original URL. Nginx permits only hash-named
-archive reads and synthetic empty Conan metadata; private metadata, directory
-listings and upload endpoints are unavailable.
-The port need not be published on the ECS host.
+## Attach to the runners
 
-The old standalone `bolt-source-cache` container can be stopped after migration;
-its data is retained. Arrow and Substrait no longer need to be baked into the CI
-image. Refresh sources with `prepare`; an archive refresh does not rebuild images.
+Wait until the selected runners are idle. Load the same environment and registration
+credentials used for their normal startup. Keep **all original Compose files in
+order**, including repository/name/label overrides, then append the installed overlay:
+
+```bash
+docker compose --project-name runners \
+  -f /path/to/existing/docker-compose.yml \
+  -f /path/to/existing/runner-overrides.yml \
+  -f "$HOST_DATA_DIR/conan-source-cache/compose.local-sources.yml" \
+  up -d --no-deps --no-build --pull never runner-medium runner-small
+```
+
+Omit the override only if the original stack has none. This recreates only the
+runner containers to add their mounts; the normal startup may register them again.
+It does not build images or update Conan/registry services. Preserve the overlay
+in future startup commands. Alternatively, `arrow-cache.py up` combines preparation
+and this update; pass each original file with `--compose-file`, in the same order.
+
+The overlay sets `RUNNER_TOOL_CACHE=/opt/bolt-runner-tools` and mounts the published
+archives into its `bolt-source-cache` child read-only. GitHub Runner automatically
+mounts its tool directory into job containers, including with Docker-in-Docker.
+The CI adapter imports from the job's translated `RUNNER_TOOL_CACHE`, checks each
+SHA-256, and discards shared metadata. Workflow YAML needs no cache paths, hostnames,
+IP addresses or repository variables. Missing or corrupt optional seeds fall back
+to normal dependency downloads. Other tool-cache entries remain writable.
+
+If the previous HTTP deployment was installed, its containers/images can be
+retired separately after switching jobs to the local cache. This command does
+not delete their data or recreate those services.
 
 ## Optional Maven, Spark and pip seeds
 
@@ -78,4 +93,4 @@ job HOME directories without overwriting existing files or writing back to seeds
 Missing seeds do not block startup. The original base must not define `BASH_ENV`;
 use its unmodified digest when refreshing this optional layer. Publish it to the
 runner registry separately. This command does not contain or configure Arrow
-source backups and is not required for the deployment above.
+source archives and is not required for the deployment above.
