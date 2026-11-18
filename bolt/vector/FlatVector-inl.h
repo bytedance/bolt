@@ -522,6 +522,18 @@ void FlatVector<T>::copyRanges(
 
   if (source->isFlatEncoding()) {
     auto* flatSource = source->asUnchecked<FlatVector<T>>();
+    const auto flatSourceSize = flatSource->size();
+    auto applyToEachBoundedRange = [&](auto&& func) {
+      applyToEachRange(
+          ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
+            const auto bound =
+                flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
+            const auto boundedCount = std::min(count, bound);
+            if (boundedCount > 0) {
+              func(targetIndex, sourceIndex, boundedCount);
+            }
+          });
+    };
     if constexpr (std::is_same_v<T, StringView>) {
       // Bulk copies only inherit stats; avoid rescanning to prevent
       // regressions.
@@ -533,55 +545,61 @@ void FlatVector<T>::copyRanges(
     }
     if (flatSource->values() == nullptr) {
       // All source values are null.
-      BaseVector::setNulls(BaseVector::mutableRawNulls(), ranges, true);
+      if constexpr (std::is_same_v<T, bool>) {
+        auto* targetNulls = BaseVector::mutableRawNulls();
+        applyToEachBoundedRange(
+            [&](auto targetIndex, auto /*sourceIndex*/, auto count) {
+              bits::fillBits(
+                  targetNulls, targetIndex, targetIndex + count, bits::kNull);
+            });
+      } else {
+        BaseVector::setNulls(BaseVector::mutableRawNulls(), ranges, true);
+      }
       return;
     }
 
-    const auto flatSourceSize = flatSource->size();
     if constexpr (std::is_same_v<T, bool>) {
       auto rawValues = reinterpret_cast<uint64_t*>(rawValues_);
       auto* sourceValues = flatSource->template rawValues<uint64_t>();
-      applyToEachRange(
-          ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
-            const auto bound =
-                flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
-            const auto boundedCount = std::min(count, bound);
-            if (boundedCount == 0) {
-              return;
-            }
+      applyToEachBoundedRange(
+          [&](auto targetIndex, auto sourceIndex, auto count) {
             bits::copyBits(
-                sourceValues,
-                sourceIndex,
-                rawValues,
-                targetIndex,
-                boundedCount);
+                sourceValues, sourceIndex, rawValues, targetIndex, count);
+            if (rawNulls) {
+              if (sourceRawNulls) {
+                bits::copyBits(
+                    sourceRawNulls, sourceIndex, rawNulls, targetIndex, count);
+              } else {
+                bits::fillBits(
+                    rawNulls, targetIndex, targetIndex + count, bits::kNotNull);
+              }
+            }
           });
     } else {
       const T* sourceValues = flatSource->rawValues();
-      applyToEachRange(
-          ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
-            auto bound =
-                flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
-            size_t boundedCount = std::min(count, bound);
+      applyToEachBoundedRange(
+          [&](auto targetIndex, auto sourceIndex, auto count) {
             if (Buffer::is_pod_like_v<T>) {
               simd::memcpy(
                   &rawValues_[targetIndex],
                   &sourceValues[sourceIndex],
-                  boundedCount * sizeof(T));
+                  count * sizeof(T));
             } else {
               std::copy(
                   sourceValues + sourceIndex,
-                  sourceValues + sourceIndex + boundedCount,
+                  sourceValues + sourceIndex + count,
                   rawValues_ + targetIndex);
             }
           });
     }
 
-    if (rawNulls) {
-      if (sourceRawNulls) {
-        BaseVector::copyNulls(rawNulls, sourceRawNulls, ranges);
-      } else {
-        BaseVector::setNulls(rawNulls, ranges, false);
+    if constexpr (!std::is_same_v<T, bool>) {
+      if (rawNulls) {
+        if (sourceRawNulls) {
+          BaseVector::copyNulls(rawNulls, sourceRawNulls, ranges);
+        } else {
+          BaseVector::setNulls(rawNulls, ranges, false);
+        }
       }
     }
   } else if (source->isConstantEncoding()) {

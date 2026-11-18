@@ -3265,6 +3265,38 @@ TEST_F(VectorTest, copyRangesBoundedBool) {
   target = makeFlatVector<bool>(160, [](auto) { return false; });
   target->copyRanges(source.get(), ranges);
   test::assertEqualVectors(expected, target);
+
+  // Null updates must use the same bounded ranges as value updates.
+  target = makeFlatVector<bool>(
+      160, [](auto) { return false; }, [](auto) { return true; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row != 5 && row != 6; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 2; },
+      [](auto row) { return row != 0 && row != 2; });
+  source->resize(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row == 5; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeAllNullFlatVector<bool>(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto) { return false; },
+      [](auto row) { return row == 5 || row == 6; });
+  test::assertEqualVectors(expected, target);
 }
 
 TEST_F(VectorTest, copyRangesBoundedDictionary) {
