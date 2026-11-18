@@ -27,11 +27,8 @@
 #include <folly/CPortability.h>
 #include <folly/Likely.h>
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
-
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
@@ -213,6 +210,12 @@ class ChunkAllocator {
 /// order, which is the byte order of the stream. Each chain keeps its tail's
 /// write position as a pointer: a linked cell's chunk is never freed or
 /// moved, so the hot appends reach the cell without the cell id arithmetic.
+///
+/// NT writes and all reads, moves, and cell recycling stay on the owning
+/// thread over ordinary WB memory, so they need no local fence. Chunk release
+/// goes through MemoryPoolImpl::freeContiguous(), whose atomic free counter
+/// supplies LOCK ordering on x86 before the allocator can reuse the pages.
+/// Revisit this dependency if the pool's release path or ownership changes.
 class DataCells {
  public:
   DataCells(
@@ -248,10 +251,27 @@ class DataCells {
     appendWithAllocation(pid, stream, data, bytes);
   }
 
-  /// Appends a positive multiple of 64 bytes to a cache-line-aligned stream.
+  /// Appends one cache line to a cache-line-aligned stream.
   /// Cells must be at least 64 bytes. The caller keeps the tail aligned by
   /// appending only full lines until the stream closes or stops streaming.
   /// The source need not be aligned. Allocation uses the general slow path.
+  FOLLY_ALWAYS_INLINE void
+  appendStreamingAligned(uint32_t pid, uint32_t stream, const void* data) {
+    BOLT_DCHECK_GE(allocator_->cellBytes(), kCacheLineBytes);
+    auto& info = infos_[chainIndex(pid, stream)];
+    if (FOLLY_LIKELY(info.tailLeft >= kCacheLineBytes)) {
+      memory::copyNonTemporalAligned(info.tail, data);
+      info.tail += kCacheLineBytes;
+      info.tailLeft -= kCacheLineBytes;
+      totalBytes_ += kCacheLineBytes;
+      return;
+    }
+    appendWithAllocation(
+        pid, stream, data, kCacheLineBytes, /*streaming=*/true);
+  }
+
+  /// Appends a positive multiple of cache lines under the same alignment and
+  /// allocation requirements as the single-line overload.
   void appendStreamingAligned(
       uint32_t pid,
       uint32_t stream,
@@ -264,7 +284,7 @@ class DataCells {
     if (FOLLY_LIKELY(bytes - 1 < info.tailLeft)) {
       BOLT_DCHECK_EQ(
           reinterpret_cast<uintptr_t>(info.tail) % kCacheLineBytes, 0);
-      copyStreamingAligned(info.tail, data, bytes);
+      memory::copyNonTemporalAligned(info.tail, data, bytes);
       info.tail += bytes;
       info.tailLeft -= bytes;
       totalBytes_ += bytes;
@@ -303,7 +323,6 @@ class DataCells {
   /// Visits the chain in byte order: fn(const char* data, uint32_t bytes).
   template <typename F>
   void scan(uint32_t pid, uint32_t stream, F&& fn) const {
-    completeStreamingWrites();
     const auto& info = infos_[chainIndex(pid, stream)];
     if (info.numCells == 0) {
       return;
@@ -359,73 +378,6 @@ class DataCells {
       uint32_t bytes,
       bool streaming = false);
 
-  /// Full cache lines only; appendStreamingAligned checks the contract.
-  FOLLY_ALWAYS_INLINE void
-  copyStreamingAligned(char* dst, const void* data, uint32_t bytes) {
-#if defined(__AVX2__)
-    const auto* src = static_cast<const char*>(data);
-    pendingStreamingWrites_ = true;
-    do {
-      const auto first =
-          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
-      const auto second =
-          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 32));
-      _mm256_stream_si256(reinterpret_cast<__m256i*>(dst), first);
-      _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + 32), second);
-      dst += kCacheLineBytes;
-      src += kCacheLineBytes;
-      bytes -= kCacheLineBytes;
-    } while (bytes != 0);
-#else
-    ::memcpy(dst, data, bytes);
-#endif
-  }
-
-  FOLLY_ALWAYS_INLINE void
-  copyStreaming(char* dst, const void* data, uint32_t bytes) {
-    const auto* src = static_cast<const char*>(data);
-#if defined(__AVX2__)
-    if (bytes >= kCacheLineBytes) {
-      const uint32_t prefix =
-          -reinterpret_cast<uintptr_t>(dst) & (kCacheLineBytes - 1);
-      if (bytes >= prefix + kCacheLineBytes) {
-        if (prefix != 0) {
-          ::memcpy(dst, src, prefix);
-          dst += prefix;
-          src += prefix;
-          bytes -= prefix;
-        }
-        pendingStreamingWrites_ = true;
-        do {
-          const auto first =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
-          const auto second =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 32));
-          _mm256_stream_si256(reinterpret_cast<__m256i*>(dst), first);
-          _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + 32), second);
-          dst += kCacheLineBytes;
-          src += kCacheLineBytes;
-          bytes -= kCacheLineBytes;
-        } while (bytes >= kCacheLineBytes);
-      }
-    }
-#endif
-    if (bytes != 0) {
-      ::memcpy(dst, src, bytes);
-    }
-  }
-
-  void completeStreamingWrites() const {
-#if defined(__AVX2__)
-    if (pendingStreamingWrites_) {
-      // Order NT writes before publication or reuse. A same-thread consumer
-      // reads these exact WB-memory locations; SFENCE is not a load barrier.
-      _mm_sfence();
-      pendingStreamingWrites_ = false;
-    }
-#endif
-  }
-
   /// Stream-major: one column's chains are contiguous, matching the cache
   /// layer's per-column flush pattern.
   size_t chainIndex(uint32_t pid, uint32_t stream) const {
@@ -439,7 +391,6 @@ class DataCells {
   ChunkAllocator* const allocator_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
-  mutable bool pendingStreamingWrites_{false};
 
   /// numStreams * numPartitions chain infos; pool-backed.
   ChainInfo* infos_{nullptr};

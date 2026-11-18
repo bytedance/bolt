@@ -979,6 +979,15 @@ TEST_F(CellWriterTest, inputMappings) {
       const auto vocabulary = makeFlatVector<T>(values);
       const auto expanded = makeFlatVector<T>(
           rows, [&](auto row) { return values[row % values.size()]; });
+      if constexpr (
+          std::is_same_v<T, int8_t> || std::is_floating_point_v<T> ||
+          std::is_same_v<T, int128_t>) {
+        columns.push_back(expanded);
+        columns.push_back(makeFlatVector<T>(
+            rows,
+            [&](auto row) { return values[row % values.size()]; },
+            nullEvery(5)));
+      }
       columns.push_back(BaseVector::wrapInDictionary(
           nullptr, makeIndicesInReverse(rows), rows, expanded));
       columns.push_back(BaseVector::wrapInDictionary(
@@ -1006,8 +1015,23 @@ TEST_F(CellWriterTest, inputMappings) {
           expanded));
     };
     addMappings(words);
+    addMappings(std::vector<int8_t>{
+        std::numeric_limits<int8_t>::min(),
+        -1,
+        0,
+        std::numeric_limits<int8_t>::max()});
     addMappings(std::vector<int64_t>{-123, 0, 42, int64_t{1} << 50});
     addMappings(std::vector<double>{-0.5, 0.0, 1.5, 1.0e100});
+    addMappings(std::vector<float>{
+        -0.0f,
+        std::numeric_limits<float>::denorm_min(),
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::max()});
+    addMappings(std::vector<int128_t>{
+        std::numeric_limits<int128_t>::min(),
+        0,
+        -42,
+        std::numeric_limits<int128_t>::max()});
     addMappings(std::vector<Timestamp>{
         Timestamp(-1, 1),
         Timestamp(0, 999'999'999),
@@ -1019,30 +1043,34 @@ TEST_F(CellWriterTest, inputMappings) {
         rows,
         fallbackVocabulary));
     const auto input = test::roundRobin({makeRowVector(columns)}, kPartitions);
-    for (const bool dictionary : {false, true}) {
-      SCOPED_TRACE(dictionary);
-      roundTrip(
-          input,
-          kPartitions,
-          {{false, arrow::Compression::LZ4_FRAME}},
-          [&](CellShuffleOptions& options, bool) {
-            options.enableStringDictionary = dictionary;
-            options.stringDictionaryProbeRowCount = 0;
-          },
-          [&](const test::WrittenShuffle& written, bool) {
-            const auto& metrics = written.metrics;
-            if (dictionary) {
-              EXPECT_GT(metrics.dictionaryMatchedRows, 0);
-              EXPECT_GT(metrics.dictionaryFallbackRows, 0);
-              EXPECT_EQ(
-                  metrics.dictionaryMatchedRows +
-                      metrics.dictionaryFallbackRows,
-                  6 * rows - 2 * ((rows + 4) / 5));
-            } else {
-              EXPECT_EQ(metrics.dictionaryMatchedRows, 0);
-              EXPECT_EQ(metrics.dictionaryFallbackRows, 0);
-            }
-          });
+    for (const bool nonTemporalStores : {false, true}) {
+      SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+      for (const bool dictionary : {false, true}) {
+        SCOPED_TRACE(dictionary);
+        roundTrip(
+            input,
+            kPartitions,
+            {{false, arrow::Compression::LZ4_FRAME}},
+            [&](CellShuffleOptions& options, bool) {
+              options.enableStringDictionary = dictionary;
+              options.stringDictionaryProbeRowCount = 0;
+              options.enableNonTemporalStores = nonTemporalStores;
+            },
+            [&](const test::WrittenShuffle& written, bool) {
+              const auto& metrics = written.metrics;
+              if (dictionary) {
+                EXPECT_GT(metrics.dictionaryMatchedRows, 0);
+                EXPECT_GT(metrics.dictionaryFallbackRows, 0);
+                EXPECT_EQ(
+                    metrics.dictionaryMatchedRows +
+                        metrics.dictionaryFallbackRows,
+                    6 * rows - 2 * ((rows + 4) / 5));
+              } else {
+                EXPECT_EQ(metrics.dictionaryMatchedRows, 0);
+                EXPECT_EQ(metrics.dictionaryFallbackRows, 0);
+              }
+            });
+      }
     }
   }
 }
@@ -1602,38 +1630,43 @@ TEST_F(CellWriterTest, writerFailsCleanlyWhenThePoolRunsOut) {
              kRows, [&](auto) { return StringView(text); }, nullEvery(7))}));
     input.pids.push_back(roundRobinPids(kRows, kPartitions));
   }
-  int failures = 0;
-  int fits = 0;
-  for (const bool rss : {false, true}) {
-    for (const int64_t cap : {4 << 20, 8 << 20, 12 << 20}) {
-      SCOPED_TRACE(
-          fmt::format("{} cap {} MiB", rss ? "rss" : "local", cap >> 20));
-      auto root = memory::memoryManager()->addRootPool(
-          fmt::format("cellWriterCap{}{}", rss, cap), cap);
-      auto leaf = root->addLeafChild("writer");
-      const auto options = writerOptions(kPartitions, rss);
-      std::optional<test::WrittenShuffle> written;
-      {
-        CellShuffleWriter writer(
-            options, leaf.get(), arrow::default_memory_pool());
-        try {
-          written = test::writeShuffle(writer, options, input, pool());
-        } catch (const BoltException&) {
+  for (const bool nonTemporalStores : {false, true}) {
+    SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
+    int failures = 0;
+    int fits = 0;
+    for (const bool rss : {false, true}) {
+      for (const int64_t cap : {4 << 20, 8 << 20, 12 << 20}) {
+        SCOPED_TRACE(
+            fmt::format("{} cap {} MiB", rss ? "rss" : "local", cap >> 20));
+        auto root = memory::memoryManager()->addRootPool(
+            fmt::format("cellWriterCap{}{}", rss, cap), cap);
+        auto leaf = root->addLeafChild("writer");
+        auto options = writerOptions(kPartitions, rss);
+        options.cellOptions.enableNonTemporalStores = nonTemporalStores;
+        options.cellOptions.enableStringDictionary = false;
+        std::optional<test::WrittenShuffle> written;
+        {
+          CellShuffleWriter writer(
+              options, leaf.get(), arrow::default_memory_pool());
+          try {
+            written = test::writeShuffle(writer, options, input, pool());
+          } catch (const BoltException&) {
+          }
+        }
+        EXPECT_EQ(leaf->usedBytes(), 0);
+        EXPECT_EQ(root->usedBytes(), 0);
+        if (written.has_value()) {
+          ++fits;
+          test::expectReadsBack(
+              input, *written, arrow::Compression::LZ4_FRAME, pool());
+        } else {
+          ++failures;
         }
       }
-      EXPECT_EQ(leaf->usedBytes(), 0);
-      EXPECT_EQ(root->usedBytes(), 0);
-      if (written.has_value()) {
-        ++fits;
-        test::expectReadsBack(
-            input, *written, arrow::Compression::LZ4_FRAME, pool());
-      } else {
-        ++failures;
-      }
     }
+    EXPECT_GT(failures, 0);
+    EXPECT_GT(fits, 0);
   }
-  EXPECT_GT(failures, 0);
-  EXPECT_GT(fits, 0);
 }
 
 TEST_F(CellWriterTest, reclaimCompactsAndKeepsAppending) {
@@ -1824,7 +1857,7 @@ TEST_F(CellWriterTest, smallReclaimsWaitForTheRunFloor) {
 }
 
 TEST_F(CellWriterTest, smallReclaimLeavesMostCellsResident) {
-  // Memory goes back to the pool only in whole 4 MiB chunks. Some 29 MB in
+  // Memory goes back to the pool only in whole 4 MiB chunks. Some 33 MB in
   // the cells of 256 partitions, each far below a chunk, past the run floor
   // - 16 MiB under a 128 MiB pool - and a reclaim of 256 KiB. A run of just
   // that would leave the cells it frees scattered over every chunk, too few
@@ -1835,7 +1868,32 @@ TEST_F(CellWriterTest, smallReclaimLeavesMostCellsResident) {
   constexpr int32_t kPartitions = 256;
   constexpr int64_t kRequest = 256 << 10;
   std::mt19937 rng(107);
-  const auto input = spreadInput(kPartitions, 36, 4096, rng);
+  auto input = spreadInput(kPartitions, 36, 4096, rng);
+  // Raw numeric streams also keep appending after their cells are spilled or
+  // moved. Use all four full-line NT types, including values wider than 64
+  // bits.
+  for (size_t batch = 0; batch < input.data.size(); ++batch) {
+    auto& data = input.data[batch];
+    data = makeRowVector(
+        {"v", "s", "f", "d", "h", "t"},
+        {data->childAt(0),
+         data->childAt(1),
+         makeFlatVector<float>(
+             data->size(),
+             [batch](auto row) { return (batch * 4096 + row) / 32.0f; }),
+         makeFlatVector<double>(
+             data->size(),
+             [batch](auto row) { return (batch * 4096 + row) / 16.0; }),
+         makeFlatVector<int128_t>(
+             data->size(),
+             [batch](auto row) {
+               return (static_cast<int128_t>(batch + 1) << 80) + row;
+             }),
+         makeFlatVector<int8_t>(data->size(), [batch](auto row) {
+           return static_cast<int8_t>(
+               static_cast<int32_t>((batch * 17 + row) % 256) - 128);
+         })});
+  }
   for (const bool nonTemporalStores : {false, true}) {
     SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
     auto root = memory::memoryManager()->addRootPool(
