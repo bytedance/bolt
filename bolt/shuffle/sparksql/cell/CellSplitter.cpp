@@ -604,7 +604,9 @@ void CellSplitter::split(const SplitBatch& batch) {
   totalWindowRows_ += batch.numRows();
 }
 
-CellWindowInput CellSplitter::windowInput() const {
+CellWindowInput CellSplitter::windowInput(
+    ColumnPositionCounts positions) const {
+  BOLT_CHECK(positions.empty() || positions.size() == layout_.numWireColumns());
   CellWindowInput in;
   in.cells = &cells_;
   in.nulls = &nulls_;
@@ -613,14 +615,8 @@ CellWindowInput CellSplitter::windowInput() const {
   in.variableBytes = variableBytes_;
   in.encodingTags = encodingTags_;
   in.numPartitions = numPartitions_;
-  in.columnPositions =
-      columnPositions_.empty() ? nullptr : columnPositions_.data();
+  in.columnPositions = positions.empty() ? nullptr : positions.data();
   return in;
-}
-
-void CellSplitter::setColumnPositions(std::vector<const uint32_t*> positions) {
-  BOLT_CHECK_EQ(positions.size(), layout_.numWireColumns());
-  columnPositions_ = std::move(positions);
 }
 
 void CellSplitter::spillRun() {
@@ -635,7 +631,8 @@ void CellSplitter::drainCells(const uint8_t* only) {
   SCOPE_EXIT {
     writingOutput_ = false;
   };
-  auto in = windowInput();
+  // Runs write only data cells; they do not summarize column nulls.
+  auto in = windowInput({});
   in.runPartitions = only;
   output_.spillRun(in);
   if (only == nullptr) {
@@ -695,15 +692,17 @@ uint64_t CellSplitter::compactCells(uint64_t targetBytes) {
   return cells_.compact(targetBytes);
 }
 
-void CellSplitter::sealWindow() {
+void CellSplitter::sealWindow(ColumnPositionCounts positions) {
   BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
   if (!hasWindowRows()) {
     return;
   }
-  seal(nullptr);
+  seal(nullptr, positions);
 }
 
-uint32_t CellSplitter::sealPartitionsOver(uint64_t maxBytes) {
+uint32_t CellSplitter::sealPartitionsOver(
+    uint64_t maxBytes,
+    ColumnPositionCounts positions) {
   BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
   std::vector<uint8_t> sealPartitions(numPartitions_, 0);
   uint32_t sealed = 0;
@@ -714,12 +713,12 @@ uint32_t CellSplitter::sealPartitionsOver(uint64_t maxBytes) {
     }
   }
   if (sealed > 0) {
-    seal(sealPartitions.data());
+    seal(sealPartitions.data(), positions);
   }
   return sealed;
 }
 
-void CellSplitter::seal(const uint8_t* only) {
+void CellSplitter::seal(const uint8_t* only, ColumnPositionCounts positions) {
   // Cache flushes can grow cells and trigger a Run spill. Only protect the
   // actual output call, after all cache residues have been committed.
   flushCaches(only);
@@ -732,7 +731,7 @@ void CellSplitter::seal(const uint8_t* only) {
     SCOPE_EXIT {
       writingOutput_ = false;
     };
-    auto in = windowInput();
+    auto in = windowInput(positions);
     in.sealPartitions = only;
     output_.sealWindow(in);
   }
@@ -756,7 +755,9 @@ void CellSplitter::seal(const uint8_t* only) {
   ++sealCount_;
 }
 
-void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
+void CellSplitter::finish(
+    ShuffleWriterMetrics& metrics,
+    ColumnPositionCounts positions) {
   BOLT_CHECK(!writingOutput_, "cannot finish during output");
   const bool windowHasData = hasWindowRows();
   if (windowHasData) {
@@ -781,7 +782,7 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
   };
   // Preserve direct output of the resident window, even if earlier Runs
   // exist. Finalization does not force an extra spill or sealed window.
-  output_.finalize(windowInput(), windowHasData, metrics);
+  output_.finalize(windowInput(positions), windowHasData, metrics);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (dictEnabled_[col] == 0) {
       continue;

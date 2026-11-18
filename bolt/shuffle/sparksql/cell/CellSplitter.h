@@ -83,11 +83,6 @@ class CellSplitter {
 
   BOLT_CELL_KERNEL void split(const SplitBatch& batch);
 
-  /// Per wire column, its position counts per partition, for its null
-  /// bodies; a nullptr entry, or none set, means the partition's rows. The
-  /// arrays must stay valid through every later output call.
-  void setColumnPositions(std::vector<const uint32_t*> positions);
-
   /// Writes and recycles the linked cells, retaining caches and window state.
   /// Safe during a split or cache flush; nested output calls are suppressed.
   void spillRun();
@@ -110,18 +105,21 @@ class CellSplitter {
 
   /// Flushes caches, drains cells (unless the output seals resident cells)
   /// and seals the window, then recycles every cell and resets its state.
-  /// Called only at a complete batch boundary.
-  void sealWindow();
+  /// Called only at a complete batch boundary. Borrows positions for this
+  /// call's null bodies; an empty view uses the window's row counts.
+  void sealWindow(ColumnPositionCounts positions);
 
   /// sealWindow() of the partitions whose bytes since their payload opened
   /// exceed `maxBytes`: only their payloads close, and only their cells are
   /// drained, so a skewed partition does not take every other partition's
   /// data through the spill file with it. Returns the partitions sealed.
-  uint32_t sealPartitionsOver(uint64_t maxBytes);
+  uint32_t sealPartitionsOver(
+      uint64_t maxBytes,
+      ColumnPositionCounts positions);
 
   /// Flushes caches and finalizes the output, allowing the backend to consume
   /// resident cells directly. Populates output and dictionary metrics.
-  void finish(ShuffleWriterMetrics& metrics);
+  void finish(ShuffleWriterMetrics& metrics, ColumnPositionCounts positions);
 
   /// Largest bytes appended to one partition since its payload opened.
   /// Drives the partition seal and approximates that payload's size.
@@ -185,9 +183,9 @@ class CellSplitter {
   void drainCells(const uint8_t* only);
 
   /// The seal of the marked partitions (every partition when null).
-  void seal(const uint8_t* only);
+  void seal(const uint8_t* only, ColumnPositionCounts positions);
 
-  CellWindowInput windowInput() const;
+  CellWindowInput windowInput(ColumnPositionCounts positions) const;
 
   const uint32_t* positionBase(const SplitBatch& batch) const {
     return batch.positionBase != nullptr ? batch.positionBase
@@ -359,7 +357,6 @@ class CellSplitter {
   uint64_t totalWindowRows_{0};
   uint32_t maxWindowRows_{0};
   uint64_t sealCount_{0};
-  std::vector<const uint32_t*> columnPositions_;
   /// One bit per wire column, set by enableDictionary for the writer lifetime.
   std::vector<uint8_t> encodingTags_;
 

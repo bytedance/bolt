@@ -190,16 +190,12 @@ CellNestedShredder::CellNestedShredder(
   std::fill_n(
       scratch<uint32_t>(runningIndex_, numPartitions_), numPartitions_, 0);
   touched_.reserve(numPartitions_);
-  // The splitter reads counts_ through these pointers as
-  // splitElementBatch() advances them: a partition's committed positions of
-  // a space are the position base of its next split there. The rows have
-  // none: the splitter counts the window's rows itself.
-  std::vector<const uint32_t*> positions;
-  positions.reserve(layout.wireSpaces().size());
+  // Output calls borrow this table while constructing null bodies. Columns
+  // of a space share its counts; row-space entries use the splitter's rows.
+  columnPositionCounts_.reserve(layout.wireSpaces().size());
   for (const uint32_t space : layout.wireSpaces()) {
-    positions.push_back(counts_[space]);
+    columnPositionCounts_.push_back(counts_[space]);
   }
-  splitter_.setColumnPositions(std::move(positions));
 }
 
 template <typename T>

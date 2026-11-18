@@ -803,6 +803,74 @@ TEST_F(CellNestedTest, spillsAndSeals) {
   }
 }
 
+TEST_F(CellNestedTest, sharedSpaceCountsAcrossPartitionSeals) {
+  // The hot partition seals after every batch; the cold one keeps its
+  // positions across all four. Sibling fields share positions, while the
+  // inner array has its own. Their null classes change at different batches.
+  constexpr vector_size_t kBatches = 4;
+  ShuffleInput input;
+  for (vector_size_t batch = 0; batch < kBatches; ++batch) {
+    const vector_size_t size = batch + 3;
+    const auto structs = makeRowVector(
+        {"a", "s", "items"},
+        {makeFlatVector<int64_t>(
+             size,
+             [&](auto row) { return batch * 100 + row; },
+             [&](auto row) { return batch == 0 || row % 3 == 1; }),
+         makeFlatVector<std::string>(
+             size,
+             [&](auto row) { return fmt::format("{}:{}", batch, row); },
+             [&](auto row) { return batch >= 2 && row % 2 == 0; }),
+         makeArrayVector<int32_t>(
+             size,
+             [&](auto row) { return (batch + row) % 3; },
+             [&](auto index) { return batch * 100 + index; },
+             nullptr,
+             [&](auto index) { return batch == 0 || index % 4 == 0; })},
+        [&](auto row) { return batch == 2 && row == 1; });
+    input.data.push_back(makeRowVector(
+        {"id", "padding", "structs"},
+        {makeFlatVector<int64_t>({2 * batch, 2 * batch + 1}),
+         makeFlatVector<std::string>(
+             {std::string(32 << 10, 'a' + batch), "cold"}),
+         test::containersOf({size, size - 2}, structs, pool())}));
+    // Partition 1 stays empty: touched partitions need not be contiguous.
+    input.pids.push_back({0, 2});
+  }
+  const auto type = asRowType(input.data[0]->type());
+  const auto lz4 = test::lz4Codec();
+  roundTrip(
+      input,
+      3,
+      [](CellShuffleOptions& cell, bool) {
+        cell.enableStringDictionary = false;
+        cell.partitionSealBytes = 4 << 10;
+        cell.spillMemoryBytes = 0;
+      },
+      [&](const test::WrittenShuffle& written, bool rss) {
+        EXPECT_EQ(
+            test::readerBatchSizes(
+                written.partitions[0],
+                type,
+                rss ? lz4.get() : nullptr,
+                pool(),
+                4096,
+                0),
+            std::vector<vector_size_t>(kBatches, 1));
+        EXPECT_TRUE(written.partitions[1].empty());
+        EXPECT_EQ(
+            test::readerBatchSizes(
+                written.partitions[2],
+                type,
+                rss ? lz4.get() : nullptr,
+                pool(),
+                4096,
+                0),
+            (std::vector<vector_size_t>{kBatches}));
+      },
+      {{4096, 0}, {1, 1}});
+}
+
 TEST_F(CellNestedTest, readsAtEveryByteBudget) {
   // As for flat payloads, a byte target at or below zero reads one append
   // per batch, and a large one every row up to the batch size, across

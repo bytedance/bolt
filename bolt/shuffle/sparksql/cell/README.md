@@ -470,7 +470,10 @@ holding the elements of its non-null entries, numbered in pre-order. A ROW
 owns none: its fields have the ROW's positions. `CellNestedShredder` splits
 the rows' columns, then each space in element batches of up to 64K
 positions, and gives the splitter each partition's position counts as the
-null-position base of those columns.
+null-position base of those columns. The shredder owns these counts and the
+wire-column mapping. At seal and finish, the writer passes a read-only view
+of the per-column counts to the splitter for that output call's null bodies;
+the splitter keeps no space metadata or borrowed count mapping between calls.
 
 **Struct-null folding.** A field is null wherever a ROW above it at the same
 positions is null, and a container below a null struct holds no element. A

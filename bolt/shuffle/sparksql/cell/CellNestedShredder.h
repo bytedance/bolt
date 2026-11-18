@@ -59,9 +59,8 @@ class CellNestedShredder {
   /// Elements one split of a container space covers at most.
   static constexpr uint32_t kElementBatchPositions = 64 << 10;
 
-  /// Sets the splitter's column positions. `layout`, `splitter` and `pool`
-  /// must outlive the shredder, and the shredder every output call of the
-  /// splitter. `excludedNs`, if not null, is a clock of time reported apart
+  /// `layout`, `splitter` and `pool` must outlive the shredder.
+  /// `excludedNs`, if not null, is a clock of time reported apart
   /// - the writer's seal and spill time, which a reclaim reached from inside
   /// the shredding or the splitter adds to - and must outlive the shredder:
   /// what it gains while the shredder runs is not shred time.
@@ -93,6 +92,13 @@ class CellNestedShredder {
 
   std::span<const NullClass> nullClass() const {
     return nullClass_;
+  }
+
+  /// Counts for an output call's null bodies, indexed by wire column.
+  /// Columns in the same space share a count array. The view and its
+  /// arrays remain valid until destruction, including across releaseScratch().
+  ColumnPositionCounts columnPositionCounts() const {
+    return columnPositionCounts_;
   }
 
   /// Whether a layout column has the rows' positions.
@@ -263,6 +269,8 @@ class CellNestedShredder {
   /// largest, this batch's exact total and what was committed of it.
   BufferPtr countsBuffer_;
   std::vector<uint32_t*> counts_;
+  /// Output view of counts_: nullptr entries use the splitter's row counts.
+  std::vector<const uint32_t*> columnPositionCounts_;
   std::vector<uint32_t> maxCount_;
   std::vector<uint64_t> totals_;
   std::vector<uint64_t> committed_;

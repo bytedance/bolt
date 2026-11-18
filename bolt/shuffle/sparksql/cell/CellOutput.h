@@ -28,6 +28,12 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
+/// Per wire column, its committed position counts across all partitions.
+/// Empty, or a nullptr entry, uses the payload's row counts. A nonempty
+/// table has numWireColumns entries; each non-null entry has numPartitions
+/// counts. The table and counts are borrowed until the output call returns.
+using ColumnPositionCounts = std::span<const uint32_t* const>;
+
 /// What an output backend reads from the splitter when draining or sealing:
 /// the live window state. Borrowed for the duration of a call. A
 /// partition's counts run since its payload opened: a partition seal closes
