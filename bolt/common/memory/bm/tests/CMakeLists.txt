@@ -17,10 +17,17 @@ add_executable(
 
 target_compile_features(bolt_memory_bm_test PRIVATE cxx_std_20)
 
+add_library(bolt_memory_bm_test_compile_deps INTERFACE)
+target_link_libraries(bolt_memory_bm_test_compile_deps INTERFACE bolt_memory_bm)
+set(BOLT_MEMORY_BM_TEST_LIBRARY bolt_memory_bm_test_compile_deps)
+if(BOLT_TEST_LINKAGE STREQUAL "static")
+  set(BOLT_MEMORY_BM_TEST_LIBRARY bolt_memory_bm)
+endif()
+
 target_link_libraries(
   bolt_memory_bm_test
   PRIVATE
-    bolt_memory_bm
+    ${BOLT_MEMORY_BM_TEST_LIBRARY}
     bolt_gtest_main
     GTest::gmock
 )

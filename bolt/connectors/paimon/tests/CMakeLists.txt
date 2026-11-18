@@ -139,7 +139,13 @@ target_link_libraries(
 )
 
 if(BOLT_ENABLE_HDFS)
-  target_link_libraries(bolt_paimon_connector_test PRIVATE bolt_hdfs)
+  if(BOLT_TEST_LINKAGE STREQUAL "shared")
+    add_library(paimon_hdfs_test_compile_deps INTERFACE)
+    target_link_libraries(paimon_hdfs_test_compile_deps INTERFACE bolt_hdfs)
+    target_link_libraries(bolt_paimon_connector_test PRIVATE paimon_hdfs_test_compile_deps)
+  else()
+    target_link_libraries(bolt_paimon_connector_test PRIVATE bolt_hdfs)
+  endif()
 endif()
 
 if(BOLT_ENABLE_GCS)

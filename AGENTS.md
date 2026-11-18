@@ -44,6 +44,16 @@ build mode before finishing.
   hard-code an engine or testutils implementation target in an individual
   test.
 
+- Before adding a source file or object-library dependency to a test, check
+  whether `bolt_engine_for_tests` or `bolt_testutils` already supplies its
+  implementation. In shared mode, do not compile or link a second copy into
+  the test executable; reuse the public test runtime and preserve the target's
+  compile requirements through an appropriate interface dependency.
+- Preserve required direct objects in static mode. When changing test linkage,
+  inspect the shared and static link commands for duplicate or missing objects;
+  when an ASAN build is available, run the affected tests with
+  `ASAN_OPTIONS=detect_odr_violation=2` to check for duplicate definitions.
+
 ## Build-Mode Configuration
 
 - Do not reintroduce a global `SPARK_COMPATIBLE` compile definition.
