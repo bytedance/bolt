@@ -263,7 +263,6 @@ TEST_F(CellShuffleCheckTest, streamingSplitterSealsAndMappedNulls) {
     batch = prepare({dictionary, constant}, pids);
     nullClasses_[1] = NullClass::kNoNulls;
     ASSERT_TRUE(check.beginBatch(batch));
-    batch.check = &check;
     splitter.split(batch);
     check.endBatch();
     if (i == 0) {
@@ -293,13 +292,12 @@ TEST_F(CellShuffleCheckTest, endBatchClearsBorrowedInputOnFailure) {
   check.prepareInput(*source, true);
   BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition counts");
   EXPECT_NO_THROW(check.endBatch());
+  EXPECT_FALSE(check.checksBatchColumn(0));
   counts_[0] = 1;
   check.prepareInput(*source, true);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   EXPECT_NO_THROW(splitter.split(batch));
   check.endBatch();
-  batch.check = nullptr;
   ShuffleWriterMetrics metrics;
   EXPECT_NO_THROW(splitter.finish(metrics, {}));
 }
@@ -943,10 +941,15 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 6, pool());
   splitter.setStreamCheck(&check);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   splitter.split(batch);
   check.endBatch();
   EXPECT_EQ(splitter.cellDataBytes(), 0);
+
+  batch = prepare(fixedColumns(0, false), {});
+  EXPECT_FALSE(check.beginBatch(batch));
+  EXPECT_FALSE(check.checksBatchColumn(0));
+  EXPECT_NO_THROW(splitter.split(batch));
+  check.endBatch();
 
   std::vector<uint32_t> pids(257);
   for (uint32_t row = 0; row < pids.size(); ++row) {
@@ -954,7 +957,6 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   }
   batch = prepare(fixedColumns(pids.size(), true), pids);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   splitter.split(batch);
   check.endBatch();
 
@@ -967,7 +969,6 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   batch = prepare(nulls, {0, 1, 2});
   nullClasses_.assign(6, NullClass::kAllNull);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   splitter.split(batch);
   check.endBatch();
 
@@ -975,7 +976,6 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   batch = prepare(fixedColumns(1, false), {1});
   nullClasses_.assign(6, NullClass::kNoNulls);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   splitter.split(batch);
   check.endBatch();
 
@@ -1007,7 +1007,6 @@ TEST_F(CellShuffleCheckTest, splitterChecksMappedInputsAndAllNullBranch) {
   CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 2, pool());
   splitter.setStreamCheck(&check);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   splitter.split(batch);
   check.endBatch();
 
@@ -1015,7 +1014,6 @@ TEST_F(CellShuffleCheckTest, splitterChecksMappedInputsAndAllNullBranch) {
       {makeFlatVector<int64_t>({1}), makeFlatVector<double>({2.0})}, {0});
   nullClasses_.assign(2, NullClass::kAllNull);
   ASSERT_TRUE(check.beginBatch(batch));
-  batch.check = &check;
   EXPECT_NO_THROW(splitter.split(batch));
   check.endBatch();
   EXPECT_EQ(output.calls, 0);
@@ -1067,11 +1065,10 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
         check.prepareInput(*source, true);
         const bool selected = check.beginBatch(batch);
         ASSERT_EQ(selected, taskId != 50);
-        if (selected) {
-          batch.check = &check;
-        }
+        EXPECT_EQ(check.checksBatchColumn(0), selected);
         EXPECT_NO_THROW(splitter.split(batch));
         check.endBatch();
+        EXPECT_FALSE(check.checksBatchColumn(0));
         if (b == 0) {
           splitter.sealWindow({});
         } else if (b == 1) {
