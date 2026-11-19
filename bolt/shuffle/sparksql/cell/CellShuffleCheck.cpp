@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -428,11 +427,6 @@ void CellShuffleCheck::observeStream(
   BOLT_CHECK(line == column.streamCache + size_t{pid} * kCacheLineBytes);
   BOLT_CHECK_LE(usedBytes, kCacheLineBytes);
   BOLT_CHECK_EQ(usedBytes % sizeof(T), 0);
-#if defined(__GNUC__) || defined(__clang__)
-  asm volatile("" : : "r"(line) : "memory");
-#else
-  std::atomic_signal_fence(std::memory_order_seq_cst);
-#endif
   auto& state = check.streamStates_
                     [size_t{column.streamIndex} * check.numPartitions_ + pid];
   const uint32_t count = usedBytes / sizeof(T);
