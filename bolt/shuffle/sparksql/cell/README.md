@@ -92,6 +92,25 @@ them:
 | `cellOptions.nativeNestedTypes` | `cellNativeNestedTypes` |
 | `compressionType` | `compressionType` |
 
+### Optional shuffle check
+
+`shuffleCheckRatio` selects whole task attempts using
+`taskAttemptId % 100 < 100 * shuffleCheckRatio`; 0 disables and 1 checks every
+task. For nonnegative IDs, selection repeats every 100 tasks, with 1% granularity
+(positive ratios below 1% select remainder 0). Negative task IDs are selected
+whenever the ratio is positive, following signed remainder semantics.
+Selected writers check the first `shuffleCheckMaxColumns` supported columns
+across all partitions and batches. Coverage depends on the task ID remainders,
+not row/byte counts. Unselected writers have no checker attached.
+
+`CellShuffleCheck.h/.cpp` contain the check implementation. Integer, REAL and
+DOUBLE non-null values use ordered CRC32C and exact counts per column/partition.
+Input values supply expected CRCs; actual cache bytes are read at natural flush
+points before encoding/reuse. State survives seals; comparison runs at finish.
+NaNs and signed zeros use value-equality semantics. No extra flush is requested.
+NULL positions, decimals, nested/packed schemas and encoded output are outside
+coverage. CRC collisions can hide corruption; this is not a cryptographic check.
+
 ## 2. Data flow
 
 ```text

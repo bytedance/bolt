@@ -28,6 +28,7 @@
 
 #include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleCheck.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -208,6 +209,9 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
 
 template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+      ? streamCheck_
+      : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
@@ -253,6 +257,10 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
+      if (check != nullptr) {
+        check->beforeFullFlush<T>(
+            pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+      }
       flushEncoded<T>(
           stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
     }
@@ -265,6 +273,9 @@ template <
     CellSplitter::InputMapping kMapping,
     bool kStreaming>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+      ? streamCheck_
+      : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
@@ -310,6 +321,12 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
+      if constexpr (sizeof(T) != 16) { // HUGEINT is outside the check scope.
+        if (check != nullptr) {
+          check->beforeFullFlush<T>(
+              pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+        }
+      }
       flushRawFull<kStreaming>(
           stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
     }
@@ -505,6 +522,12 @@ void CellSplitter::split(const SplitBatch& batch) {
     }
     const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
+    const bool checked =
+        streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col);
+    if (checked) {
+      const auto stream = layout_.firstStream(col);
+      streamCheck_->beginColumn(col, cacheLine(stream, 0));
+    }
     const bool recordNulls = nulls_.observeBatch(nullColumn, klass, positions);
     if (klass == NullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
@@ -763,6 +786,9 @@ void CellSplitter::finish(
   if (windowHasData) {
     flushCaches();
   }
+  if (streamCheck_ != nullptr) {
+    streamCheck_->finishStream();
+  }
 
   // Capture utilization after cache flushes, before resident data is released.
   const int64_t chunkBytes = allocator_.allocatedBytes();
@@ -842,6 +868,10 @@ void CellSplitter::flushCaches(const uint8_t* only) {
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
       if (cur[pid] == 0 || skip(pid)) {
         continue;
+      }
+      if (streamCheck_ != nullptr && streamCheck_->checksColumn(info.column)) {
+        streamCheck_->beforeStreamFlush(
+            info.column, pid, cacheLine(stream, pid), cur[pid]);
       }
       if (info.kind == StreamKind::kEncoded) {
         switch (info.sourceWidth) {

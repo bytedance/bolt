@@ -2415,6 +2415,101 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
   }
 }
 
+TEST_F(CellWriterTest, checkedBatchesPreserveSpillAndSealBoundaries) {
+  // Four occupied partitions keep reclaim work bounded while checking the
+  // larger persistent state and both ends of the partition range.
+  constexpr int32_t kPartitions = 1024;
+  constexpr int32_t kActivePartitions = 4;
+  std::mt19937 rng(97);
+  ShuffleInput input;
+  for (const vector_size_t rows :
+       {113, 113, 4096, 1024, 4096, 16384, 113, 16384}) {
+    auto batch = skewedInput(kActivePartitions, 1, rows, 50, 600, false, rng);
+    for (auto& pid : batch.pids[0]) {
+      pid *= (kPartitions - 1) / (kActivePartitions - 1);
+    }
+    input.data.push_back(makeRowVector(
+        {"v", "n", "s"},
+        {batch.data[0]->childAt(0),
+         makeFlatVector<int32_t>(
+             rows, [](auto row) { return row * 17; }, nullEvery(7)),
+         batch.data[0]->childAt(1)}));
+    input.pids.push_back(std::move(batch.pids[0]));
+  }
+
+  for (const bool rss : {false, true}) {
+    SCOPED_TRACE(rss ? "rss" : "local");
+    std::vector<std::vector<uint64_t>> boundaries;
+    std::vector<test::WrittenShuffle> written;
+    for (const double checkRatio : {0.0, 0.25, 0.5, 1.0}) {
+      auto options = writerOptions(kPartitions, rss);
+      options.shuffleCheckRatio = checkRatio;
+      options.shuffleCheckMaxColumns = 2;
+      options.taskAttemptId = 25;
+      // RSS reclaim requires two live chunks. A 4 MiB cap would seal the
+      // large batch at its second chunk, before the reclaim can observe it.
+      options.cellOptions.partitionSealBytes = (rss ? 8 : 1) << 20;
+      options.cellOptions.cellMemorySpillRatio =
+          test::spillRatio((rss ? 12 : 4) << 20);
+      options.cellOptions.spillMemoryBytes = 0;
+      options.cellOptions.reclaimRunFloorBytes = 0;
+      auto root = memory::memoryManager()->addRootPool(
+          fmt::format("cellCheckBoundaries{}{}", rss, checkRatio),
+          test::kSpillLimitBytes);
+      auto leaf = root->addLeafChild("writer");
+      CellShuffleWriter writer(
+          options, leaf.get(), arrow::default_memory_pool());
+      auto& events = boundaries.emplace_back();
+      const auto recordBoundary = [&] {
+        // spillCount is finalized only at stop(). Observe actual disk bytes
+        // or remote pushes at each split and reclaim instead.
+        uint64_t progress = 0;
+        if (rss) {
+          progress = test::rssClient(options).numPushes;
+        } else {
+          for (const auto& file : std::filesystem::directory_iterator(dir_)) {
+            if (file.is_regular_file()) {
+              progress += file.file_size();
+            }
+          }
+        }
+        events.push_back(progress);
+      };
+      written.push_back(test::writeShuffle(
+          writer, options, input, pool(), nullptr, [&](size_t batch) {
+            recordBoundary();
+            if (batch == 5) {
+              const auto beforeReclaim = events.back();
+              int64_t freed = 0;
+              ASSERT_TRUE(writer.reclaimFixedSize(1 << 30, &freed).ok());
+              EXPECT_GT(freed, 0);
+              recordBoundary();
+              if (rss) {
+                EXPECT_EQ(events.back(), beforeReclaim + kActivePartitions);
+              }
+            }
+          }));
+    }
+    for (uint32_t variant = 1; variant < written.size(); ++variant) {
+      EXPECT_EQ(boundaries[0], boundaries[variant]);
+      EXPECT_GT(boundaries[0].back(), 0);
+      EXPECT_EQ(written[0].partitions, written[variant].partitions);
+      EXPECT_EQ(written[0].pushes, written[variant].pushes);
+      const auto& baseline = written[0].metrics;
+      const auto& checked = written[variant].metrics;
+      EXPECT_GT(baseline.spillCount, 0);
+      EXPECT_EQ(checked.spillCount, baseline.spillCount);
+      EXPECT_EQ(checked.totalSpillFiles, baseline.totalSpillFiles);
+      EXPECT_EQ(checked.totalBytesEvicted, baseline.totalBytesEvicted);
+      EXPECT_EQ(checked.rawPartitionLengths, baseline.rawPartitionLengths);
+      EXPECT_EQ(checked.totalInputRowNumber, baseline.totalInputRowNumber);
+      EXPECT_EQ(checked.totalInputBatches, baseline.totalInputBatches);
+      test::expectReadsBack(
+          input, written[variant], arrow::Compression::LZ4_FRAME, pool());
+    }
+  }
+}
+
 TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
   // Past cellSpillBytesPerStream for every stream of every partition, a
   // local writer spills at a batch boundary though nothing presses on its

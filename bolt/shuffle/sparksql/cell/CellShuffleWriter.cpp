@@ -29,6 +29,7 @@
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleCheck.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -148,6 +149,7 @@ CellShuffleWriter::CellShuffleWriter(
 
 CellShuffleWriter::~CellShuffleWriter() {
   // Failed split/stop paths must return the chunk reservations as well.
+  shuffleCheck_.reset();
   shredder_.reset();
   splitter_.reset();
   output_.reset();
@@ -258,6 +260,14 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
     shredder_ = std::make_unique<CellNestedShredder>(
         *nested_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);
   }
+
+  shuffleCheck_ = CellShuffleCheck::create(
+      *layout_.rowType(),
+      numPartitions_,
+      options_,
+      nested_ == nullptr && !adapter_->hasComplexColumns(),
+      boltPool_);
+  splitter_->setStreamCheck(shuffleCheck_.get());
 
   perPidCounter_.assign(numPartitions_, 0);
   decoded_.resize(layout_.numColumns());
@@ -442,7 +452,19 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   if (anyNullable) {
     batch.rowIndexInPid = rowIndexInPid_;
   }
-  splitter_->split(batch);
+  {
+    auto cleanup = folly::makeGuard([&]() noexcept {
+      if (shuffleCheck_ != nullptr) {
+        shuffleCheck_->endBatch();
+      }
+    });
+    if (shuffleCheck_ != nullptr) {
+      shuffleCheck_->prepareInput(
+          *rv, options_.partitioning == Partitioning::kHash);
+      shuffleCheck_->beginBatch(batch);
+    }
+    splitter_->split(batch);
+  }
 
   metrics_.totalInputRowNumber += numRows;
   metrics_.totalInputBatches += 1;
@@ -957,6 +979,8 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   if (initialized_) {
     logPressure();
   }
+
+  shuffleCheck_.reset();
 
   // The splitter has released its window; return idle chunks, the
   // shredder's scratch and reservation.
