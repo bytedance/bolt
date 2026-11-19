@@ -1035,14 +1035,14 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
       const uint32_t stride = 1 + size;
       uint32_t hit = count;
       if (FOLLY_LIKELY(size <= 7)) {
-        const auto value = folly::loadUnaligned<uint64_t>(
+        const auto value = memory::loadUnaligned<uint64_t>(
             reinterpret_cast<const char*>(&view) + 4);
         const uint64_t needle = (value << 8) | size;
         const uint64_t needleMask =
             (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
         uint32_t off = 0;
         for (uint32_t k = 0; k < count; ++k) {
-          const auto window = folly::loadUnaligned<uint64_t>(entries + off);
+          const auto window = memory::loadUnaligned<uint64_t>(entries + off);
           if ((window & needleMask) == needle) {
             hit = k;
           }
@@ -1084,14 +1084,14 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
       uint32_t off = 0;
       i = 0;
       if (FOLLY_LIKELY(size <= 7)) {
-        const auto value = folly::loadUnaligned<uint64_t>(
+        const auto value = memory::loadUnaligned<uint64_t>(
             reinterpret_cast<const char*>(&view) + 4);
         const uint64_t needle = (value << 8) | size;
         const uint64_t needleMask =
             (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
         uint32_t hit = count;
         for (uint32_t k = 0; k < count; ++k) {
-          const auto window = folly::loadUnaligned<uint64_t>(entries + off);
+          const auto window = memory::loadUnaligned<uint64_t>(entries + off);
           if ((window & needleMask) == needle) {
             hit = k; // at most once; compiles to a flag-carrying select
           }

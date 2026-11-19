@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -60,7 +61,7 @@ struct DecodedRun {
 };
 
 uint64_t readU64(const std::string& bytes, size_t at) {
-  return folly::loadUnaligned<uint64_t>(bytes.data() + at);
+  return memory::loadUnaligned<uint64_t>(bytes.data() + at);
 }
 
 /// Parses `run` as CellFormat.h lays out a run of `numStreams` streams,

@@ -27,6 +27,7 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/memory/Allocation.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -596,7 +597,7 @@ uint32_t NullCells::cellNulls(const Cell& cell) {
   for (uint32_t at = 0; at + sizeof(uint64_t) <= sizeof(cell.bits);
        at += sizeof(uint64_t)) {
     ones +=
-        __builtin_popcountll(folly::loadUnaligned<uint64_t>(cell.bits + at));
+        __builtin_popcountll(memory::loadUnaligned<uint64_t>(cell.bits + at));
   }
   for (uint32_t at = sizeof(cell.bits) / sizeof(uint64_t) * sizeof(uint64_t);
        at < sizeof(cell.bits);

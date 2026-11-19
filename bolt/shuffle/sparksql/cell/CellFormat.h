@@ -115,11 +115,11 @@
 
 #pragma once
 
-#include <folly/lang/Bits.h>
 #include <cstdint>
 #include <cstring>
 #include <vector>
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/type/Type.h"
 
 /// Starts a hot Cell kernel on a cache line. Its loops then keep their
@@ -246,7 +246,7 @@ inline constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 /// The size prefix of a CompositeRows row. Rows lie back to back, so the
 /// prefix is in general unaligned.
 inline int32_t compositeRowSize(const void* row) {
-  return folly::loadUnaligned<int32_t>(row);
+  return memory::loadUnaligned<int32_t>(row);
 }
 
 /// Bytes of a CompositeRows row with its size prefix.
