@@ -487,11 +487,9 @@ Writer and reader decide alike from the same logical type, which is why
   field shorter than its struct is supported by the shredder, but not in a
   batch that gets sliced.
 - **Malformed input** on the read side is reported as an error, never
-  crashed on; `CellDecodeLimits` bounds the row and run counts. A malformed
-  block's error ends with where the reader was: the stream and the block's
-  index and offset in it, the stream's previous payload (its offsets and
-  header fields), the block's header bytes read and up to 32 bytes after
-  them, in hex.
+  crashed on; `CellDecodeLimits` bounds the row and run counts. Errors name
+  the defect, such as a truncated header, an invalid block kind or an
+  unsupported layout.
 
 ## 8. Performance notes
 
