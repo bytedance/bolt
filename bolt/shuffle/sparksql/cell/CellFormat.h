@@ -279,9 +279,6 @@ enum class StreamKind : uint8_t {
 struct CellStream {
   uint16_t column; // logical column (rowType child), not wire column
   StreamKind kind;
-  /// Bytes per source value: 1/2/4/8/16 for value streams, 8 for a String
-  /// length stream, 0 for kStringData.
-  uint8_t sourceWidth;
   /// Sign extension of kConstNarrow and kBitPack values. String lengths are
   /// non-negative so either interpretation matches; they are flagged signed
   /// to match their Bigint encoding.

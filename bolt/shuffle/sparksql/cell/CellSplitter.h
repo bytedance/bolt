@@ -173,24 +173,24 @@ class CellSplitter {
   void enableDictionary(uint32_t col);
 
  private:
-  /// Encodes cache residues as stream tail blocks before a window closes:
-  /// of the partitions `only` marks, or of every partition. Chunk growth
+  /// Encodes cache residues as stream tail blocks before a window closes.
+  /// `partitionMask` selects partitions; nullptr selects all. Chunk growth
   /// during this step may still spill complete prior appends.
-  void flushCaches(const uint8_t* only = nullptr);
+  void flushCaches(const uint8_t* partitionMask = nullptr);
 
   /// Clears nulls, row counts and dictionary state after successful output.
   void resetWindow();
 
-  /// resetWindow() of the partitions `only` marks.
-  void resetPartitions(const uint8_t* only);
+  /// resetWindow() of the partitions `partitionMask` marks.
+  void resetPartitions(const uint8_t* partitionMask);
 
   /// The Run step of spillRun()/spillPartitions(): writes the marked
-  /// partitions' cells (every partition's when `only` is null) and
+  /// partitions' cells (every partition's when `partitionMask` is null) and
   /// recycles them.
-  void drainCells(const uint8_t* only);
+  void drainCells(const uint8_t* partitionMask);
 
   /// The seal of the marked partitions (every partition when null).
-  void seal(const uint8_t* only, ColumnPositionCounts positions);
+  void seal(const uint8_t* partitionMask, ColumnPositionCounts positions);
 
   CellWindowInput windowInput(ColumnPositionCounts positions) const;
 

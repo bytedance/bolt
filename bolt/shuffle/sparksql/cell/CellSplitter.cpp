@@ -19,6 +19,7 @@
 #include <folly/lang/Bits.h>
 #include <algorithm>
 #include <functional>
+#include <type_traits>
 
 #include <folly/ScopeGuard.h>
 
@@ -649,20 +650,20 @@ void CellSplitter::spillRun() {
   drainCells(nullptr);
 }
 
-void CellSplitter::drainCells(const uint8_t* only) {
+void CellSplitter::drainCells(const uint8_t* partitionMask) {
   writingOutput_ = true;
   SCOPE_EXIT {
     writingOutput_ = false;
   };
   // Runs write only data cells; they do not summarize column nulls.
   auto in = windowInput({});
-  in.runPartitions = only;
+  in.runPartitions = partitionMask;
   output_.spillRun(in);
-  if (only == nullptr) {
+  if (partitionMask == nullptr) {
     cells_.releaseAll();
   } else {
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      if (only[pid] != 0) {
+      if (partitionMask[pid] != 0) {
         cells_.releasePartition(pid);
       }
     }
@@ -741,13 +742,15 @@ uint32_t CellSplitter::sealPartitionsOver(
   return sealed;
 }
 
-void CellSplitter::seal(const uint8_t* only, ColumnPositionCounts positions) {
+void CellSplitter::seal(
+    const uint8_t* partitionMask,
+    ColumnPositionCounts positions) {
   // Cache flushes can grow cells and trigger a Run spill. Only protect the
   // actual output call, after all cache residues have been committed.
-  flushCaches(only);
+  flushCaches(partitionMask);
   const bool sealsResident = output_.sealsResidentCells();
   if (!sealsResident && cells_.totalBytes() > 0) {
-    drainCells(only);
+    drainCells(partitionMask);
   }
   {
     writingOutput_ = true;
@@ -755,25 +758,25 @@ void CellSplitter::seal(const uint8_t* only, ColumnPositionCounts positions) {
       writingOutput_ = false;
     };
     auto in = windowInput(positions);
-    in.sealPartitions = only;
+    in.sealPartitions = partitionMask;
     output_.sealWindow(in);
   }
   if (sealsResident) {
-    if (only == nullptr) {
+    if (partitionMask == nullptr) {
       cells_.releaseAll();
     } else {
       for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-        if (only[pid] != 0) {
+        if (partitionMask[pid] != 0) {
           cells_.releasePartition(pid);
         }
       }
     }
     allocator_.packFreelist();
   }
-  if (only == nullptr) {
+  if (partitionMask == nullptr) {
     resetWindow();
   } else {
-    resetPartitions(only);
+    resetPartitions(partitionMask);
   }
   ++sealCount_;
 }
@@ -825,9 +828,9 @@ void CellSplitter::finish(
   resetWindow();
 }
 
-void CellSplitter::flushCaches(const uint8_t* only) {
-  const auto skip = [only](uint32_t pid) {
-    return only != nullptr && only[pid] == 0;
+void CellSplitter::flushCaches(const uint8_t* partitionMask) {
+  const auto skip = [partitionMask](uint32_t pid) {
+    return partitionMask != nullptr && partitionMask[pid] == 0;
   };
   // Dictionary columns first: a partition still in dictionary mode has raw
   // index bytes in its length cache (flushed raw, so the generic loop below
@@ -865,31 +868,42 @@ void CellSplitter::flushCaches(const uint8_t* only) {
   for (uint32_t stream = 0; stream < numStreams_; ++stream) {
     const auto& info = layout_.stream(stream);
     uint8_t* cur = cursors(stream);
-    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      if (cur[pid] == 0 || skip(pid)) {
-        continue;
-      }
-      if (streamCheck_ != nullptr && streamCheck_->checksColumn(info.column)) {
-        streamCheck_->beforeStreamFlush(
-            info.column, pid, cacheLine(stream, pid), cur[pid]);
-      }
-      if (info.kind == StreamKind::kEncoded) {
-        switch (info.sourceWidth) {
-          case 2:
-            flushEncoded<int16_t>(stream, pid, cacheLine(stream, pid), cur);
-            break;
-          case 4:
-            flushEncoded<int32_t>(stream, pid, cacheLine(stream, pid), cur);
-            break;
-          case 8:
-            flushEncoded<int64_t>(stream, pid, cacheLine(stream, pid), cur);
-            break;
-          default:
-            BOLT_UNREACHABLE();
+    const auto flush = [&]<typename T>() {
+      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+        if (cur[pid] == 0 || skip(pid)) {
+          continue;
         }
-      } else {
-        flushRaw(stream, pid, cacheLine(stream, pid), cur);
+        if (streamCheck_ != nullptr &&
+            streamCheck_->checksColumn(info.column)) {
+          streamCheck_->beforeStreamFlush(
+              info.column, pid, cacheLine(stream, pid), cur[pid]);
+        }
+        if constexpr (std::is_void_v<T>) {
+          flushRaw(stream, pid, cacheLine(stream, pid), cur);
+        } else {
+          flushEncoded<T>(stream, pid, cacheLine(stream, pid), cur);
+        }
       }
+    };
+    if (info.kind != StreamKind::kEncoded) {
+      flush.template operator()<void>();
+      continue;
+    }
+    switch (layout_.rowType()->childAt(info.column)->kind()) {
+      case TypeKind::SMALLINT:
+        flush.template operator()<int16_t>();
+        break;
+      case TypeKind::INTEGER:
+        flush.template operator()<int32_t>();
+        break;
+      case TypeKind::BIGINT:
+      case TypeKind::TIMESTAMP:
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        flush.template operator()<int64_t>();
+        break;
+      default:
+        BOLT_UNREACHABLE();
     }
   }
 }
@@ -917,9 +931,9 @@ void CellSplitter::resetWindow() {
   }
 }
 
-void CellSplitter::resetPartitions(const uint8_t* only) {
+void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    if (only[pid] == 0) {
+    if (partitionMask[pid] == 0) {
       continue;
     }
     nulls_.releasePartition(pid);
