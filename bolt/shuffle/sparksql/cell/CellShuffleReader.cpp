@@ -139,18 +139,17 @@ CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
       source_.reset();
       continue;
     }
-    std::string error;
     uint8_t kind = 0;
     BOLT_CHECK(source_->read(&kind, 1), "truncated cell shuffle block");
     if (kind == static_cast<uint8_t>(CellBlockKind::kCompositeRows)) {
-      const bool ok = readCompositeBlock(error);
-      BOLT_CHECK(ok, "malformed composite shuffle block: {}", error);
+      readCompositeBlock();
       return NextBlock::kCompositeRows;
     }
     BOLT_CHECK_EQ(
         kind,
         static_cast<uint8_t>(CellBlockKind::kPayload),
         "unknown cell shuffle block kind");
+    std::string error;
     const bool ok = nestedAssembler_ != nullptr
         ? nestedAssembler_->beginPayload(*source_, error)
         : decoder_.beginPayload(*source_, error);
@@ -161,42 +160,45 @@ CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
   return NextBlock::kEnd;
 }
 
-bool CellShuffleReader::readCompositeBlock(std::string& error) {
-  const auto fail = [&](const char* message) {
-    error = message;
-    return false;
-  };
+void CellShuffleReader::readCompositeBlock() {
   compositeRows_.clear();
   nextCompositeRow_ = 0;
   uint8_t header[kCompositeBlockHeaderBytes - 1];
   if (!source_->read(header, sizeof(header))) {
-    return fail("truncated composite block header");
+    BOLT_FAIL(
+        "malformed composite shuffle block: truncated composite block header");
   }
   const auto rowCount = folly::loadUnaligned<uint32_t>(header);
   const auto decodedBytes = folly::loadUnaligned<uint64_t>(header + 4);
   const auto stored = folly::loadUnaligned<uint64_t>(header + 12);
   const auto layout = static_cast<RunLayout>(header[20]);
   if (rowCount == 0 || rowCount > kMaxPayloadRows) {
-    return fail("composite block row count out of range");
+    BOLT_FAIL(
+        "malformed composite shuffle block: composite block row count out of range");
   }
   if (decodedBytes < 4ull * rowCount) {
-    return fail("composite block smaller than its row headers");
+    BOLT_FAIL(
+        "malformed composite shuffle block: composite block smaller than its row headers");
   }
   if (stored > source_->remainingBound()) {
-    return fail("composite block out of bounds");
+    BOLT_FAIL(
+        "malformed composite shuffle block: composite block out of bounds");
   }
   if (layout == RunLayout::kCombinedUncompressed) {
     if (stored != decodedBytes) {
-      return fail("stored composite block size mismatch");
+      BOLT_FAIL(
+          "malformed composite shuffle block: stored composite block size mismatch");
     }
   } else if (layout != RunLayout::kCombined || decompressor_ == nullptr) {
-    return fail("unsupported composite block layout");
+    BOLT_FAIL(
+        "malformed composite shuffle block: unsupported composite block layout");
   }
 
   resetBuffer(compositeStored_, stored, pool_);
   if (stored > 0 &&
       !source_->read(compositeStored_->asMutable<char>(), stored)) {
-    return fail("truncated composite block body");
+    BOLT_FAIL(
+        "malformed composite shuffle block: truncated composite block body");
   }
   const char* body = compositeStored_->as<char>();
   if (layout == RunLayout::kCombined) {
@@ -204,7 +206,8 @@ bool CellShuffleReader::readCompositeBlock(std::string& error) {
     if (!decompressor_->decompress(
             {compositeStored_->as<uint8_t>(), stored},
             {compositeDecoded_->asMutable<uint8_t>(), decodedBytes})) {
-      return fail("composite block decompression failed");
+      BOLT_FAIL(
+          "malformed composite shuffle block: composite block decompression failed");
     }
     body = compositeDecoded_->as<char>();
   }
@@ -214,21 +217,23 @@ bool CellShuffleReader::readCompositeBlock(std::string& error) {
   uint64_t pos = 0;
   for (uint32_t i = 0; i < rowCount; ++i) {
     if (decodedBytes - pos < sizeof(int32_t)) {
-      return fail("truncated composite row header");
+      BOLT_FAIL(
+          "malformed composite shuffle block: truncated composite row header");
     }
     const int32_t size = compositeRowSize(body + pos);
     pos += sizeof(int32_t);
     if (size < 0 || static_cast<uint64_t>(size) > decodedBytes - pos) {
-      return fail("composite row out of bounds");
+      BOLT_FAIL(
+          "malformed composite shuffle block: composite row out of bounds");
     }
     rows.emplace_back(body + pos, static_cast<size_t>(size));
     pos += size;
   }
   if (pos != decodedBytes) {
-    return fail("composite block length mismatch");
+    BOLT_FAIL(
+        "malformed composite shuffle block: composite block length mismatch");
   }
   compositeRows_ = std::move(rows);
-  return true;
 }
 
 RowVectorPtr CellShuffleReader::nextComposite() {
