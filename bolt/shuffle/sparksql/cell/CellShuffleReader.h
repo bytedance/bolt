@@ -157,8 +157,8 @@ class CellShuffleReader {
   NextBlock nextBlock();
 
   /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
-  /// consumed; false, with `error`, on a malformed one.
-  bool readCompositeBlock(std::string& error);
+  /// consumed. Throws on malformed input.
+  void readCompositeBlock();
 
   bool hasCompositeRows() const {
     return nextCompositeRow_ < compositeRows_.size();
