@@ -232,7 +232,7 @@ void CellNestedShredder::followSeals() {
   }
 }
 
-void CellNestedShredder::prepare(const RowVector& rv) {
+void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   const uint64_t start = currentTimeNs();
   const uint64_t excluded = excludedNow();
   busy_ = true;
@@ -242,12 +242,14 @@ void CellNestedShredder::prepare(const RowVector& rv) {
   numRows_ = rv.size();
   std::fill(totals_.begin(), totals_.end(), 0);
   const auto& topNodes = layout_.topNodes();
-  BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + 1);
+  BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + columnOffset);
   for (uint32_t i = 0; i < topNodes.size(); ++i) {
     BOLT_CHECK(
-        rv.childAt(i + 1)->type()->equivalent(*layout_.node(topNodes[i]).type),
+        rv.childAt(i + columnOffset)
+            ->type()
+            ->equivalent(*layout_.node(topNodes[i]).type),
         "Cell input schema changed");
-    decodeNode(topNodes[i], rv.childAt(i + 1));
+    decodeNode(topNodes[i], rv.childAt(i + columnOffset));
   }
 
   // The rows' columns: a leaf as it comes, a ROW as its presence, a

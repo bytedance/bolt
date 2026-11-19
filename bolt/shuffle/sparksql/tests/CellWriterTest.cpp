@@ -27,6 +27,7 @@
 #include <type_traits>
 
 #include <fmt/format.h>
+#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -664,6 +665,54 @@ TEST_F(CellWriterTest, lazyInputIsSlicedByLoadedBytes) {
           .ok());
   EXPECT_GE(writer.metrics().totalInputBatches, 2);
   ASSERT_TRUE(writer.stop().ok());
+}
+
+TEST_F(CellWriterTest, singleAndRoundRobinKeepPartitionsAcrossSlices) {
+  // The first batch exceeds the remote slice limit. Round-robin state must
+  // advance across both those slices and the following input batch.
+  constexpr int32_t kRows = 517;
+  constexpr int32_t kValueBytes = 20'000;
+  for (const auto partitioning :
+       {Partitioning::kSingle, Partitioning::kRoundRobin}) {
+    SCOPED_TRACE(static_cast<int>(partitioning));
+    const bool single = partitioning == Partitioning::kSingle;
+    const int32_t numPartitions = single ? 1 : 5;
+    const int32_t start = single ? 0 : 3;
+    ShuffleInput input;
+    int32_t totalRows = 0;
+    for (const int32_t count : {kRows, 7}) {
+      input.data.push_back(makeRowVector(
+          {"id", "s"},
+          {makeFlatVector<int32_t>(
+               count, [&](auto row) { return totalRows + row; }),
+           makeFlatVector<std::string>(count, [&](auto row) {
+             return std::string(kValueBytes, 'a' + row % 26);
+           })}));
+      auto& pids = input.pids.emplace_back(count);
+      for (int32_t row = 0; row < count; ++row) {
+        pids[row] = single ? 0 : (start + totalRows + row) % numPartitions;
+      }
+      totalRows += count;
+    }
+    for (const double checkRatio : {0.0, 1.0}) {
+      SCOPED_TRACE(checkRatio);
+      auto options = writerOptions(numPartitions, true);
+      options.partitioning = partitioning;
+      options.startPartitionId = start;
+      options.shuffleCheckRatio = checkRatio;
+      options.shuffleCheckMaxColumns = 1;
+      options.cellOptions.enableStringDictionary = false;
+      const auto written =
+          test::writeShuffle(options, input, pool(), [&](size_t batch) {
+            return input.data[batch];
+          });
+      EXPECT_GT(
+          written.metrics.totalInputBatches,
+          static_cast<int64_t>(input.data.size()));
+      test::expectReadsBack(
+          input, written, arrow::Compression::LZ4_FRAME, pool());
+    }
+  }
 }
 
 TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
@@ -1960,6 +2009,63 @@ TEST_F(CellWriterTest, celebornEmptyMapperStillEndsTheAttempt) {
   EXPECT_EQ(writer.metrics().partitionLengths, std::vector<int64_t>(3, 0));
   EXPECT_EQ(writer.metrics().useCellShuffle, 1);
   EXPECT_FALSE(std::filesystem::exists(dataFile_));
+}
+
+TEST_F(CellWriterTest, failedPartitioningDoesNotDeferReclaim) {
+  constexpr int32_t kPartitions = 2;
+  std::mt19937 rng(43);
+  ShuffleInput input;
+  input.data.push_back(
+      makeCompressibleBatch(4096, kPartitions, rng, input.pids.emplace_back()));
+  auto options = writerOptions(kPartitions, true);
+  options.shuffleCheckRatio = 1.0;
+  options.shuffleCheckMaxColumns = 1;
+  const auto& client = test::rssClient(options);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  const auto written =
+      test::writeShuffle(writer, options, input, pool(), nullptr, [&](size_t) {
+        auto children = input.data[0]->children();
+        children.insert(
+            children.begin(),
+            makeFlatVector<int64_t>(
+                input.data[0]->size(), [](auto) { return int64_t{0}; }));
+        const auto invalid = makeRowVector(children);
+        BOLT_ASSERT_THROW(
+            (void)writer.split(invalid, 0), "pid column must be INTEGER");
+        EXPECT_EQ(client.numPushes, 0);
+        int64_t freed = 0;
+        ASSERT_TRUE(writer.reclaimFixedSize(1LL << 30, &freed).ok());
+        EXPECT_EQ(client.numPushes, kPartitions);
+        EXPECT_GT(freed, 0);
+      });
+  test::expectReadsBack(input, written, arrow::Compression::LZ4_FRAME, pool());
+}
+
+TEST_F(CellWriterTest, compositeBlockKeepsWireHeader) {
+  const auto data = makeRowVector(
+      {"v", "s"},
+      {makeFlatVector<int64_t>({17, -23}),
+       makeFlatVector<std::string>({"first", "second"})});
+  const ShuffleInput input{{data}, {{0, 0}}};
+  const auto composite = test::makeComposite(input.pids[0], data, pool());
+  const auto rawBytes = static_cast<uint64_t>(composite->totalRowSize());
+  for (const bool rss : {false, true}) {
+    SCOPED_TRACE(rss ? "rss" : "local");
+    const auto written = test::writeShuffle(
+        writerOptions(1, rss, arrow::Compression::UNCOMPRESSED),
+        input,
+        pool(),
+        [&](size_t) { return composite; });
+    const auto& bytes = written.partitions[0];
+    ASSERT_EQ(bytes.size(), 22 + rawBytes);
+    EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 1);
+    EXPECT_EQ(folly::loadUnaligned<uint32_t>(bytes.data() + 1), 2);
+    EXPECT_EQ(folly::loadUnaligned<uint64_t>(bytes.data() + 5), rawBytes);
+    EXPECT_EQ(folly::loadUnaligned<uint64_t>(bytes.data() + 13), rawBytes);
+    EXPECT_EQ(
+        static_cast<RunLayout>(bytes[21]), RunLayout::kCombinedUncompressed);
+    EXPECT_EQ(bytes.substr(22), std::string(composite->rowAt(0), rawBytes));
+  }
 }
 
 TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {

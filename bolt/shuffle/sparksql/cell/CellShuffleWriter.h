@@ -33,45 +33,13 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 class CellShuffleCheck;
 
-/// Prepares decoded and partitioned input batches and schedules spills,
-/// window seals and final output through CellSplitter.
+/// Prepares logical rows for CellSplitter and schedules spills and seals.
+/// Hash/range input includes a leading pid column; single/round-robin does not.
+/// Nested columns are shredded or packed by the type adapter.
 ///
-/// Accepts logical rows (pid column first), so callers never see the
-/// physical Cell schema: the columns of a nested layout are shredded into
-/// plain ones by a CellNestedShredder, and other complex columns packed into
-/// the trailing binary column by the type adapter. CompositeRowVectors are
-/// handled entirely by the CompositeShuffleWriter base.
-///
-/// Memory decisions never consult the split() memLimit parameter (it is
-/// ignored by design). Locally, at a batch boundary, cell data past the
-/// cell threshold - CellShuffleOptions::cellSpillBytesPerStream for every
-/// stream of every partition, at least cellSpillMinBytes - spills the
-/// largest partitions down to half of it, without memory pressure. Under
-/// pressure, the choke point is reserveChunk() at chunk growth, where a
-/// failed maybeReserve - or the memory threshold passed,
-/// CellShuffleOptions::cellMemorySpillRatio of the memory limit - spills
-/// the largest partitions until half the cell data is
-/// covered. A reclaim frees idle chunks first, then runs
-/// partial spills and compaction, and spills everything only when those
-/// fall short; one of a given size writes no run while the cells hold less
-/// data than the run floor (CellShuffleOptions::reclaimRunFloorBytes).
-/// Accounting is the allocator's exact chunk/cell counters.
-///
-/// Locally, the newest of what spills - runs and sealed payloads, the
-/// composite blocks too - stays in a SpillMemory of the writer's pool, and
-/// the merge copies it from there. It grows until the first memory pressure
-/// and from then on reuses its blocks, writing the oldest out. Every
-/// pressure event - a reclaim, a chunk reservation that fails or passes
-/// the memory threshold, composite rows short of room - writes its oldest
-/// blocks out first, as much as the event needs, then does what it did
-/// before. A reclaim writes them out even while the output writes: a
-/// block's reservation, which may reclaim the writer, is taken only between
-/// blocks.
-///
-/// On Celeborn a window can only be pushed whole, so every one of those
-/// spills becomes a seal at the next batch boundary instead: batches are
-/// sliced small, each slice is admitted against the pool first, and a
-/// reclaim arriving mid-batch is deferred to the boundary.
+/// Local memory pressure releases buffered spill data, then cell partitions.
+/// Celeborn pushes whole windows at batch boundaries. Memory limits come from
+/// the pool and task; split()'s memLimit is unused.
 class CellShuffleWriter final : public CompositeShuffleWriter {
  public:
   CellShuffleWriter(
@@ -82,7 +50,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   ~CellShuffleWriter() override;
 
   const uint64_t cachedPayloadSize() const override {
-    return 0; // no payload cache layer, by design
+    return 0;
   }
 
   std::string toString() const override;
@@ -103,11 +71,11 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
  private:
   /// Why a whole window was sealed.
   enum class SealReason : uint8_t {
-    kRows, // a payload's rows or nested positions would pass their bound
-    kMemory, // memory pressure asked for it
-    kNulls, // the null bitmaps passed nullMemLimitBytes
-    kFlush, // composite rows come next
-    kReserve, // the next slice could not be reserved
+    kPositionLimit,
+    kMemoryPressure,
+    kNullBitmapLimit,
+    kComposite,
+    kReserveFailed,
     kCount,
   };
 
@@ -159,12 +127,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     std::string toString() const;
   };
 
-  /// Times one seal, spill or push of cell data while a split() call is
-  /// under way, into sealSpillNs_. One reached from inside another - a
-  /// chunk growth or a reclaim during a seal, the seal of a window release
-  /// - counts once, with the outer one. Outside a split it times nothing:
-  /// the operator counts an external reclaim as externalReclaimTime, and
-  /// stop() is no split.
+  /// Times only the outermost seal/spill within split(), so releaseWindow ->
+  /// sealWindow and allocation-triggered reclaims do not double count time.
+  /// External reclaims and stop() are accounted separately.
   class SealSpillTimer {
    public:
     explicit SealSpillTimer(CellShuffleWriter& writer);
@@ -180,6 +145,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   };
 
   void initOnFirstBatch(const RowVector& rv);
+  arrow::Status computeOrdinaryPartitions(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// splitBatch() of a nested layout: seals the window first when the
   /// batch's positions do not fit beside it.
@@ -191,13 +157,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       uint32_t numRows,
       std::span<const DecodedVector> decoded,
       std::span<const NullClass> nullClass);
-  /// The allocator's ReserveChunkFn: reserves a chunk's memory within the
-  /// memory threshold. Locally, when it cannot, it writes the spill
-  /// memory out and tries once more; then it spills the largest partitions
-  /// until half the cell data is covered, and the growth takes their
-  /// recycled cells. Remotely, a window is released only whole at a batch
-  /// boundary, so it requests that and lets this growth proceed.
-  void reserveChunk();
+  /// Before chunk growth, reserves capacity or spills local data. Remote
+  /// pressure requests a seal at the next batch boundary.
+  void prepareChunkGrowth();
   ColumnPositionCounts columnPositionCounts() const {
     return shredder_ != nullptr ? shredder_->columnPositionCounts()
                                 : ColumnPositionCounts{};
@@ -247,6 +209,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// A SealSpillTimer is running.
   bool timingSealSpill_{false};
 
+  /// Only retained when complex columns need packing.
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   /// Set, in place of adapter_, when the schema takes a nested layout.
   std::unique_ptr<CellNestedLayout> nested_;
@@ -270,8 +233,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// perPidCounter_.
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
-  std::vector<DecodedVector> decoded_;
-  std::vector<NullClass> nullClass_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

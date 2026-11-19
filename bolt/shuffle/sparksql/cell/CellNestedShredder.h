@@ -71,11 +71,11 @@ class CellNestedShredder {
       memory::MemoryPool& pool,
       const uint64_t* excludedNs = nullptr);
 
-  /// Takes the next batch, pid column first: decodes it, classifies the
+  /// Takes data columns starting at columnOffset: decodes them, classifies the
   /// nulls of the rows' columns and counts each space's positions in this
   /// batch alone. Throws a user error once some space passes
   /// CellNestedLayout::kMaxPositions: no payload can carry the batch.
-  void prepare(const RowVector& rv);
+  void prepare(const RowVector& rv, uint32_t columnOffset);
 
   /// Whether the prepared batch's positions in every space, added to the
   /// most a partition holds there, stay within kMaxPositions. Follows any
