@@ -46,10 +46,8 @@ class CompositeShuffleWriter : public ShuffleWriter {
   arrow::Status stop() final;
 
  protected:
-  /// Builds the partitioner both sides share. Under single or round-robin
-  /// partitioning, which give no pid column, split() puts one computed by
-  /// that partitioning in front of every ordinary batch, so the subclass
-  /// always sees a pid column; composite rows are refused there.
+  /// Builds the partitioner both sides share. Composite rows require a pid
+  /// column; ordinary batches retain the configured partitioning's shape.
   CompositeShuffleWriter(
       ShuffleWriterOptions options,
       memory::MemoryPool* boltPool,
@@ -57,7 +55,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
 
   ~CompositeShuffleWriter() override;
 
-  /// An ordinary (non-composite) batch, pid column first.
+  /// An ordinary batch, with a leading pid column only when hasPid() is true.
   virtual arrow::Status splitOrdinary(RowVectorPtr rv, int64_t memLimit) = 0;
 
   /// Reclaim while the ordinary side holds the data.
@@ -89,12 +87,6 @@ class CompositeShuffleWriter : public ShuffleWriter {
     return nullptr;
   }
 
-  /// Partitions `rv` by its pid column (child 0, INTEGER) into
-  /// row2Partition_ and partition2RowCount_. Both sides use them: they never
-  /// split at the same time - a reclaim reached from inside a split goes to
-  /// the active side, and a composite flush waits for the split's end.
-  arrow::Status computePartitions(const RowVector& rv);
-
   /// Inside split(): a reclaim reached now is nested in the split, which
   /// the operator times as a whole, not as externalReclaimTime.
   bool inSplitCall() const {
@@ -102,15 +94,16 @@ class CompositeShuffleWriter : public ShuffleWriter {
   }
 
   memory::MemoryPool* const boltPool_;
+  /// Shared by the two paths, which never split at the same time. A reclaim
+  /// inside a split goes to its active side; composite flushes wait for it.
   std::vector<uint32_t> row2Partition_;
   std::vector<uint32_t> partition2RowCount_;
 
  private:
   void splitComposite(const CompositeRowVectorPtr& rv);
 
-  /// `rv` behind a pid column computed by pidSource_, sharing its
-  /// children.
-  RowVectorPtr withComputedPids(const RowVectorPtr& rv);
+  /// Partitions composite rows by their pid column (child 0, INTEGER).
+  arrow::Status computeCompositePartitions(const RowVector& rv);
 
   /// Writes the held composite rows out - or, while a split or write is
   /// under way, right after it.
@@ -121,17 +114,13 @@ class CompositeShuffleWriter : public ShuffleWriter {
   void writeComposite();
 
   /// The BlockSource of writeComposite(): partition `pid`'s next block,
-  /// from its row `nextRow` on, compressed through `scratch`.
+  /// from its row `nextRow` on, compressed through `compressedBuffer`.
   bool nextBlock(
       uint32_t pid,
       BufferPtr& block,
       size_t& nextRow,
-      BufferPtr& scratch);
+      BufferPtr& compressedBuffer);
 
-  /// The single or round-robin partitioner that computes the pid column of
-  /// a batch without one; null under hash or range. partitioner_ then
-  /// takes the computed ids as they are.
-  std::shared_ptr<Partitioner> pidSource_;
   bool stopped_{false};
   bool inSplitCall_{false};
   /// The last batch was composite: that side is the active one - it takes

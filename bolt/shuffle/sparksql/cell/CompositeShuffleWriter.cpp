@@ -16,7 +16,6 @@
 
 #include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
 
-#include <folly/Likely.h>
 #include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 #include <cstring>
@@ -38,6 +37,22 @@ namespace {
 /// gives the reader batch-sized pieces.
 constexpr uint64_t kCompositeBlockBytes = 4 << 20;
 
+/// Serializes fields explicitly so native struct padding never enters the wire.
+struct CompositeBlockHeader {
+  uint32_t rowCount;
+  uint64_t decodedBytes;
+  uint64_t storedBytes;
+  RunLayout layout;
+
+  void writeTo(char* out) const {
+    out[0] = static_cast<char>(CellBlockKind::kCompositeRows);
+    folly::storeUnaligned<uint32_t>(out + 1, rowCount);
+    folly::storeUnaligned<uint64_t>(out + 5, decodedBytes);
+    folly::storeUnaligned<uint64_t>(out + 13, storedBytes);
+    out[21] = static_cast<char>(layout);
+  }
+};
+
 /// Assembles one CompositeRows block (CellFormat.h) of `rows` into `block`.
 /// The body is gathered in place, so a stored block needs no second copy
 /// and a compressed one is copied back over it. The compression workspace
@@ -49,7 +64,7 @@ void buildBlock(
     uint64_t rawBytes,
     Codec* codec,
     BufferPtr& block,
-    BufferPtr& scratch,
+    BufferPtr& compressedBuffer,
     memory::MemoryPool* pool,
     uint64_t& compressTimeNs) {
   BOLT_CHECK_LE(
@@ -67,33 +82,32 @@ void buildBlock(
   }
 
   // Compressed when the codec shrinks the body, else stored as is.
-  uint64_t stored = rawBytes;
-  auto layout = RunLayout::kCombinedUncompressed;
+  CompositeBlockHeader header{
+      static_cast<uint32_t>(numRows),
+      rawBytes,
+      rawBytes,
+      RunLayout::kCombinedUncompressed};
   if (codec != nullptr && rawBytes >= kMinCompressBytes) {
     const uint64_t start = currentTimeNs();
     resetBuffer(
-        scratch, codec->maxCompressedLen(rawBytes), memory::spillMemoryPool());
+        compressedBuffer,
+        codec->maxCompressedLen(rawBytes),
+        memory::spillMemoryPool());
     const int64_t written = codec->compress(
         reinterpret_cast<const uint8_t*>(body),
         static_cast<int64_t>(rawBytes),
-        scratch->asMutable<uint8_t>(),
-        static_cast<int64_t>(scratch->size()));
+        compressedBuffer->asMutable<uint8_t>(),
+        static_cast<int64_t>(compressedBuffer->size()));
     compressTimeNs += currentTimeNs() - start;
     if (written > 0 && static_cast<uint64_t>(written) < rawBytes) {
-      stored = static_cast<uint64_t>(written);
-      layout = RunLayout::kCombined;
-      ::memcpy(body, scratch->as<char>(), stored);
+      header.storedBytes = static_cast<uint64_t>(written);
+      header.layout = RunLayout::kCombined;
+      ::memcpy(body, compressedBuffer->as<char>(), header.storedBytes);
     }
   }
 
-  char* header = block->asMutable<char>();
-  header[0] = static_cast<char>(CellBlockKind::kCompositeRows);
-  const auto rowCount = static_cast<uint32_t>(numRows);
-  folly::storeUnaligned<uint32_t>(header + 1, rowCount);
-  folly::storeUnaligned<uint64_t>(header + 5, rawBytes);
-  folly::storeUnaligned<uint64_t>(header + 13, stored);
-  header[21] = static_cast<char>(layout);
-  block->setSize(kCompositeBlockHeaderBytes + stored);
+  header.writeTo(block->asMutable<char>());
+  block->setSize(kCompositeBlockHeaderBytes + header.storedBytes);
 }
 
 } // namespace
@@ -123,16 +137,6 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       "Failed to create partitioner: {}",
       maybePartitioner.status().ToString());
   partitioner_ = *maybePartitioner;
-  if (!partitioner_->hasPid()) {
-    // Single or round-robin: split() computes each ordinary batch's
-    // partition ids with this partitioner, as V1 does, and puts them in
-    // front as a pid column; the pid path then takes them as they are.
-    pidSource_ = std::move(partitioner_);
-    auto passThrough = Partitioner::make(
-        Partitioning::kRange, numPartitions_, options_.startPartitionId);
-    BOLT_CHECK(passThrough.ok(), "{}", passThrough.status().ToString());
-    partitioner_ = *passThrough;
-  }
   const auto& writerOptions = options_.partitionWriterOptions;
   if (writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
     codec_ = createCodec(
@@ -144,7 +148,9 @@ CompositeShuffleWriter::CompositeShuffleWriter(
   }
 }
 
-arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
+arrow::Status CompositeShuffleWriter::computeCompositePartitions(
+    const RowVector& rv) {
+  BOLT_CHECK(partitioner_->hasPid(), "composite rows require a pid column");
   const auto& pidChild = rv.childAt(0);
   BOLT_CHECK_EQ(
       static_cast<int32_t>(pidChild->typeKind()),
@@ -165,45 +171,6 @@ arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
       pids, rv.size(), row2Partition_, partition2RowCount_);
 }
 
-RowVectorPtr CompositeShuffleWriter::withComputedPids(const RowVectorPtr& rv) {
-  const vector_size_t numRows = rv->size();
-  auto pid =
-      BaseVector::create<FlatVector<int32_t>>(INTEGER(), numRows, boltPool_);
-  int32_t* pids = pid->mutableRawValues();
-  if (options_.partitioning == Partitioning::kSingle) {
-    // V1 writes every row to partition 0; SinglePartitioner computes
-    // nothing.
-    std::fill(pids, pids + numRows, 0);
-  } else {
-    // V1's call: the partitioner's round-robin position carries over from
-    // batch to batch, from startPartitionId on.
-    const auto status = pidSource_->compute(
-        nullptr, numRows, row2Partition_, partition2RowCount_);
-    BOLT_CHECK(status.ok(), "{}", status.ToString());
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      pids[row] = static_cast<int32_t>(row2Partition_[row]);
-    }
-  }
-  const auto& rowType = rv->type()->asRow();
-  std::vector<std::string> names{"pid"};
-  std::vector<TypePtr> types{INTEGER()};
-  std::vector<VectorPtr> children{std::move(pid)};
-  names.reserve(rowType.size() + 1);
-  types.reserve(rowType.size() + 1);
-  children.reserve(rowType.size() + 1);
-  for (uint32_t i = 0; i < rowType.size(); ++i) {
-    names.push_back(rowType.nameOf(i));
-    types.push_back(rowType.childAt(i));
-    children.push_back(rv->childAt(i));
-  }
-  return std::make_shared<RowVector>(
-      boltPool_,
-      ROW(std::move(names), std::move(types)),
-      nullptr,
-      numRows,
-      std::move(children));
-}
-
 CompositeShuffleWriter::~CompositeShuffleWriter() {
   // A failed split or stop may leave composite rows held.
   converter_.reset();
@@ -221,14 +188,10 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
       flushComposite();
       compositeActive_ = false;
     }
-    if (FOLLY_UNLIKELY(pidSource_ != nullptr)) {
-      rv = withComputedPids(rv);
-    }
     return splitOrdinary(std::move(rv), memLimit);
   }
-  // V1 does not take them either: its composite path needs a pid column.
   BOLT_CHECK(
-      pidSource_ == nullptr,
+      partitioner_->hasPid(),
       "CellShuffleWriter takes composite rows only under hash or range "
       "partitioning");
   if (!compositeActive_) {
@@ -312,7 +275,7 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
       }
       writeComposite();
     }
-    const auto status = computePartitions(*rv);
+    const auto status = computeCompositePartitions(*rv);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     const uint64_t start = currentTimeNs();
     converter_.convert(rv, row2Partition_, heldRows_);
@@ -348,13 +311,13 @@ void CompositeShuffleWriter::writeComposite() {
     return;
   }
   size_t nextRow = 0;
-  BufferPtr scratch;
+  BufferPtr compressedBuffer;
   output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
-    return nextBlock(pid, block, nextRow, scratch);
+    return nextBlock(pid, block, nextRow, compressedBuffer);
   });
   converter_.reset();
   heldRowBytes_ = 0;
-  scratch.reset();
+  compressedBuffer.reset();
   boltPool_->release();
 }
 
@@ -362,7 +325,7 @@ bool CompositeShuffleWriter::nextBlock(
     uint32_t pid,
     BufferPtr& block,
     size_t& nextRow,
-    BufferPtr& scratch) {
+    BufferPtr& compressedBuffer) {
   auto& rows = heldRows_[pid];
   if (nextRow >= rows.size()) {
     rows.clear();
@@ -385,7 +348,7 @@ bool CompositeShuffleWriter::nextBlock(
       raw,
       codec_.get(),
       block,
-      scratch,
+      compressedBuffer,
       boltPool_,
       compressTimeNs_);
   rawPartitionBytes_[pid] +=
