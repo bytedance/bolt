@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 #include <folly/CPortability.h>
 
@@ -29,6 +30,16 @@
 #include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::memory {
+
+/// Reads exactly sizeof(T) bytes in native byte order, without requiring source
+/// alignment. The bytes must contain a valid representation of the POD type T.
+template <typename T>
+FOLLY_ALWAYS_INLINE T loadUnaligned(const void* source) {
+  static_assert(std::is_trivial_v<T> && std::is_standard_layout_v<T>);
+  T value;
+  ::memcpy(&value, source, sizeof(T));
+  return value;
+}
 
 namespace detail {
 

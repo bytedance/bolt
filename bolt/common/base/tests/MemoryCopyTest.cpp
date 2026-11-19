@@ -18,9 +18,12 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstring>
+#include <limits>
 #include <thread>
 
+#include <folly/BenchmarkUtil.h>
 #include <gtest/gtest.h>
 
 #if defined(__unix__)
@@ -45,6 +48,63 @@ std::array<char, 512> sourceBytes() {
     source[i] = static_cast<char>((i * 37 + i / 7) & 255);
   }
   return source;
+}
+
+template <typename T>
+void checkLoadAtAllOffsets(T expected) {
+  alignas(64) std::array<char, 64 + sizeof(T)> source;
+  for (size_t offset = 0; offset < 64; ++offset) {
+    source.fill('\x5a');
+    std::memcpy(source.data() + offset, &expected, sizeof(T));
+    const auto* src = source.data() + offset;
+    folly::makeUnpredictable(src);
+    const auto actual = loadUnaligned<T>(src);
+    folly::doNotOptimizeAway(actual);
+    EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(T)), 0)
+        << "width=" << sizeof(T) << " offset=" << offset;
+  }
+}
+
+TEST(MemoryCopyTest, loadUnalignedValuesAndAlignments) {
+  const auto checkInteger = []<typename T>() {
+    checkLoadAtAllOffsets(T{0});
+    checkLoadAtAllOffsets(std::numeric_limits<T>::min());
+    checkLoadAtAllOffsets(std::numeric_limits<T>::max());
+  };
+  checkInteger.template operator()<int8_t>();
+  checkInteger.template operator()<uint8_t>();
+  checkInteger.template operator()<int16_t>();
+  checkInteger.template operator()<uint16_t>();
+  checkInteger.template operator()<int32_t>();
+  checkInteger.template operator()<uint32_t>();
+  checkInteger.template operator()<int64_t>();
+  checkInteger.template operator()<uint64_t>();
+  checkLoadAtAllOffsets(
+      std::array<uint64_t, 2>{0x0123456789abcdefULL, 0xfedcba9876543210ULL});
+
+  // Compare representations so signed zero and NaN payloads are preserved.
+  for (const uint32_t bits :
+       {0x00000000U,
+        0x80000000U,
+        0x3f800000U,
+        0xbf800000U,
+        0x7f800000U,
+        0xff800000U,
+        0x7fc12345U,
+        0xffc54321U}) {
+    checkLoadAtAllOffsets(std::bit_cast<float>(bits));
+  }
+  for (const uint64_t bits :
+       {0x0000000000000000ULL,
+        0x8000000000000000ULL,
+        0x3ff0000000000000ULL,
+        0xbff0000000000000ULL,
+        0x7ff0000000000000ULL,
+        0xfff0000000000000ULL,
+        0x7ff8123456789abcULL,
+        0xfff8fedcba987654ULL}) {
+    checkLoadAtAllOffsets(std::bit_cast<double>(bits));
+  }
 }
 
 TEST(MemoryCopyTest, under64AllLengthsAndAlignments) {
@@ -203,6 +263,24 @@ TEST(MemoryCopyTest, guardedBoundaries) {
   for (size_t i = 0; i < pageSize; ++i) {
     source[i] = static_cast<char>((i * 37 + i / 7) & 255);
   }
+
+  const auto checkLoad = [&]<typename T>() {
+    for (size_t offset = 0; offset < 64; ++offset) {
+      for (const auto* src :
+           {source + offset, source + pageSize - sizeof(T) - offset}) {
+        folly::makeUnpredictable(src);
+        const auto actual = loadUnaligned<T>(src);
+        folly::doNotOptimizeAway(actual);
+        EXPECT_EQ(std::memcmp(&actual, src, sizeof(T)), 0)
+            << "width=" << sizeof(T) << " offset=" << offset;
+      }
+    }
+  };
+  checkLoad.template operator()<uint8_t>();
+  checkLoad.template operator()<uint16_t>();
+  checkLoad.template operator()<uint32_t>();
+  checkLoad.template operator()<uint64_t>();
+  checkLoad.template operator()<std::array<uint64_t, 2>>();
 
   // Check both ends of accessible pages. The tail cases also vary alignment
   // and fault on any overread or overwrite beyond the requested byte range.

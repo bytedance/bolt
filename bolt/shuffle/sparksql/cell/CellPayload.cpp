@@ -23,6 +23,7 @@
 #include <string_view>
 #include <type_traits>
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
@@ -55,7 +56,7 @@ loadBitWord(const uint8_t* bits, uint64_t bytes, uint64_t offset) {
   const uint64_t byte = offset / 8;
   const uint32_t shift = offset % 8;
   if (byte + 9 <= bytes) {
-    const uint64_t word = folly::loadUnaligned<uint64_t>(bits + byte);
+    const uint64_t word = memory::loadUnaligned<uint64_t>(bits + byte);
     return shift == 0 ? word
                       : (word >> shift) |
             (static_cast<uint64_t>(bits[byte + 8]) << (64 - shift));
@@ -328,7 +329,7 @@ bool expandNullRecords(
     error = "truncated null records";
     return false;
   }
-  const uint32_t count = folly::loadUnaligned<uint32_t>(cursor);
+  const uint32_t count = memory::loadUnaligned<uint32_t>(cursor);
   cursor += sizeof(uint32_t);
   if (count > static_cast<uint64_t>(end - cursor) / kNullRecordBytes) {
     error = "truncated null records";
@@ -338,7 +339,7 @@ bool expandNullRecords(
   uint64_t row = 0;
   uint64_t nulls = 0;
   for (uint32_t i = 0; i < count; ++i, cursor += kNullRecordBytes) {
-    const auto run = folly::loadUnaligned<uint16_t>(cursor);
+    const auto run = memory::loadUnaligned<uint16_t>(cursor);
     const uint32_t fill = cursor[2];
     const uint8_t* bits = cursor + (kNullRecordBytes - kNullRecordBitmapBytes);
     if (fill > kNullRecordBits) {
@@ -446,14 +447,14 @@ bool CellPayloadDecoder::parseNullBody(
       continue;
     }
     if (end - cursor < static_cast<ptrdiff_t>(sizeof(uint32_t)) ||
-        folly::loadUnaligned<uint32_t>(cursor) >
+        memory::loadUnaligned<uint32_t>(cursor) >
             static_cast<uint64_t>(end - cursor - sizeof(uint32_t)) /
                 kNullRecordBytes) {
       return fail(error, "truncated null records");
     }
     records_[col] = cursor;
     cursor += sizeof(uint32_t) +
-        uint64_t{folly::loadUnaligned<uint32_t>(cursor)} * kNullRecordBytes;
+        uint64_t{memory::loadUnaligned<uint32_t>(cursor)} * kNullRecordBytes;
   }
   if (cursor != end) {
     return fail(error, "null body length mismatch");
@@ -485,7 +486,8 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
       case NullTag::kRawNull: {
         const uint8_t* cursor = records_[col];
         const uint8_t* const end = cursor + sizeof(uint32_t) +
-            uint64_t{folly::loadUnaligned<uint32_t>(cursor)} * kNullRecordBytes;
+            uint64_t{memory::loadUnaligned<uint32_t>(cursor)} *
+                kNullRecordBytes;
         if (!expandNullRecords(
                 cursor, end, rowCount, bitmap, nonNullCount_[col], error)) {
           return false;
@@ -713,15 +715,15 @@ bool CellPayloadDecoder::parsePayload(
   if (!in.read(header, sizeof(header))) {
     return fail(error, "truncated payload header");
   }
-  rowCount = folly::loadUnaligned<uint32_t>(header);
-  const uint32_t runCount = folly::loadUnaligned<uint32_t>(header + 4);
+  rowCount = memory::loadUnaligned<uint32_t>(header);
+  const uint32_t runCount = memory::loadUnaligned<uint32_t>(header + 4);
   // variableBytes (offset 8) is unused here; it must be 0 only in a
   // payload without wire columns.
-  const uint32_t nullStoredSize = folly::loadUnaligned<uint32_t>(header + 16);
-  const uint32_t nullDecodedSize = folly::loadUnaligned<uint32_t>(header + 20);
+  const uint32_t nullStoredSize = memory::loadUnaligned<uint32_t>(header + 16);
+  const uint32_t nullDecodedSize = memory::loadUnaligned<uint32_t>(header + 20);
   if (layout_.numWireColumns() == 0 &&
       (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
-       folly::loadUnaligned<uint64_t>(header + 8) != 0)) {
+       memory::loadUnaligned<uint64_t>(header + 8) != 0)) {
     return fail(
         error, "payload without wire columns must contain only its header");
   }
@@ -926,7 +928,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     if (dataSize - pos < 4) {
       return fail(error, "truncated dictionary matched count");
     }
-    const uint32_t matchedRows = folly::loadUnaligned<uint32_t>(data + pos);
+    const uint32_t matchedRows = memory::loadUnaligned<uint32_t>(data + pos);
     pos += 4;
     cursor.dictionaries.push_back(
         {firstEntry,

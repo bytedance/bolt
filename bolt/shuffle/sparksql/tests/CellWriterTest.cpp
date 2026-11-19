@@ -29,6 +29,7 @@
 #include <fmt/format.h>
 #include <folly/lang/Bits.h>
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
@@ -2059,9 +2060,9 @@ TEST_F(CellWriterTest, compositeBlockKeepsWireHeader) {
     const auto& bytes = written.partitions[0];
     ASSERT_EQ(bytes.size(), 22 + rawBytes);
     EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 1);
-    EXPECT_EQ(folly::loadUnaligned<uint32_t>(bytes.data() + 1), 2);
-    EXPECT_EQ(folly::loadUnaligned<uint64_t>(bytes.data() + 5), rawBytes);
-    EXPECT_EQ(folly::loadUnaligned<uint64_t>(bytes.data() + 13), rawBytes);
+    EXPECT_EQ(memory::loadUnaligned<uint32_t>(bytes.data() + 1), 2);
+    EXPECT_EQ(memory::loadUnaligned<uint64_t>(bytes.data() + 5), rawBytes);
+    EXPECT_EQ(memory::loadUnaligned<uint64_t>(bytes.data() + 13), rawBytes);
     EXPECT_EQ(
         static_cast<RunLayout>(bytes[21]), RunLayout::kCombinedUncompressed);
     EXPECT_EQ(bytes.substr(22), std::string(composite->rowAt(0), rawBytes));

@@ -31,6 +31,7 @@
 #include <string>
 #include <type_traits>
 
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
 #if defined(__AVX2__)
@@ -281,13 +282,13 @@ inline uint64_t loadLowBytes(const uint8_t* in, uint32_t bytes) {
 FOLLY_ALWAYS_INLINE int64_t loadSignedBytes(const uint8_t* in, uint32_t bytes) {
   switch (bytes) {
     case 1:
-      return folly::loadUnaligned<int8_t>(in);
+      return memory::loadUnaligned<int8_t>(in);
     case 2:
-      return folly::loadUnaligned<int16_t>(in);
+      return memory::loadUnaligned<int16_t>(in);
     case 4:
-      return folly::loadUnaligned<int32_t>(in);
+      return memory::loadUnaligned<int32_t>(in);
     case 8:
-      return folly::loadUnaligned<int64_t>(in);
+      return memory::loadUnaligned<int64_t>(in);
     default:
       return signExtend(loadLowBytes(in, bytes), bytes * 8);
   }
@@ -431,9 +432,9 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
         const __m256i shifts =
             _mm256_mul_epu32(_mm256_setr_epi64x(0, 1, 2, 3), width);
         const __m256i low =
-            _mm256_set1_epi64x(folly::loadUnaligned<int64_t>(in));
-        const __m256i high =
-            _mm256_set1_epi64x(folly::loadUnaligned<int64_t>(in + (bits >> 1)));
+            _mm256_set1_epi64x(memory::loadUnaligned<int64_t>(in));
+        const __m256i high = _mm256_set1_epi64x(
+            memory::loadUnaligned<int64_t>(in + (bits >> 1)));
         const __m256i highShifts =
             _mm256_add_epi64(shifts, _mm256_set1_epi64x((4 * bits) & 7));
         _mm256_storeu_si256(

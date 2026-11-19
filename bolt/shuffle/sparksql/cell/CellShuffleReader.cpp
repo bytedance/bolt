@@ -18,11 +18,11 @@
 
 #include <arrow/io/interfaces.h>
 #include <folly/ScopeGuard.h>
-#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedAssembler.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
@@ -168,9 +168,9 @@ void CellShuffleReader::readCompositeBlock() {
     BOLT_FAIL(
         "malformed composite shuffle block: truncated composite block header");
   }
-  const auto rowCount = folly::loadUnaligned<uint32_t>(header);
-  const auto decodedBytes = folly::loadUnaligned<uint64_t>(header + 4);
-  const auto stored = folly::loadUnaligned<uint64_t>(header + 12);
+  const auto rowCount = memory::loadUnaligned<uint32_t>(header);
+  const auto decodedBytes = memory::loadUnaligned<uint64_t>(header + 4);
+  const auto stored = memory::loadUnaligned<uint64_t>(header + 12);
   const auto layout = static_cast<RunLayout>(header[20]);
   if (rowCount == 0 || rowCount > kMaxPayloadRows) {
     BOLT_FAIL(
