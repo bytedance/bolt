@@ -17,7 +17,9 @@
 #include "bolt/common/base/MemoryCopy.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -66,6 +68,8 @@ TEST(MemoryCopyTest, under64AllLengthsAndAlignments) {
 }
 
 TEST(MemoryCopyTest, nonTemporalAligned) {
+  // Same-thread reads and reuse of ordinary WB memory deliberately do not
+  // fence.
   alignas(64) const auto source = sourceBytes();
   alignas(64) std::array<char, 512> actual;
   for (const size_t bytes : {64, 128, 192, 256}) {
@@ -76,14 +80,12 @@ TEST(MemoryCopyTest, nonTemporalAligned) {
       std::memcpy(expected.data() + 64, src, bytes);
       const bool streamed =
           copyNonTemporalAligned(actual.data() + 64, src, bytes);
-      nonTemporalStoreFence();
       ASSERT_EQ(streamed, kHasNonTemporalStores);
       ASSERT_EQ(actual, expected)
           << "bytes=" << bytes << " srcOffset=" << srcOffset;
       if (bytes == 64) {
         actual.fill('\x5a');
         const bool streamed64 = copyNonTemporalAligned(actual.data() + 64, src);
-        nonTemporalStoreFence();
         ASSERT_EQ(streamed64, kHasNonTemporalStores);
         ASSERT_EQ(actual, expected) << "srcOffset=" << srcOffset;
       }
@@ -103,7 +105,6 @@ TEST(MemoryCopyTest, nonTemporalPrefixesAndTails) {
         auto* dst = actual.data() + 64 + dstOffset;
         std::memcpy(expected.data() + 64 + dstOffset, src, bytes);
         const bool streamed = copyNonTemporal(dst, src, bytes);
-        nonTemporalStoreFence();
         const size_t prefix = (64 - dstOffset) % 64;
         ASSERT_EQ(streamed, kHasNonTemporalStores && bytes >= prefix + 64);
         ASSERT_EQ(actual, expected)
@@ -112,6 +113,69 @@ TEST(MemoryCopyTest, nonTemporalPrefixesAndTails) {
       }
     }
   }
+}
+
+TEST(MemoryCopyTest, nonTemporalPublicationAndReuse) {
+  constexpr uint32_t kIterations = 1024;
+  constexpr size_t kBufferBytes = 4096 + 128;
+  constexpr std::array<size_t, 3> kCopyBytes{64, 4096, 4097};
+  constexpr std::array<size_t, 3> kOffsets{64, 64, 65};
+  alignas(64) std::array<char, kBufferBytes> actual;
+  alignas(64) std::atomic<uint32_t> published{0};
+  alignas(64) std::atomic<uint32_t> consumed{0};
+  bool storesAsExpected = true;
+  const auto sourceFor = [](uint32_t generation) {
+    std::array<uint64_t, kBufferBytes / sizeof(uint64_t)> source;
+    for (size_t i = 0; i < source.size(); ++i) {
+      source[i] = uint64_t{generation} * 0x9e3779b97f4a7c15ULL + i;
+    }
+    return source;
+  };
+  std::thread producer([&] {
+    for (uint32_t generation = 1; generation <= kIterations; ++generation) {
+      // Do not reuse the buffer until the consumer has finished reading it.
+      while (consumed.load(std::memory_order_acquire) != generation - 1) {
+        std::this_thread::yield();
+      }
+      actual.fill('\x5a');
+      const auto source = sourceFor(generation);
+      const auto* src = reinterpret_cast<const char*>(source.data()) + 1;
+      const size_t variant = generation % kCopyBytes.size();
+      auto* dst = actual.data() + kOffsets[variant];
+      const size_t bytes = kCopyBytes[variant];
+      const bool streamed = variant == 0 ? copyNonTemporalAligned(dst, src)
+          : variant == 1 ? copyNonTemporalAligned(dst, src, bytes)
+                         : copyNonTemporal(dst, src, bytes);
+      storesAsExpected = storesAsExpected && streamed == kHasNonTemporalStores;
+      // Release/acquire publishes the buffer; SFENCE orders the NT stores
+      // before that publication. Neither substitutes for the other.
+      nonTemporalStoreFence();
+      published.store(generation, std::memory_order_release);
+    }
+  });
+
+  uint32_t firstMismatch = 0;
+  for (uint32_t generation = 1; generation <= kIterations; ++generation) {
+    while (published.load(std::memory_order_acquire) != generation) {
+      std::this_thread::yield();
+    }
+    const auto source = sourceFor(generation);
+    const size_t variant = generation % kCopyBytes.size();
+    std::array<char, kBufferBytes> expected;
+    expected.fill('\x5a');
+    std::memcpy(
+        expected.data() + kOffsets[variant],
+        reinterpret_cast<const char*>(source.data()) + 1,
+        kCopyBytes[variant]);
+    if (actual != expected && firstMismatch == 0) {
+      firstMismatch = generation;
+    }
+    // Always acknowledge, even after a mismatch, so the producer can finish.
+    consumed.store(generation, std::memory_order_release);
+  }
+  producer.join();
+  EXPECT_TRUE(storesAsExpected);
+  EXPECT_EQ(firstMismatch, 0) << "first mismatching publication";
 }
 
 #if defined(__unix__)
@@ -154,18 +218,15 @@ TEST(MemoryCopyTest, guardedBoundaries) {
       }
       std::memset(target, '\x5a', pageSize);
       copyNonTemporal(dst, src, bytes);
-      nonTemporalStoreFence();
       ASSERT_EQ(std::memcmp(dst, src, bytes), 0);
       if (bytes != 0 && bytes % 64 == 0) {
         std::memset(target, '\x5a', pageSize);
         copyNonTemporalAligned(dst, src, bytes);
-        nonTemporalStoreFence();
         ASSERT_EQ(std::memcmp(dst, src, bytes), 0);
       }
       if (bytes == 64) {
         std::memset(target, '\x5a', pageSize);
         const bool streamed = copyNonTemporalAligned(dst, src);
-        nonTemporalStoreFence();
         ASSERT_EQ(streamed, kHasNonTemporalStores);
         ASSERT_EQ(std::memcmp(dst, src, bytes), 0);
       }
