@@ -122,8 +122,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       logicalType->toString());
   if (options_.cellOptions.nativeNestedTypes &&
       CellNestedLayout::supports(logicalType)) {
-    nested_ = std::make_unique<CellNestedLayout>(std::move(logicalType));
-    layout_ = nested_->layout();
+    nestedLayout_ = std::make_unique<CellNestedLayout>(std::move(logicalType));
+    layout_ = nestedLayout_->layout();
   } else {
     auto adapter =
         std::make_unique<CellShuffleTypeAdapter>(asRowType(rv.type()));
@@ -207,16 +207,16 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       *output_,
       *boltPool_,
       options_.cellOptions.enableNonTemporalStores);
-  if (nested_ != nullptr) {
+  if (nestedLayout_ != nullptr) {
     shredder_ = std::make_unique<CellNestedShredder>(
-        *nested_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);
+        *nestedLayout_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);
   }
 
   shuffleCheck_ = CellShuffleCheck::create(
       *layout_.rowType(),
       numPartitions_,
       options_,
-      nested_ == nullptr && adapter_ == nullptr,
+      nestedLayout_ == nullptr && adapter_ == nullptr,
       boltPool_);
   splitter_->setStreamCheck(shuffleCheck_.get());
 
@@ -228,7 +228,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       ? "no cap"
       : std::to_string(spillMemory_->capBytes());
   LOG(INFO) << "CellShuffleWriter init: layout="
-            << (nested_ != nullptr        ? "native nested"
+            << (nestedLayout_ != nullptr  ? "native nested"
                     : adapter_ != nullptr ? "adapter"
                                           : "flat")
             << ", logicalColumns=" << inputType.size() - columnOffset

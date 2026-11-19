@@ -49,7 +49,7 @@ class CellByteSource {
 
   /// True when no byte is left. Lets a stream reader distinguish "clean end
   /// between payloads" from truncation.
-  virtual bool atEnd() const = 0;
+  virtual bool atEnd() = 0;
 
   /// Upper bound on bytes still available, SIZE_MAX when unknown. The
   /// decoder compares declared lengths against it before allocating or
@@ -75,7 +75,7 @@ class MemoryByteSource final : public CellByteSource {
     return true;
   }
 
-  bool atEnd() const override {
+  bool atEnd() override {
     return pos_ == size_;
   }
 
@@ -216,13 +216,6 @@ class CellPayloadDecoder {
 
   const CellLayout& layout() const {
     return layout_;
-  }
-
-  /// The fixed header of the payload read last, its bytes as read: when
-  /// reading it failed, only the first bytes, as many as the source gave,
-  /// are its own. What a malformed stream's error shows of it.
-  std::span<const uint8_t, kPayloadFixedHeaderBytes> payloadHeader() const {
-    return std::span<const uint8_t, kPayloadFixedHeaderBytes>(header_);
   }
 
  private:
@@ -420,9 +413,6 @@ class CellPayloadDecoder {
   vector_size_t batchCapacity_{0};
   vector_size_t batchRows_{0};
   uint64_t batchStringBytes_{0};
-
-  /// The header parsePayload() read last.
-  uint8_t header_[kPayloadFixedHeaderBytes]{};
 };
 
 /// Expands the null records of one kRawNull column at `cursor` - their u32

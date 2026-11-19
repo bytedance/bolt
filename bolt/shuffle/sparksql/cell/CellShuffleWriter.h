@@ -212,7 +212,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// Only retained when complex columns need packing.
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   /// Set, in place of adapter_, when the schema takes a nested layout.
-  std::unique_ptr<CellNestedLayout> nested_;
+  std::unique_ptr<CellNestedLayout> nestedLayout_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
   /// Locally, where both outputs' spill files keep their newest bytes;
