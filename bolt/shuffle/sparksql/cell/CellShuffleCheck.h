@@ -128,6 +128,8 @@ class CellShuffleCheck {
 
   template <typename T>
   static void prepareColumn(CellShuffleCheck& check);
+  // Keep cache loads out of the producer so they cannot reuse its stored
+  // values.
   template <typename T>
   FOLLY_NOINLINE static void observeStream(
       CellShuffleCheck& check,
