@@ -79,6 +79,7 @@ import argparse
 import ast
 import hashlib
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -956,6 +957,12 @@ def _generate_selected_profile(
         if key not in profile_settings
     }
     compiler_libcxx = normalize_libcxx(libcxx)
+    if is_clang_family(compiler_info.family) and platform.machine().lower().startswith(
+        ("arm", "aarch64")
+    ):
+        extra_link_flags = [*extra_link_flags, "-rtlib=compiler-rt"]
+        if compiler_libcxx == "libstdc++11":
+            extra_link_flags.append("--unwindlib=libgcc")
 
     conf = {
         "tools.build:compiler_executables": repr(
