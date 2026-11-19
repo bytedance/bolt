@@ -3244,6 +3244,91 @@ TEST_F(VectorTest, rowCopyRanges) {
   test::assertEqualVectors(expected, rowVectorDest);
 }
 
+TEST_F(VectorTest, copyRangesBoundedBool) {
+  auto source = makeFlatVector<bool>(160, [](auto row) { return row != 1; });
+  source->resize(3);
+  auto target = makeFlatVector<bool>(160, [](auto) { return false; });
+  const std::vector<BaseVector::CopyRange> ranges{
+      {.sourceIndex = 1, .targetIndex = 5, .count = 130},
+      {.sourceIndex = 3, .targetIndex = 140, .count = 5},
+      {.sourceIndex = 4, .targetIndex = 150, .count = 5}};
+
+  target->copyRanges(source.get(), ranges);
+
+  // The backing buffer still contains true bits past the logical size, so an
+  // unbounded copy fails deterministically. Empty ranges leave the target
+  // alone.
+  auto expected = makeFlatVector<bool>(160, [](auto row) { return row == 6; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeFlatVector<bool>({true, false, true});
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  test::assertEqualVectors(expected, target);
+
+  // Null updates must use the same bounded ranges as value updates.
+  target = makeFlatVector<bool>(
+      160, [](auto) { return false; }, [](auto) { return true; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row != 5 && row != 6; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 2; },
+      [](auto row) { return row != 0 && row != 2; });
+  source->resize(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row == 5; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeAllNullFlatVector<bool>(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto) { return false; },
+      [](auto row) { return row == 5 || row == 6; });
+  test::assertEqualVectors(expected, target);
+}
+
+TEST_F(VectorTest, copyRangesBoundedDictionary) {
+  auto testCopy = [&](const VectorPtr& values) {
+    auto source = wrapInDictionary(makeIndices({2, 0, 1}), values);
+    auto target = BaseVector::create(values->type(), 8, pool());
+    ASSERT_EQ(target->rawNulls(), nullptr);
+    const std::vector<BaseVector::CopyRange> ranges{
+        {.sourceIndex = 1, .targetIndex = 0, .count = 5},
+        {.sourceIndex = 0, .targetIndex = 5, .count = 1},
+        {.sourceIndex = 3, .targetIndex = 6, .count = 1},
+        {.sourceIndex = 4, .targetIndex = 7, .count = 1}};
+
+    target->copyRanges(source.get(), ranges);
+
+    for (const auto row : {0, 1, 5}) {
+      const auto sourceRow = row == 5 ? 0 : row + 1;
+      EXPECT_TRUE(target->equalValueAt(source.get(), row, sourceRow));
+    }
+    for (const auto row : {2, 3, 4, 6, 7}) {
+      EXPECT_TRUE(target->isNullAt(row));
+    }
+    EXPECT_FALSE(target->isNullAt(5));
+  };
+
+  // Exercise both values paths and both existing and newly allocated nulls.
+  testCopy(makeFlatVector<int32_t>({10, 20, 30}));
+  testCopy(makeNullableFlatVector<int32_t>({10, std::nullopt, 30}));
+  testCopy(makeFlatVector<bool>({true, false, true}));
+  testCopy(makeNullableFlatVector<bool>({true, std::nullopt, false}));
+}
+
 TEST_F(VectorTest, containsNullAtIntegers) {
   VectorPtr data = makeFlatVector<int32_t>({1, 2, 3});
   for (auto i = 0; i < data->size(); ++i) {
