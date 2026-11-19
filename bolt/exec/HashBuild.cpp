@@ -607,10 +607,12 @@ void HashBuild::addInput(RowVectorPtr input) {
     noMoreInput();
     return;
   }
-  if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
-    spillRowBasedInput(); // spill previous input rows in hash tables.
-  } else {
-    spillInput(input);
+  if (spillEnabled()) {
+    if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
+      spillRowBasedInput(); // spill previous input rows in hash tables.
+    } else {
+      spillInput(input);
+    }
   }
 
   if (!activeRows_.hasSelections()) {
@@ -856,10 +858,9 @@ bool HashBuild::reserveMemory(
 }
 
 void HashBuild::spillRowBasedInput() {
-  if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-    return;
-  }
-  if (!spillEnabled() || spiller_ == nullptr || !spiller_->isAnySpilled() ||
+  if (!spillEnabled() ||
+      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE ||
+      spiller_ == nullptr || !spiller_->isAnySpilled() ||
       !activeRows_.hasSelections() || spiller_->container()->numRows() == 0) {
     return;
   }
@@ -872,11 +873,9 @@ void HashBuild::spillRowBasedInput() {
 void HashBuild::spillInput(const RowVectorPtr& input) {
   BOLT_CHECK_EQ(input->size(), activeRows_.size());
 
-  if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
-    return;
-  }
-
-  if (!spillEnabled() || spiller_ == nullptr || !spiller_->isAnySpilled() ||
+  if (!spillEnabled() ||
+      spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE ||
+      spiller_ == nullptr || !spiller_->isAnySpilled() ||
       !activeRows_.hasSelections()) {
     return;
   }
