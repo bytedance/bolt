@@ -1,11 +1,11 @@
 # Cell shuffle
 
 The Cell shuffle is a columnar Spark shuffle writer and reader for hash,
-range, single and round-robin partitioning. It stages every value in a
-64-byte cache line of its (partition, stream), encodes each full line as one
-small integer block, and keeps a whole window of payloads resident in
-fixed-size cells until it is sealed or spilled. This page gives the overview and the reasoning behind the
-design. The wire format is defined, field by field, in
+range, single and round-robin partitioning. It uses a 64-byte staging line
+per (partition, stream), integer block encoding, and fixed-size cells for
+encoded and raw bytes. Payloads remain open across batches until sealed;
+their data cells can spill earlier. This page explains the design. The
+wire format is defined, field by field, in
 [CellFormat.h](CellFormat.h); this page does not repeat it.
 
 ## 1. What it is and when to use it
@@ -19,21 +19,10 @@ design. The wire format is defined, field by field, in
 | Nulls | validity buffers | one null body per payload: a 2-bit tag per column, plus run/bitmap null records for mixed columns only |
 | Payload | one per buffer eviction | one per partition per window, however many batches it spans |
 | Compression | per buffer | per run, in `COMBINED` or `SEPARATE` frames, skipping data that does not compress |
-| Memory accounting | buffer sizes | exact chunk counts, through one choke point (`reserveChunk`) |
+| Memory accounting | buffer sizes | exact chunk counts, checked before growth (`prepareChunkGrowth`) |
 
 The reader protocol is not compatible with the other writers: a Cell writer
 must be read by the Cell reader, and both sides must select it the same way.
-
-### Where it is not a good fit
-
-- **Ultra-narrow, highly repetitive rows.** The codec already shrinks such
-  data very well in any writer, so Cell's encoding gains little, while its
-  per-row split loop and per-payload framing still cost.
-- **Many streams at very high partition counts.** The staging arena is
-  `64 B x partitions x streams` (for example 30000 partitions and 100 streams
-  take about 192 MB), and the cell size shrinks with the same product. Wide
-  nested schemas multiply the streams; for them, turning
-  `nativeNestedTypes` off packs the complex columns into one column.
 
 ### How to enable it
 
@@ -60,10 +49,10 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `cellMemorySpillRatio` | `0` (off) | Spill threshold on the chunk memory plus the spill memory, as a share of the writer's memory limit: the tighter of its pool's cap and the task's execution memory, which the `CellShuffleWriter init` line shows with the threshold (`memorySpillThreshold`). From `0` to `2`, as a task may hold more than its share while fewer tasks run; `0`, or no limit, is off. Not a hard cap: past it a chunk growth spills (local) or requests a window push (Celeborn). |
+| `cellMemorySpillRatio` | `0` (off) | Memory-pressure threshold for cell chunks plus spill memory, as a share of the writer's memory limit; `0` disables it. See [Memory model](#4-memory-model). |
 | `spillMemoryBytes` | `-1` | Local only: the newest spill data - runs, sealed payloads, composite blocks - kept in memory, at most this many bytes (see [Spill memory](#spill-memory-local)). `-1` is no cap of its own: it grows until the first memory pressure; `0` is off. |
-| `reclaimRunFloorBytes` | `64 MiB` | Local only: the cell data a writer must hold before a reclaim of a given size writes a run; below it, the reclaim frees only idle chunks and the spill memory. In effect the smaller of this and an eighth of the memory limit, this with none (see [Reclaim policy](#reclaim-policy-local)). `0` is off; a negative value is an error. |
-| `cellSpillBytesPerStream` | `512 KiB` | Local only: the cell data the writer holds per stream of every partition before it spills without memory pressure: at a batch boundary, cell data past partitions x streams x this many bytes, and at least `cellSpillMinBytes`, spills the largest partitions down to half (see [Cell threshold](#cell-threshold-local)). A very large value turns it off; it must be positive. |
+| `reclaimRunFloorBytes` | `64 MiB` | Local only: minimum resident cell data for a sized reclaim to spill a run; `0` disables the floor. See [Reclaim policy](#reclaim-policy-local). |
+| `cellSpillBytesPerStream` | `512 KiB` | Local only: per-(partition, stream) cell-data budget for batch-boundary spills, subject to `cellSpillMinBytes`. See [Cell threshold](#cell-threshold-local). |
 | `cellSpillMinBytes` | `64 MiB` | Local only: the least threshold `cellSpillBytesPerStream` sets, so that a shuffle of a few partitions does not spill its cells in runs of a few MiB. A negative value is an error. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
 | `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
@@ -113,75 +102,78 @@ coverage. CRC collisions can hide corruption; this is not a cryptographic check.
 
 ## 2. Data flow
 
+### Input and staging
+
 ```text
- input RowVector (pid column first; single/round-robin: computed)
-   |
-   v
- CompositeShuffleWriter --- CompositeRowVector ---> held rows ----------+
-   | ordinary batch                                (CompositeRows      |
-   v                                                blocks)             |
- CellShuffleWriter  (slice big batches, reserveSlice on Celeborn,       |
-   |                 computePartitions, null classes, dictionary probe) |
-   |-- nested layout -----> CellNestedShredder (one split per space)    |
-   |-- complex, adapter --> CellShuffleTypeAdapter::pack                |
-   v                                                                    |
- CellSplitter  (64 B staging line per (partition, stream);              |
-   |            full line -> Encoding Block / raw bytes)                |
-   v                                                                    |
- DataCells (chains)  <- ChunkAllocator (4 MiB chunks of cells)          |
- NullCells (null state, own chunk allocator)                            |
-   |  run (local spill)      | seal (window or partition)               |
-   v                         v                                          |
- LocalCellOutput (local)                   RssCellOutput (Celeborn)     |
-   | RunCompressor -> spill file             | RunCompressor -> payload |
-   | finalize: merge per partition           | writeBlocks per seal     |
-   v                                         v                          |
- data file  <-- composite spill --  PartitionBlockOutput: LocalBlockOutput
-                                    / RssBlockOutput (push channel)  <--+
-   |
-   v  bytes: [kind][ColumnarPayload] ... [kind][CompositeRows] ...
- CellShuffleReader  (stream iterator, kind byte, codec)
-   |-- flat or adapter ---> CellPayloadDecoder -> adapter unpack
-   |-- nested layout -----> CellNestedAssembler (a CellPayloadDecoder
-   |                        per space) -> ARRAY / MAP / ROW vectors
-   |-- CompositeRows -----> CompositeRowVector
-   v
- RowVector batches of at most batchSize rows
+RowVector
+    |
+CompositeShuffleWriter
+    +-- CompositeRowVector --> held rows --> PartitionBlockOutput
+    |
+    +-- ordinary batch --> CellShuffleWriter
+                              |
+                    flat / nested / adapter
+                              |
+                         CellSplitter
+                          /        \
+                     DataCells    NullCells
+                         |
+                   ChunkAllocator
 ```
 
-Step by step:
+- `CompositeShuffleWriter` routes ordinary batches and buffers composite
+  aggregation states. Switching kinds flushes the previous one, so they do
+  not hold data together.
+- `CellShuffleWriter` partitions rows, chooses the layout, probes
+  dictionaries, classifies nulls, and controls spills and seals. Large
+  batches are sliced to 200 MiB locally or 8 MiB on Celeborn.
+- Native nested input passes through `CellNestedShredder`, one space at a
+  time. The adapter instead packs complex columns into one VARBINARY column.
+- `CellSplitter` stages values in 64-byte lines and appends encoded blocks
+  or raw bytes to `DataCells`. `NullCells` keeps the payload's null state.
 
-1. **CompositeShuffleWriter** (base class) partitions every batch by its pid
-   column - computed and put in front first under single or round-robin
-   partitioning - and buffers `CompositeRowVector` rows (aggregation state)
-   as `CompositeRows` blocks. Only one kind holds data at a time: a batch of the
-   other kind first writes the current one out.
-2. **CellShuffleWriter** builds the layout on the first batch, sizes the
-   cells, runs the one-time dictionary probe, classifies nulls per batch
-   (`NullClass`), and decides when to spill and seal. Batches above 200 MiB
-   locally, or 8 MiB on Celeborn, are sliced.
-3. **CellShuffleTypeAdapter** packs complex columns into one trailing
-   VARBINARY column when the schema does not take a nested layout;
-   **CellNestedShredder** splits a nested-layout batch, rows first, then each
-   container's elements, space by space.
-4. **CellSplitter** runs the per-type row loops: each value goes into the
-   staging line of its (partition, stream), and a full line is flushed as an
-   Encoding Block or as raw bytes into **DataCells** chains of
-   **ChunkAllocator** cells. **NullCells** keeps the null records.
-5. **LocalCellOutput** writes runs and sealed null bodies to a spill file -
-   whose newest bytes stay in spill memory until memory runs short - and,
-   in `finalize`, merges them partition by partition into the data file,
-   writing the window still in memory straight from the cells.
-   **RssCellOutput** pushes one complete payload per partition at each seal.
-   Both write every run and null body through **RunCompressor**. The
-   composite blocks go through a **PartitionBlockOutput**: locally a
-   `LocalBlockOutput` spill that the Cell merge folds into the same data file
-   (each partition's payloads, then its composite blocks); on Celeborn an
-   `RssBlockOutput`, the push channel both kinds share.
-6. **CellShuffleReader** reads each block's kind byte and decodes payloads
-   through **CellPayloadDecoder**, or **CellNestedAssembler** for a nested
-   layout; `CompositeRows` blocks come out as `CompositeRowVector`s, never
-   mixed with payload rows.
+### Output
+
+```text
+                     DataCells + NullCells
+                              |
+                          CellOutput
+                         /          \
+                LocalCellOutput    RssCellOutput
+                      |                  |
+                spill runs and      complete payloads
+                sealed nulls             |
+                      |             Celeborn pushes
+                partition merge
+                      |
+                  data file
+```
+
+Both backends use `RunCompressor`. Local finalization copies spilled runs
+and writes the remaining resident cells directly. RSS sends complete
+payloads at seals. Composite blocks use the same destination through
+`PartitionBlockOutput`: the local merge includes its spill; RSS shares its
+push channel.
+
+### Read
+
+```text
+partition bytes --> CellShuffleReader --> block kind
+                                            |
+                  +-------------------------+---------------------+
+                  |                         |                     |
+           flat / adapter                 nested             CompositeRows
+                  |                         |                     |
+          CellPayloadDecoder       CellNestedAssembler     CompositeRowVector
+                  |                 (decoder per space)
+                  +-------------+-----------+
+                                |
+                         RowVector batches
+```
+
+The adapter unpacks its binary column after decoding. Nested assembly
+reconstructs ARRAY, MAP and ROW vectors. Batches contain at most `batchSize`
+rows, and composite rows are never mixed with payload rows.
 
 ## 3. Core concepts
 
@@ -221,24 +213,13 @@ The partly filled tail cell of every chain is slack, so a cell sized from a
 budget far above the real one would waste much of the real memory. The
 `CellShuffleWriter init` log line shows the inputs and the result.
 
-### The choke points: `reserveChunk` and `reserveSlice`
+- `prepareChunkGrowth()` handles local growth pressure by flushing spill
+  memory, then spilling cells as needed. Celeborn requests a seal instead.
+- `prepareRemoteSlice()` reserves room for the next slice and its push;
+  reservation failure or memory pressure pushes the current window first
+  (`SealReason::kReserveFailed`).
 
-- **`reserveChunk`** is the allocator's callback, called only when the
-  freelist is empty and a new chunk is needed. Locally, if the chunk passes
-  the memory threshold (`cellMemorySpillRatio` of the memory limit) or
-  `maybeReserve` fails, it writes the spill memory
-  out and tries once more; only if that fails too does it spill the largest
-  partitions until half of the used cell bytes are covered, and the growth
-  then reuses their recycled cells. On Celeborn it only sets a seal request
-  and lets the growth proceed. While the output is reading cells, nothing
-  may spill, so growth there proceeds unreserved.
-- **`reserveSlice`** (Celeborn only) runs before each slice of a batch: it
-  reserves the slice's estimated bytes plus one chunk, plus twice the largest
-  partition's bytes for the push. If that fails, or passes the memory
-  threshold, the window is pushed first (`SealReason::kReserve`).
-
-`DataCells::append` takes every cell it needs before it copies a byte, so a
-spill fired from inside a growth sees only complete earlier appends.
+`DataCells::append` allocates all needed cells before copying, so growth-triggered spills see only complete prior appends.
 
 ### Local partial spills vs. Celeborn whole-window pushes
 
@@ -256,70 +237,42 @@ mid-seal is deferred to the next boundary.
 
 ### Cell threshold (local)
 
-The cells hold data not yet compressed; the spill memory holds compressed
-data, several times more rows per byte. So the writer bounds the cells
-without waiting for memory pressure: at a batch boundary, cell data past
-`cellSpillBytesPerStream` (512 KiB) for every stream of every partition,
-and at least `cellSpillMinBytes` (64 MiB), spills the largest partitions
-down to half of that, into the spill memory.
-The other partitions grow on until the next time, so the spills of a
-uniform shuffle spread over the partitions instead of coming together.
-A stream's frames carry about its share of the threshold, a wide stream's
-more: the narrow streams beside it leave it theirs. The floor keeps a
-shuffle of a few partitions, whose product is a few MiB, from spilling
-runs that small, each a frame per stream for the reader to decompress.
+Cells hold uncompressed data; spill memory holds compressed runs. At a
+batch boundary, the writer spills the largest partitions down to half once
+cell data exceeds both:
 
-When the threshold passes what memory allows, memory
-pressure comes first and the writer spills as it did before, at a reclaim
-or a chunk growth. The `CellShuffleWriter init` log line shows the
-threshold (`cellSpillThreshold`), and the pressure line counts its runs
-(`threshold runs`).
+- `partitions x streams x cellSpillBytesPerStream` (512 KiB per stream);
+- `cellSpillMinBytes` (64 MiB).
+
+Other partitions remain resident. The floor avoids many tiny runs when
+there are few streams or partitions. Memory pressure may trigger a spill
+first. The init log reports `cellSpillThreshold`; the pressure log reports
+`threshold runs`.
 
 ### Spill memory (local)
 
-What a local writer spills is copied into the data file by the merge
-anyway, so the newest of it waits in memory instead of on disk: the spill
-file keeps its newest bytes in blocks of the writer's pool, accounted to
-it, and the merge copies them from there. A skewed task whose hot
-partitions seal payload after payload then needs no disk write and read
-for the last of them. The blocks of the Cell output's spill file and of the
-composite blocks' share one cap, `spillMemoryBytes`: only one kind holds
-data at a time, so the kind being written reuses the blocks the other
-holds. By default (`-1`) there is no cap of its own: the spill memory grows
-until the first memory pressure, and a reclaim finds it as the writer's
-memory, which competes with the task's other operators by size, as V1's
-payload cache does. A block is 4 MiB, smaller only under a cap below
-16 MiB, so that four fit. The `CellShuffleWriter init` log line shows the
-cap: `spillMemory=<cap>`, or `spillMemory=no cap`.
+The newest spill bytes stay in blocks of the writer's pool until memory
+runs short. Finalization copies them directly into the data file, avoiding
+a disk round trip. Cell runs, sealed null bodies and composite blocks
+share the `spillMemoryBytes` cap:
 
-A file keeps its blocks oldest first, and its bytes in memory are always
-its last: a block written out continues the file on disk. A file whose
-last block is full takes a new one while the spill memory still grows and
-stays within the cap. Otherwise it reuses the oldest block of the file
-holding the most, its own included, written out first, so the spill memory
-keeps the newest bytes at a constant size; with no block anywhere, it
-appends to disk.
+- `-1`: grow until the first memory pressure;
+- `0`: write directly to disk;
+- positive: bound the retained bytes.
 
-The spill memory grows until the first memory pressure, and only reuses its
-blocks from then on. Every pressure event writes the oldest blocks out
-first, as much as it needs, and then does what it would have done:
+Blocks are normally 4 MiB; a cap below 16 MiB uses smaller blocks so four
+fit. A file's in-memory bytes are always its trailing bytes. Reusing a
+block first writes the file's oldest block to disk. After the first
+pressure event, spill memory reuses its blocks rather than growing.
 
-- a reclaim writes out as much as the idle chunks left of its request,
-  every block for a reclaim of everything;
-- a chunk reservation that fails or passes the memory threshold writes
-  out 8 MiB, a reservation's step, and tries once more before it spills;
-- composite rows short of room for the next batch write out what the batch
-  takes, and a reclaim while composite rows are held writes out what the
-  held rows leave of its request;
-- a block the pool cannot reserve ends the growth too.
+Reclaims release enough oldest blocks to cover the request; failed chunk
+reservations release 8 MiB before retrying. Composite growth and failed
+spill-block reservations also end growth. Flushing completed blocks is
+safe while output is writing; a file asks for another only after filling
+its last block. Reclaim is disabled during the final merge.
 
-A block's reservation may reclaim the writer, and a reclaim writes blocks
-out even while the output is writing: a file asks for a block only once its
-last one is full, so what is written out is whole. Nothing is written out
-during the merge, where the writer cannot be reclaimed. `totalBytesEvicted`
-counts the bytes that reached the disk; the `CellShuffleWriter pressure`
-log line ends with the spill memory's peak, the bytes and blocks it wrote
-out, and the bytes appended to disk directly.
+`totalBytesEvicted` counts bytes written to disk. The pressure log reports
+spill-memory peak, flushed bytes and blocks, and direct disk appends.
 
 ### Reclaim policy (local)
 
@@ -349,30 +302,29 @@ moved null cells exceed a quarter of `nullMemLimitBytes`. On Celeborn, a
 reclaim pushes the whole window instead of steps 2 to 7. All of this is
 counted in the `CellShuffleWriter pressure` log line.
 
-**The run floor.** A run must carry real data. Memory arbitration may
-reclaim a squeezed writer a little at a time, after every batch; a run each
-time would write a few hundred bytes per partition, and the next batch
-would re-grow the tail cell of every chain the run emptied, so the writer's
-memory would go to nearly empty tail cells rather than data. A reclaim of a
-given size therefore writes no run while the cells hold less data than the
-run floor: `reclaimRunFloorBytes` (64 MiB by default), at most an eighth of
-the memory limit the cell size is taken from. It returns what steps 1 and 2
-freed, perhaps less than it asked, and the arbitrator turns to other
-operators for the rest. A reclaim that asks for everything (a size of 0 or
-less) and a chunk growth short of memory still write whatever the cells
-hold; `reclaimRunFloorBytes = 0` turns the floor off. The
-`CellShuffleWriter init` log line shows the floor in effect
-(`reclaimRunFloor`), and the pressure line counts the reclaims it turned
-away (`below floor`).
+**The run floor.** Reclaiming a small amount after every batch can create
+many tiny runs and repeatedly allocate mostly empty tail cells. A sized
+reclaim therefore stops after freeing idle chunks and spill memory while
+cell data is below `reclaimRunFloorBytes` (64 MiB by default, capped at an
+eighth of the memory limit). Reclaims of everything and chunk-growth
+pressure bypass this floor; `0` disables it. The init log reports
+`reclaimRunFloor`, and the pressure log counts `below floor` reclaims.
 
 ### Why null cells are not freed by spills
 
-A payload's null body precedes its runs and covers all of its rows, so it
-can only be written when the payload closes. Spills write data streams only.
-The null state therefore stays resident for the life of the window, in a
-separate chunk allocator owned by `NullCells`. It is bounded by
-`nullMemLimitBytes` (a `kNulls` window seal) instead. Columns that are all
-null or have no nulls in the window store nothing.
+The null body describes the complete payload and precedes its runs, so it
+is written only when the payload closes. A run spill writes data streams
+and keeps the null state for subsequent batches.
+
+**Uniform nullness is cheap.** A column that stays all-null or all-non-null
+keeps only a small classification state in memory and a 2-bit tag per
+payload. It needs no per-partition null cells, bitmap or null records.
+All-null columns also append no value bytes. Only mixed columns allocate
+null cells; long runs are encoded compactly.
+
+Mixed-column null storage has its own allocator. `nullMemLimitBytes`
+triggers a window seal to release moved null cells, independently of data
+spills.
 
 ### Compression workspaces
 
@@ -386,74 +338,58 @@ gives the workspaces back. Stream compression needs only fixed buffers
 
 ### Encoding Blocks
 
-Encoded streams are SmallInt, Integer, Date and Bigint values (short
-decimals map to Bigint), Timestamp seconds and nanos, and string lengths.
-Each block starts with an `EncodingByte`: the kind in the low 2 bits, a
-parameter in the high 6.
+Integer streams encode one staging line at a time: up to 32 SmallInts,
+16 Integers or 8 Bigints. Date, short decimal, Timestamp components and
+string lengths use these same encoders.
 
-| Kind | Body |
+| Kind | Core idea |
 | --- | --- |
-| `kConstNarrow` | every value equal: the value in 1 to width bytes, sign-extended |
-| `kBitPack` | values in 1 to 63 bits each, sign-extended |
-| `kForBitPack` | a base, then `value - base` in 0 to 63 bits |
-| `kPlain` | the values as they are |
+| `kConstNarrow` | Store one signed value for a constant block. |
+| `kBitPack` | Store each value at a reduced signed width. |
+| `kForBitPack` | Store a base, then unsigned differences from it. |
+| `kPlain` | Copy values at their original width. |
 
-The encoder chooses from the block's minimum and maximum alone, so the
-bytes are deterministic. Equal values take `kConstNarrow` when that saves
-bytes. A block of values within `kExactPackMaxBits` (16) bits takes the
-smallest body, ties resolving `kPlain`, `kBitPack`, `kForBitPack` in that
-order. A wider block packs at whole bytes, and so do residuals past 16
-bits: a value that recurs in a partition, such as a hash-partitioned key,
-then recurs as the same bytes, which the codec matches as it does in V1's
-raw values, where at an exact width of, say, 50 bits its bytes would differ
-with its position in the block. Such a block takes `kForBitPack` only
-below three quarters of the alternative's size, a tie going to the
-alternative, as a base per block scatters a value's bytes too. The
-alternative is `kBitPack` when smaller than the values and, for 8-byte
-values, narrower than `kBigintPlainMinBits` (48) bits, else `kPlain`: ZSTD
-at level 1 with the input size unknown, as the stream compressor runs it,
-matches 7 bytes or more, so a 6- or 7-byte field matches neither on its own
-nor the same value stored whole in another block, while whole 8-byte values
-match as V1's do. A block is at most `kMaxBlockBytes` (73). Boolean,
-TinyInt, Hugeint, Real and Double are raw streams: a full line is copied as
-it is. String bytes go to the data stream, staged through the line; values
-of 64 bytes or more bypass it.
+- Test constant blocks first; use the compact form when it saves bytes.
+- Choose the remaining forms from the block's minimum and maximum.
+  Small widths pack exactly; wider widths round to bytes so repeated
+  values remain useful to the outer codec.
+- Wide Bigints favor Plain unless FOR saves enough. This preserves
+  repeated-byte matches in the outer codec.
+- `kMaxBlockBytes` (73) is conservative writable buffer capacity, including
+  the packer's final whole-word store; it is not the emitted block length.
+- Boolean, TinyInt, Hugeint, Real and Double use raw streams. String data
+  uses raw bytes, with full lines and long values copied in bulk.
+
+See `CellEncoding.h` for selection thresholds and `CellFormat.h` for the
+wire layout.
 
 ### String dictionaries
 
-The first batch decides, per string column and for the writer's lifetime,
-whether to use dictionary form; in a nested layout only the string columns
-at the rows' positions are probed. A column qualifies when every distinct
-value is at most 63 bytes, they serialize into at most 63 bytes together,
-and the non-null rows are at least four times the distinct values. The
-decision is final because cell bytes are already in wire form. With
-`enableStringDictionary` off, or a first batch below `stringDictionaryProbeRowCount` rows
-(64 by default), no column uses it. Setting `stringDictionaryProbeRowCount` to `0` skips
-all first-batch checks and enables every eligible string column, including
-all-null columns; the nested row-position restriction and runtime fallback
-below still apply. A table scan sizes its
-batches by the estimated bytes of the rows it reads, so a scan of a wide
-table can feed a narrow shuffle batches of a few hundred rows. The probe
-logs one line per writer, `CellShuffleWriter dictionary probe`: the columns
-it turned on and off, or, `skipped`, why it decided none.
-
-In dictionary form each partition keeps an open segment of up to 16 entries
-staged in its data-stream line. Matched rows write one index byte. When a
-segment is full, it closes; a successor opens only if the segment matched at
-least `kDictSegmentContinueFactor` (4) rows per entry. Otherwise the
-partition demotes to fallback rows for the rest of its payload. Each payload
-starts afresh. The `dictionaryMatchedRows` and `dictionaryFallbackRows`
-metrics report the totals.
+- **Selection:** the first batch chooses a column's wire form for the
+  writer's lifetime. In a nested layout, only strings at the rows'
+  positions are eligible. The probe requires distinct values to fit a
+  63-byte serialized dictionary and at least four non-null rows per
+  distinct value.
+- **Controls:** `enableStringDictionary=false` disables dictionaries.
+  `stringDictionaryProbeRowCount` defaults to 64; smaller first batches
+  skip the probe. Setting it to `0` enables every eligible string column,
+  including all-null columns, while retaining runtime fallback.
+- **Writing:** each partition's open segment holds up to 16 entries in its
+  data staging line. A matched row writes one index byte.
+- **Fallback:** when a segment closes, a successor opens only if it matched
+  at least four rows per entry. Otherwise that partition uses fallback
+  rows for the rest of its payload. Every new payload starts afresh.
+- **Observability:** the probe log records selected or skipped columns;
+  `dictionaryMatchedRows` and `dictionaryFallbackRows` count written rows.
 
 ### Null records
 
-Each batch's nulls are classified per column first (`kNoNulls`,
-`kSomeNulls`, `kAllNull`) with a word-level scan, because `mayHaveNulls()`
-only says that a buffer exists. A column stays free while every row of the
-window is null, or none is. Only a mixed column stores 32-byte cells (a
-4-byte head plus one 28-byte null record) per partition. At a seal they
-become the null body, compressed when it is at least `kMinCompressBytes` and
-compresses to half its size or less.
+- Classify each batch as `kNoNulls`, `kSomeNulls` or `kAllNull` with a
+  word-level scan; `mayHaveNulls()` alone only reports a null buffer.
+- Uniform columns need no null records. Mixed columns use 32-byte cells:
+  a 4-byte head and a 28-byte run/bitmap record per partition.
+- At seal, records form the null body. Bodies of at least
+  `kMinCompressBytes` are compressed when they shrink to half or less.
 
 ### RunCompressor
 
@@ -463,16 +399,15 @@ compresses to half its size or less.
 | below `kMinSeparateRunBytes` (64 KiB) | one `kCombined` frame, judged on its whole size |
 | 64 KiB or more | `kSeparate`: one frame per stream, so each stream sets its own ratio |
 
-A frame is stored instead of compressed when it is below 256 B or does not
-shrink (compressed size plus 1/32 is not below the input). With the stream
-form, a `kSeparate` frame is judged after its first 256 KiB of input, before
-anything reaches the sink, so nothing written is taken back. With `adaptiveCompression`, a frame
-that did not shrink makes the next nine frames of its kind (the same stream
-for `kSeparate`, all `kCombined` frames, or null bodies) stored without a
-codec call, and the tenth is tried again. This keeps random keys, hashes and
-packed doubles from paying for compression they do not get. Totals are in
-the `CellShuffleWriter compression` log line; per-stream detail is at
-`VLOG(1)`.
+- Store frames below 256 B or without enough compression gain (compressed
+  size plus 1/32 must be below input size).
+- Stream compression judges a Separate frame after its first 256 KiB,
+  before emitting bytes, so it never needs to retract output.
+- Adaptive compression skips nine attempts after a frame does not shrink,
+  then retries. History is tracked per stream, combined frames, or null
+  bodies as applicable.
+- The `CellShuffleWriter compression` log reports totals; `VLOG(1)` adds
+  per-stream detail.
 
 ## 6. Nested types
 
@@ -522,15 +457,11 @@ Writer and reader decide alike from the same logical type, which is why
 
 ## 7. Limits and failure modes
 
-- **Single and round-robin partitioning:** their batches carry no pid
-  column. `CompositeShuffleWriter::split` computes one per ordinary batch
-  with the partitioner V1 uses - every row to partition 0, or round-robin
-  from `startPartitionId`, its position carried across batches, so each
-  row lands where V1 puts it - and puts it in front, sharing the batch's
-  children; the rest of the writer, and the reader, are the hash path's.
-  This costs one INTEGER column per batch. Composite rows are refused
-  there (`composite rows only under hash or range partitioning`), as V1
-  refuses them.
+- **Partitioning:** hash and range batches carry a pid column. Single and
+  round-robin batches keep their original schema, with no synthetic pid
+  column. The writer uses the shared partitioner: Single sends every row to
+  partition 0; round-robin continues from `startPartitionId` across batches.
+  Composite rows require hash or range partitioning.
 - **Supported types:** BOOLEAN, TINYINT, SMALLINT, INTEGER (and DATE),
   BIGINT (and short DECIMAL), HUGEINT (long DECIMAL), REAL, DOUBLE, VARCHAR,
   VARBINARY, TIMESTAMP and UNKNOWN (which has no wire column), plus ARRAY,
@@ -539,7 +470,7 @@ Writer and reader decide alike from the same logical type, which is why
 - **65535 columns:** a layout holds at most 65535 columns (`too many Cell
   columns`). A nested schema above it falls back to the adapter.
 - **`kMaxPayloadRows`** (2^31 - 1): a window is sealed before a partition
-  would pass it (`SealReason::kRows`).
+  would pass it (`SealReason::kPositionLimit`).
 - **`kMaxPositions`** (2^31 - 8): the most positions one space holds in a
   payload. A window is sealed before a batch's positions would pass it.
 - **Runs per payload:** a reader accepts at most
