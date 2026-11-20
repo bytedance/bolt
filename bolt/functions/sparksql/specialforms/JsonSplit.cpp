@@ -17,6 +17,7 @@
 #include "bolt/functions/sparksql/specialforms/JsonSplit.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/expression/PeeledEncoding.h"
 #include "bolt/expression/SpecialForm.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
@@ -257,6 +258,9 @@ parseElement(VectorPtr& vector, size_t index, simdjson::ondemand::value value) {
   try {
     value.get(jsonValue);
   } catch (simdjson::simdjson_error& error) {
+    if (error.error() == simdjson::MEMALLOC) {
+      BOLT_MEM_ALLOC_ERROR(error.what());
+    }
   }
   flatVector->set(index, jsonValue);
 }
@@ -605,7 +609,10 @@ void jsonToArray_SimdJson(
             row, doc.type() == simdjson::ondemand::json_type::null);
         arrayVector->setOffsetAndSize(row, lastOffset, offset - lastOffset);
         lastOffset = offset;
-      } catch (const simdjson::simdjson_error&) {
+      } catch (const simdjson::simdjson_error& e) {
+        if (e.error() == simdjson::MEMALLOC) {
+          BOLT_MEM_ALLOC_ERROR(e.what());
+        }
         arrayVector->setOffsetAndSize(row, lastOffset, 0);
         result->setNull(row, true);
         offset = lastOffset;
