@@ -286,8 +286,9 @@ class PartialSpiller {
   /// only - and removes them afterwards, freeing their memory. Fills
   /// partitionLengths, totalBytesWritten, totalBytesEvicted - the bytes that
   /// reached disk - and the write and evict times, and totalSpillFiles with
-  /// the spill runs: every run goes into the one spill file, so the run is
-  /// what the local partition writer's file per spill corresponds to.
+  /// the spill runs that put bytes on disk: every run goes into the one spill
+  /// file, so a run whose bytes reached disk is what the local partition
+  /// writer's file per spill corresponds to.
   static void mergeToDataFile(
       const PartitionWriterOptions& options,
       std::initializer_list<PartialSpiller*> spillers,
@@ -313,16 +314,18 @@ class PartialSpiller {
   /// only, for partition 0, 1, ..., with the spill file frozen.
   virtual void writePartitionShare(uint32_t pid, DataFileWriter& out) = 0;
 
-  /// Counts one spill run if `begin`, the spill end before it, has moved.
+  /// Records one spill run if `begin`, the spill end before it, has moved.
   void countSpill(uint64_t begin) {
-    numSpills_ += spill_.end() > begin ? 1 : 0;
+    if (spill_.end() > begin) {
+      spillStarts_.push_back(begin);
+    }
   }
 
   ShuffleSpillFile spill_;
 
  private:
-  /// Spills that wrote bytes: totalSpillFiles.
-  int64_t numSpills_{0};
+  /// Start offsets of non-empty spill runs in `spill_`, ascending.
+  std::vector<uint64_t> spillStarts_;
 };
 
 /// Produces the next opaque block of partition `pid` into `block`; false

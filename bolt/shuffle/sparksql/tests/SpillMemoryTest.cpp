@@ -265,5 +265,86 @@ TEST_F(SpillMemoryTest, nothingIsReleasedDuringTheMerge) {
   BOLT_ASSERT_THROW(memory.release(1), "released during the merge");
 }
 
+TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
+  // totalSpillFiles counts only runs whose bytes actually reached disk: runs
+  // that stay wholly in SpillMemory are not counted, a run starting right at
+  // the disk/memory boundary is not counted, a run straddling it is, and empty
+  // runs are never counted.
+  const auto writeRun = [&](LocalBlockOutput& output, size_t bytes) {
+    bool emitted = false;
+    output.writeBlocks([&](uint32_t pid, BufferPtr& block) {
+      if (pid != 0 || emitted || bytes == 0) {
+        return false;
+      }
+      emitted = true;
+      block = AlignedBuffer::allocate<char>(bytes, pool_.get(), 'a');
+      return true;
+    });
+  };
+  const auto makeOptions = [&]() {
+    auto opts = options();
+    opts.numPartitions = 2;
+    return opts;
+  };
+
+  // All runs stay in memory.
+  {
+    SpillMemory memory(pool_.get(), kCap);
+    LocalBlockOutput output(makeOptions(), &memory);
+    writeRun(output, kBlock / 2);
+    writeRun(output, 0);
+    writeRun(output, kBlock / 2);
+    ShuffleWriterMetrics metrics;
+    output.finish(metrics);
+    EXPECT_EQ(metrics.totalBytesEvicted, 0);
+    EXPECT_EQ(metrics.totalSpillFiles, 0);
+  }
+
+  // Exact boundary: run 0 is [0, kBlock), run 1 starts at kBlock (in memory).
+  {
+    SpillMemory memory(pool_.get(), kCap);
+    LocalBlockOutput output(makeOptions(), &memory);
+    writeRun(output, kBlock);
+    writeRun(output, 0);
+    writeRun(output, kBlock);
+    writeRun(output, kBlock / 2);
+    ASSERT_EQ(memory.release(1), kBlock);
+    ShuffleWriterMetrics metrics;
+    output.finish(metrics);
+    EXPECT_EQ(metrics.totalBytesEvicted, kBlock);
+    EXPECT_EQ(metrics.totalSpillFiles, 1);
+  }
+
+  // Straddling boundary: run 0 is [0, kBlock/2), run 1 is [kBlock/2, 3*kBlock/2)
+  // so half of run 1 reaches disk; run 2 starts at 3*kBlock/2 (in memory).
+  {
+    SpillMemory memory(pool_.get(), kCap);
+    LocalBlockOutput output(makeOptions(), &memory);
+    writeRun(output, kBlock / 2);
+    writeRun(output, kBlock);
+    writeRun(output, kBlock);
+    ASSERT_EQ(memory.release(1), kBlock);
+    ShuffleWriterMetrics metrics;
+    output.finish(metrics);
+    EXPECT_EQ(metrics.totalBytesEvicted, kBlock);
+    EXPECT_EQ(metrics.totalSpillFiles, 2);
+  }
+
+  // All runs flushed to disk.
+  {
+    SpillMemory memory(pool_.get(), kCap);
+    LocalBlockOutput output(makeOptions(), &memory);
+    writeRun(output, kBlock / 2);
+    writeRun(output, 0);
+    writeRun(output, kBlock);
+    writeRun(output, kBlock / 2);
+    ASSERT_GT(memory.releaseAll(), 0);
+    ShuffleWriterMetrics metrics;
+    output.finish(metrics);
+    EXPECT_EQ(metrics.totalBytesEvicted, 2 * kBlock);
+    EXPECT_EQ(metrics.totalSpillFiles, 3);
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql
