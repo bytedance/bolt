@@ -111,3 +111,11 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
 )
+
+add_executable(bolt_sparksql_benchmarks_json JsonBenchmark.cpp)
+target_link_libraries(
+  bolt_sparksql_benchmarks_json
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
+)

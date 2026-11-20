@@ -46,7 +46,10 @@ struct JsonObjectKeysFunction {
       const arg_type<Varchar>& json) {
     simdjson::ondemand::document jsonDoc;
 
-    simdjson::padded_string paddedJson(json.data(), json.size());
+    paddedInput_.assign(json.data(), json.size());
+    paddedInput_.append(simdjson::SIMDJSON_PADDING, '\0');
+    simdjson::padded_string_view paddedJson(
+        paddedInput_.data(), json.size(), paddedInput_.size());
     // The result is NULL if the given string is not a valid JSON string.
     if (simdjsonParse(paddedJson).get(jsonDoc)) {
       return false;
@@ -68,6 +71,9 @@ struct JsonObjectKeysFunction {
     }
     return true;
   }
+
+ private:
+  std::string paddedInput_;
 };
 
 } // namespace bytedance::bolt::functions::sparksql
