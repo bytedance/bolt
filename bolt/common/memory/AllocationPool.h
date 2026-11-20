@@ -69,6 +69,10 @@ class AllocationPool {
   /// distance from start to first byte after last allocation.
   folly::Range<char*> rangeAt(int32_t index) const;
 
+  /// Releases a range that is no longer needed. Its index stays stable and
+  /// rangeAt() returns an empty range after release.
+  uint64_t releaseRange(int32_t index);
+
   int64_t currentOffset() const {
     return currentOffset_;
   }

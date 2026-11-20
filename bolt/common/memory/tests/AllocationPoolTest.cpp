@@ -121,3 +121,83 @@ TEST_F(AllocationPoolTest, hugePages) {
   // Should be empty after destruction.
   EXPECT_EQ(0, pool_->currentBytes());
 }
+
+TEST_F(AllocationPoolTest, releaseRange) {
+  auto allocationPool = std::make_unique<memory::AllocationPool>(pool_.get());
+  allocationPool->setHugePageThreshold(1 << 20);
+
+  allocationPool->allocateFixed(64 << 10);
+  allocationPool->allocateFixed(1);
+  ASSERT_EQ(2, allocationPool->numRanges());
+
+  const auto bytesBeforeRelease = pool_->currentBytes();
+  auto released = allocationPool->releaseRange(0);
+  EXPECT_GT(released, 0);
+  EXPECT_TRUE(allocationPool->rangeAt(0).empty());
+  EXPECT_LT(pool_->currentBytes(), bytesBeforeRelease);
+
+  released = allocationPool->releaseRange(0);
+  EXPECT_EQ(0, released);
+
+  released = allocationPool->releaseRange(allocationPool->numRanges() - 1);
+  EXPECT_GT(released, 0);
+  EXPECT_EQ(0, pool_->currentBytes());
+
+  allocationPool->clear();
+  EXPECT_EQ(0, pool_->currentBytes());
+}
+
+TEST_F(AllocationPoolTest, releaseMixedRangesAndReuse) {
+  for (const bool useMmap : {false, true}) {
+    SCOPED_TRACE(useMmap);
+    memory::MemoryManager::Options options;
+    options.allocatorCapacity = 1L << 30;
+    options.useMmapAllocator = useMmap;
+    auto manager = std::make_shared<memory::MemoryManager>(options);
+    auto root = manager->addRootPool("rangeRelease");
+    auto pool = root->addLeafChild("leaf");
+    memory::AllocationPool allocations(pool.get());
+    allocations.setHugePageThreshold(64 << 10);
+
+    allocations.allocateFixed(64 << 10);
+    auto* retained = allocations.allocateFixed(64 << 10, 16);
+    *retained = 42;
+    const auto bytesBefore = pool->currentBytes();
+    EXPECT_EQ(bytesBefore, allocations.allocatedBytes());
+
+    EXPECT_EQ(64 << 10, allocations.releaseRange(0));
+    EXPECT_TRUE(allocations.rangeAt(0).empty());
+    EXPECT_EQ(42, *retained);
+    EXPECT_EQ(bytesBefore - (64 << 10), pool->currentBytes());
+    EXPECT_EQ(pool->currentBytes(), allocations.allocatedBytes());
+    EXPECT_EQ(0, allocations.releaseRange(0));
+    EXPECT_EQ(0, allocations.releaseRange(0));
+
+    allocations.allocateFixed(allocations.testingFreeAddressableBytes());
+    retained = allocations.allocateFixed(8, 16);
+    *retained = 43;
+    ASSERT_EQ(3, allocations.numRanges());
+    EXPECT_GT(allocations.releaseRange(1), 0);
+    EXPECT_EQ(43, *retained);
+    EXPECT_EQ(pool->currentBytes(), allocations.allocatedBytes());
+
+    EXPECT_GT(allocations.releaseRange(2), 0);
+    EXPECT_EQ(0, pool->currentBytes());
+    EXPECT_EQ(0, allocations.freeBytes());
+    EXPECT_EQ(0, allocations.allocatedBytes());
+    EXPECT_EQ(0, allocations.releaseRange(2));
+    EXPECT_TRUE(allocations.rangeAt(2).empty());
+
+    retained = allocations.allocateFixed(8, 16);
+    *retained = 44;
+    ASSERT_EQ(4, allocations.numRanges());
+    EXPECT_EQ(retained, allocations.rangeAt(3).data());
+    EXPECT_EQ(44, *retained);
+    EXPECT_GT(allocations.releaseRange(3), 0);
+    EXPECT_EQ(0, pool->currentBytes());
+    allocations.clear();
+    EXPECT_EQ(0, allocations.numRanges());
+    allocations.allocateFixed(8);
+    EXPECT_EQ(1, allocations.numRanges());
+  }
+}
