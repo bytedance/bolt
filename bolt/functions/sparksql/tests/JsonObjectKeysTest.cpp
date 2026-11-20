@@ -57,5 +57,24 @@ TEST_F(JsonObjectKeysTest, basic) {
   assertEqualVectors(jsonObjectKeys(R"("")"), expected);
 }
 
+TEST_F(JsonObjectKeysTest, multipleRows) {
+  auto input = makeFlatVector<std::string>({
+      R"({"name": "Alice", "address": {"city": "Paris"}, "id": "001"})",
+      R"({"k": 1})",
+      R"({"k": "unterminated)",
+      R"(1)",
+      R"({"x": [1, 2], "y": null})",
+  });
+  auto expected = makeArrayVectorFromJson<std::string>({
+      R"(["name", "address", "id"])",
+      R"(["k"])",
+      "null",
+      "null",
+      R"(["x", "y"])",
+  });
+  assertEqualVectors(
+      expected, evaluate("json_object_keys(c0)", makeRowVector({input})));
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

@@ -57,6 +57,25 @@ TEST_F(VariantFunctionTest, basic) {
   EXPECT_EQ(extracted.value(), "1");
 }
 
+TEST_F(VariantFunctionTest, multipleRows) {
+  auto input = makeRowVector({makeNullableFlatVector<std::string>({
+      R"({"a":"a string that is longer than the next rows","b":[1,2,3]})",
+      R"({"a":2})",
+      R"({"a":"unterminated)",
+      std::nullopt,
+      R"({"a":true})",
+  })});
+  auto expected = makeNullableFlatVector<std::string>({
+      "a string that is longer than the next rows",
+      "2",
+      std::nullopt,
+      std::nullopt,
+      "true",
+  });
+  assertEqualVectors(
+      expected, evaluate("variant_get(parse_json(c0), '$.a')", input));
+}
+
 TEST_F(VariantFunctionTest, nested) {
   // Test nested object
   auto extracted = evaluateOnce<std::string>(

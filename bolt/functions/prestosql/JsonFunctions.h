@@ -116,9 +116,9 @@ struct JsonExtractScalarFunctionWithDetected {
       out_type<Varchar>& result,
       const arg_type<Json>& json,
       const arg_type<Varchar>& jsonPath) {
-    simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    simdjson::error_code error = parser.parse(json).get(doc);
+    simdjson::error_code error =
+        parser_.parse(json.data(), json.size()).get(doc);
 
     if (error && !simd_check_scalar(json)) {
       return false;
@@ -135,6 +135,9 @@ struct JsonExtractScalarFunctionWithDetected {
       }
     }
   }
+
+ private:
+  simdjson::dom::parser parser_;
 };
 
 template <typename T>
