@@ -33,6 +33,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -5206,12 +5207,24 @@ TEST_F(
       makeBuffer<vector_size_t>({1}),
       makeVector<int32_t>(INTEGER(), {7}),
       makeVector<int64_t>(BIGINT(), {9}));
-  expectRejected(
-      makeRows({"map"}, {map}),
-      {1},
-      7,
-      static_cast<char>(0),
-      "Radix sort encoded map key and value counts differ");
+  if (kSparkCompatible) {
+    // One validity marker precedes Spark's big-endian uint32 cardinality.
+    // Claim two entries in a payload containing one: decoding must reject the
+    // truncated second entry before allocating result children.
+    expectRejected(
+        makeRows({"map"}, {map}),
+        {1},
+        sizeof(uint8_t) + sizeof(uint32_t) - 1,
+        static_cast<char>(2),
+        "Radix sort key input is truncated");
+  } else {
+    expectRejected(
+        makeRows({"map"}, {map}),
+        {1},
+        7,
+        static_cast<char>(0),
+        "Radix sort encoded map key and value counts differ");
+  }
 }
 
 TEST_F(
