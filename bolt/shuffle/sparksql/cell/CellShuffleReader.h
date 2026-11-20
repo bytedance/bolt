@@ -20,6 +20,7 @@
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
+#include "bolt/shuffle/sparksql/common/ShuffleBlockReader.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -41,7 +42,7 @@ class CellNestedAssembler;
 /// Every block opens with a kind byte; CompositeRows blocks come out as
 /// CompositeRowVectors of at most batchSize rows, never concatenated with
 /// payload rows.
-class CellShuffleReader {
+class CellShuffleReader final : public BlockShuffleReader {
  public:
   CellShuffleReader(
       std::shared_ptr<ReaderStreamIterator> streams,
@@ -54,22 +55,22 @@ class CellShuffleReader {
       // The writer's CellShuffleOptions::nativeNestedTypes.
       bool nativeNestedTypes = true);
 
-  ~CellShuffleReader();
+  ~CellShuffleReader() override;
 
   /// Next output batch; nullptr when every stream is exhausted.
-  RowVectorPtr next();
+  RowVectorPtr next() override;
 
   /// Total decode time: reading the input, payload parsing,
   /// decompression, vector building and complex-column restoration
   /// together.
-  uint64_t decodeTimeNs() const {
+  uint64_t decodeTimeNs() const override {
     return decodeTimeNs_;
   }
 
   /// The decompression share of decodeTimeNs(), metered at the codec
   /// seam so the reader node can report decompress and deserialize as
   /// disjoint metrics, matching the legacy reader's accounting.
-  uint64_t decompressTimeNs() const {
+  uint64_t decompressTimeNs() const override {
     return decompressor_ == nullptr ? 0 : decompressor_->decompressTimeNs();
   }
 
@@ -79,71 +80,38 @@ class CellShuffleReader {
   /// building vectors from it. In a Spark task the reads are calls into
   /// the shuffle fetch's Java streams; the legacy reader leaves all of
   /// this out of its deserialize time too.
-  uint64_t readTimeNs() const {
-    return readTimeNs_;
+  uint64_t readTimeNs() const override {
+    return cursor_.readTimeNs();
   }
 
   /// Rows next() returned so far.
-  uint64_t rowsRead() const {
+  uint64_t rowsRead() const override {
     return rowsRead_;
   }
 
   /// Payloads read so far, CompositeRows blocks aside.
-  uint64_t payloadsRead() const {
+  uint64_t payloadsRead() const override {
     return payloadsRead_;
   }
 
   /// Streams opened so far.
-  uint64_t streamsRead() const {
-    return streamsOpened_;
+  uint64_t streamsRead() const override {
+    return cursor_.streamsOpened();
+  }
+
+  std::string_view readerName() const override {
+    return "CellShuffleReader";
   }
 
  private:
-  /// CellByteSource over an arrow input stream, with one byte of lookahead
-  /// so a clean end between payloads is distinguishable from truncation.
-  class StreamSource final : public CellByteSource {
-   public:
-    explicit StreamSource(std::shared_ptr<arrow::io::InputStream> in)
-        : in_(std::move(in)) {}
-
-    bool read(void* out, size_t n) override;
-    bool atEnd() override;
-
-   private:
-    std::shared_ptr<arrow::io::InputStream> in_;
-    bool peeked_{false};
-    bool ended_{false};
-    uint8_t peekByte_{0};
-  };
-
-  class CodecDecompressor final : public CellDecompressor {
-   public:
-    explicit CodecDecompressor(Codec* codec) : codec_(codec) {}
-
-    bool decompress(std::span<const uint8_t> in, std::span<uint8_t> out)
-        override;
-
-    uint64_t decompressTimeNs() const {
-      return decompressTimeNs_;
-    }
-
-   private:
-    Codec* const codec_;
-    uint64_t decompressTimeNs_{0};
-  };
-
   enum class NextBlock { kPayload, kCompositeRows, kEnd };
 
   /// Opens the next block across streams: a payload in the decoder, or a
-  /// CompositeRows block into compositeRows_.
+  /// CompositeRows block into compositeBlock_.
   NextBlock nextBlock();
 
-  /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
-  /// consumed. Throws on malformed input.
-  void readCompositeBlock();
-
   bool hasCompositeRows() const {
-    return nextCompositeRow_ < compositeRows_.size();
+    return nextCompositeRow_ < compositeBlock_.rows.size();
   }
 
   /// The next up to batchSize rows of the last CompositeRows block, rebuilt
@@ -154,11 +122,11 @@ class CellShuffleReader {
   /// nullptr at the end.
   RowVectorPtr nextPhysical();
 
-  std::shared_ptr<ReaderStreamIterator> streams_;
   /// Built first: its schema check covers nestedAssembler_ too.
   const CellShuffleTypeAdapter adapter_;
   std::unique_ptr<CodecDecompressor> decompressor_;
-  arrow::MemoryPool* const arrowPool_;
+  ShuffleStreamCursor cursor_;
+  RowBlockReader rowBlockReader_;
   memory::MemoryPool* const pool_;
   const int32_t batchSize_;
   const int64_t batchByteSize_;
@@ -167,18 +135,13 @@ class CellShuffleReader {
   /// Set for a nested layout, which it reads in place of decoder_.
   std::unique_ptr<CellNestedAssembler> nestedAssembler_;
   ShuffleRowToColumnarConverter compositeConverter_;
-  BufferPtr compositeStored_;
-  BufferPtr compositeDecoded_;
-  /// Row bodies (without the size prefix) of the last CompositeRows block.
-  std::vector<std::string_view> compositeRows_;
+  /// Last CompositeRows block's backing buffer and row views (without size
+  /// prefix).
+  RowBlock compositeBlock_;
   size_t nextCompositeRow_{0};
-  std::unique_ptr<StreamSource> source_;
-  bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
-  uint64_t readTimeNs_{0};
   uint64_t rowsRead_{0};
   uint64_t payloadsRead_{0};
-  uint64_t streamsOpened_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

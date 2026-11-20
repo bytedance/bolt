@@ -19,7 +19,6 @@
 #include <folly/lang/Assume.h>
 #include <folly/lang/Bits.h>
 #include <algorithm>
-#include <chrono>
 #include <string_view>
 #include <type_traits>
 
@@ -1722,62 +1721,6 @@ bool CellPayloadDecoder::decode(
 }
 
 // Writer side.
-
-uint64_t currentTimeNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
-  if (buffer == nullptr) {
-    if (size == 0) {
-      return nullptr;
-    }
-    buffer = AlignedBuffer::allocate<char>(std::max<size_t>(64, size), pool);
-  } else if (size > buffer->capacity()) {
-    AlignedBuffer::reallocate<char>(
-        &buffer,
-        std::max(size, checkedMultiply<size_t>(2, buffer->capacity())));
-  }
-  buffer->setSize(size);
-  return buffer->asMutable<char>();
-}
-
-char* resetBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
-  if (buffer == nullptr || size > buffer->capacity()) {
-    buffer.reset();
-    if (size == 0) {
-      return nullptr;
-    }
-    buffer = AlignedBuffer::allocate<char>(size, pool);
-  }
-  buffer->setSize(size);
-  return buffer->asMutable<char>();
-}
-
-void appendBytes(
-    BufferPtr& out,
-    const void* data,
-    size_t bytes,
-    memory::MemoryPool* pool) {
-  if (bytes == 0) {
-    return;
-  }
-  const size_t at = out ? out->size() : 0;
-  resizeBuffer(out, checkedPlus(at, bytes), pool);
-  ::memcpy(out->asMutable<char>() + at, data, bytes);
-}
-
-void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool) {
-  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
-  appendBytes(out, &value, sizeof(value), pool);
-}
-
-void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool) {
-  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
-  appendBytes(out, &value, sizeof(value), pool);
-}
 
 void buildNullBody(
     const CellWindowInput& in,

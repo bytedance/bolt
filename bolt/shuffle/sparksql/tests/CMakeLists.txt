@@ -189,6 +189,7 @@ add_executable(
   CellNestedTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
+  ShuffleBlockCommonTest.cpp
   SpillMemoryTest.cpp
 )
 

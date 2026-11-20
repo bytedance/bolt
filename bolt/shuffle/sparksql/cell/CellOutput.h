@@ -21,9 +21,9 @@
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
-#include "bolt/shuffle/sparksql/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
+#include "bolt/shuffle/sparksql/common/PartitionBlockOutput.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 

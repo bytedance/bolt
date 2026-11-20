@@ -27,7 +27,7 @@
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
-#include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
+#include "bolt/shuffle/sparksql/common/CompositeShuffleWriter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -145,7 +145,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   };
 
   void initOnFirstBatch(const RowVector& rv);
-  arrow::Status computeOrdinaryPartitions(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// splitBatch() of a nested layout: seals the window first when the
   /// batch's positions do not fit beside it.

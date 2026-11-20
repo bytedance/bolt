@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include <fmt/format.h>
 #include "bolt/common/time/Timer.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 
@@ -120,9 +121,9 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   }
 
   if (useCellReader_) {
-    if (!cellShuffleReader_) {
+    if (!blockShuffleReader_) {
       NanosecondTimer timer(&deserializerCreateTime_);
-      cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+      blockShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
           readerStreamIterator_,
           outputType_,
           codec_.get(),
@@ -132,7 +133,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
           shuffleBatchByteSize_,
           shuffleReaderOptions_.cellNativeNestedTypes);
     }
-    auto output = cellShuffleReader_->next();
+    auto output = blockShuffleReader_->next();
     if (!output) {
       finished_ = true;
     }
@@ -232,13 +233,13 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
-  if (cellShuffleReader_) {
+  if (blockShuffleReader_) {
     // Report decompression and deserialization disjointly, matching the
     // legacy reader's accounting: deserialization is the decode time less
     // decompression and reading the input. The legacy reader counts its
     // reads of the streams in the total read time alone, which holds the
-    // Cell reader's too.
-    const auto& reader = *cellShuffleReader_;
+    // block reader's too.
+    const auto& reader = *blockShuffleReader_;
     const uint64_t decodeNs = reader.decodeTimeNs();
     const uint64_t decompressNs = reader.decompressTimeNs();
     const uint64_t readNs = reader.readTimeNs();
@@ -248,8 +249,9 @@ void SparkShuffleReader::close() {
     deserializeTime_ += deserializeNs;
     // The three times are disjoint: decode is the deserialization above.
     LOG(INFO) << fmt::format(
-        "CellShuffleReader totals: rows={}, payloads={}, streams={}, "
+        "{} totals: rows={}, payloads={}, streams={}, "
         "read={:.3f}ms, decompress={:.3f}ms, decode={:.3f}ms",
+        reader.readerName(),
         reader.rowsRead(),
         reader.payloadsRead(),
         reader.streamsRead(),
@@ -258,7 +260,7 @@ void SparkShuffleReader::close() {
         deserializeNs / 1e6);
     {
       NanosecondTimer timer(&deserializerDestroyTime_);
-      cellShuffleReader_.reset();
+      blockShuffleReader_.reset();
     }
   }
   {

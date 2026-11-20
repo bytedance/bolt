@@ -16,78 +16,14 @@
 
 #include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 
-#include <arrow/io/interfaces.h>
-#include <folly/ScopeGuard.h>
 #include <algorithm>
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedAssembler.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
-
-bool CellShuffleReader::StreamSource::read(void* out, size_t n) {
-  auto* dst = reinterpret_cast<uint8_t*>(out);
-  if (peeked_ && n > 0) {
-    *dst++ = peekByte_;
-    --n;
-    peeked_ = false;
-  }
-  if (ended_ && n > 0) {
-    return false;
-  }
-  while (n > 0) {
-    const auto result = in_->Read(n, dst);
-    BOLT_CHECK(
-        result.ok(),
-        "shuffle stream read failed: {}",
-        result.status().ToString());
-    const auto got = static_cast<size_t>(*result);
-    if (got == 0) {
-      ended_ = true;
-      return false;
-    }
-    dst += got;
-    n -= got;
-  }
-  return true;
-}
-
-bool CellShuffleReader::StreamSource::atEnd() {
-  if (peeked_) {
-    return false;
-  }
-  if (ended_) {
-    return true;
-  }
-  const auto result = in_->Read(1, &peekByte_);
-  BOLT_CHECK(
-      result.ok(),
-      "shuffle stream read failed: {}",
-      result.status().ToString());
-  if (*result == 0) {
-    ended_ = true;
-    return true;
-  }
-  peeked_ = true;
-  return false;
-}
-
-bool CellShuffleReader::CodecDecompressor::decompress(
-    std::span<const uint8_t> in,
-    std::span<uint8_t> out) {
-  const uint64_t start = currentTimeNs();
-  const auto decodedSize = static_cast<int64_t>(out.size());
-  const bool ok = codec_->decompress(
-                      in.data(),
-                      static_cast<int64_t>(in.size()),
-                      out.data(),
-                      decodedSize) == decodedSize;
-  decompressTimeNs_ += currentTimeNs() - start;
-  return ok;
-}
 
 CellShuffleReader::CellShuffleReader(
     std::shared_ptr<ReaderStreamIterator> streams,
@@ -98,12 +34,12 @@ CellShuffleReader::CellShuffleReader(
     int32_t batchSize,
     int64_t batchByteSize,
     bool nativeNestedTypes)
-    : streams_(std::move(streams)),
-      adapter_(outputType),
+    : adapter_(outputType),
       decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
-      arrowPool_(arrowPool),
+      cursor_(std::move(streams), arrowPool, decompressor_.get()),
+      rowBlockReader_(decompressor_.get(), pool),
       pool_(pool),
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
@@ -128,134 +64,33 @@ CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
   // time, decompression aside. Timed per block, not per read: a payload
   // takes a dozen small reads, and from memory two clock reads around
   // each would cost more than the reads.
-  const uint64_t start = currentTimeNs();
-  const uint64_t decompressStart = decompressTimeNs();
-  SCOPE_EXIT {
-    const uint64_t elapsed = currentTimeNs() - start;
-    const uint64_t decompress = decompressTimeNs() - decompressStart;
-    if (elapsed > decompress) {
-      readTimeNs_ += elapsed - decompress;
-    }
-  };
-  while (!exhausted_) {
-    if (source_ == nullptr) {
-      auto in = streams_->nextStream(arrowPool_);
-      if (in == nullptr) {
-        exhausted_ = true;
-        return NextBlock::kEnd;
-      }
-      source_ = std::make_unique<StreamSource>(std::move(in));
-      ++streamsOpened_;
-    }
-    if (source_->atEnd()) {
-      source_.reset();
-      continue;
-    }
-    uint8_t kind = 0;
-    BOLT_CHECK(source_->read(&kind, 1), "truncated cell shuffle block");
-    if (kind == static_cast<uint8_t>(CellBlockKind::kCompositeRows)) {
-      readCompositeBlock();
-      return NextBlock::kCompositeRows;
-    }
-    BOLT_CHECK_EQ(
-        kind,
-        static_cast<uint8_t>(CellBlockKind::kPayload),
-        "unknown cell shuffle block kind");
-    std::string error;
-    const bool ok = nestedAssembler_ != nullptr
-        ? nestedAssembler_->beginPayload(*source_, error)
-        : decoder_.beginPayload(*source_, error);
-    BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
-    ++payloadsRead_;
-    return NextBlock::kPayload;
+  auto timer = cursor_.timeRead();
+  uint8_t kind = 0;
+  if (!cursor_.nextBlockKind(kind)) {
+    return NextBlock::kEnd;
   }
-  return NextBlock::kEnd;
-}
-
-void CellShuffleReader::readCompositeBlock() {
-  compositeRows_.clear();
-  nextCompositeRow_ = 0;
-  uint8_t header[kCompositeBlockHeaderBytes - 1];
-  if (!source_->read(header, sizeof(header))) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: truncated composite block header");
+  if (kind == static_cast<uint8_t>(CellBlockKind::kCompositeRows)) {
+    nextCompositeRow_ = 0;
+    rowBlockReader_.read(cursor_.source(), compositeBlock_, "composite");
+    return NextBlock::kCompositeRows;
   }
-  const auto rowCount = memory::loadUnaligned<uint32_t>(header);
-  const auto decodedBytes = memory::loadUnaligned<uint64_t>(header + 4);
-  const auto stored = memory::loadUnaligned<uint64_t>(header + 12);
-  const auto layout = static_cast<RunLayout>(header[20]);
-  if (rowCount == 0 || rowCount > kMaxPayloadRows) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: composite block row count out of range");
-  }
-  if (decodedBytes < 4ull * rowCount) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: composite block smaller than its row headers");
-  }
-  if (stored > source_->remainingBound()) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: composite block out of bounds");
-  }
-  if (layout == RunLayout::kCombinedUncompressed) {
-    if (stored != decodedBytes) {
-      BOLT_FAIL(
-          "malformed composite shuffle block: stored composite block size mismatch");
-    }
-  } else if (layout != RunLayout::kCombined || decompressor_ == nullptr) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: unsupported composite block layout");
-  }
-
-  resetBuffer(compositeStored_, stored, pool_);
-  if (stored > 0 &&
-      !source_->read(compositeStored_->asMutable<char>(), stored)) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: truncated composite block body");
-  }
-  const uint8_t* storedData =
-      stored > 0 ? compositeStored_->as<uint8_t>() : nullptr;
-  const char* body = reinterpret_cast<const char*>(storedData);
-  if (layout == RunLayout::kCombined) {
-    resetBuffer(compositeDecoded_, decodedBytes, pool_);
-    uint8_t* decodedData =
-        decodedBytes > 0 ? compositeDecoded_->asMutable<uint8_t>() : nullptr;
-    if (stored == 0 ||
-        !decompressor_->decompress(
-            {storedData, stored}, {decodedData, decodedBytes})) {
-      BOLT_FAIL(
-          "malformed composite shuffle block: composite block decompression failed");
-    }
-    body = reinterpret_cast<const char*>(decodedData);
-  }
-
-  std::vector<std::string_view> rows;
-  rows.reserve(rowCount);
-  uint64_t pos = 0;
-  for (uint32_t i = 0; i < rowCount; ++i) {
-    if (decodedBytes - pos < sizeof(int32_t)) {
-      BOLT_FAIL(
-          "malformed composite shuffle block: truncated composite row header");
-    }
-    const int32_t size = compositeRowSize(body + pos);
-    pos += sizeof(int32_t);
-    if (size < 0 || static_cast<uint64_t>(size) > decodedBytes - pos) {
-      BOLT_FAIL(
-          "malformed composite shuffle block: composite row out of bounds");
-    }
-    rows.emplace_back(body + pos, static_cast<size_t>(size));
-    pos += size;
-  }
-  if (pos != decodedBytes) {
-    BOLT_FAIL(
-        "malformed composite shuffle block: composite block length mismatch");
-  }
-  compositeRows_ = std::move(rows);
+  BOLT_CHECK_EQ(
+      kind,
+      static_cast<uint8_t>(CellBlockKind::kPayload),
+      "unknown cell shuffle block kind");
+  std::string error;
+  const bool ok = nestedAssembler_ != nullptr
+      ? nestedAssembler_->beginPayload(cursor_.source(), error)
+      : decoder_.beginPayload(cursor_.source(), error);
+  BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
+  ++payloadsRead_;
+  return NextBlock::kPayload;
 }
 
 RowVectorPtr CellShuffleReader::nextComposite() {
   const uint64_t start = currentTimeNs();
   const size_t limit = std::min(
-      compositeRows_.size(),
+      compositeBlock_.rows.size(),
       nextCompositeRow_ + static_cast<size_t>(std::max(batchSize_, 1)));
   const uint64_t byteCap = batchByteSize_ > 0
       ? std::min<uint64_t>(
@@ -265,7 +100,7 @@ RowVectorPtr CellShuffleReader::nextComposite() {
   size_t end = nextCompositeRow_;
   uint64_t total = 0;
   while (end < limit) {
-    const uint64_t rowBytes = compositeRows_[end].size();
+    const uint64_t rowBytes = compositeBlock_.rows[end].size();
     if (end > nextCompositeRow_ && total + rowBytes > byteCap) {
       break;
     }
@@ -277,7 +112,8 @@ RowVectorPtr CellShuffleReader::nextComposite() {
       std::numeric_limits<int32_t>::max(),
       "composite rows too large for one vector");
   std::vector<std::string_view> slice(
-      compositeRows_.begin() + nextCompositeRow_, compositeRows_.begin() + end);
+      compositeBlock_.rows.begin() + nextCompositeRow_,
+      compositeBlock_.rows.begin() + end);
   nextCompositeRow_ = end;
   auto output = compositeConverter_.convertToComposite(
       slice, static_cast<int32_t>(total));

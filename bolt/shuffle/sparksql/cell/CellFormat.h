@@ -120,6 +120,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/MemoryCopy.h"
+#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
 #include "bolt/type/Type.h"
 
 /// Starts a hot Cell kernel on a cache line. Its loops then keep their
@@ -145,7 +146,7 @@ inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 /// Not a memory bound: the reader decodes a payload in batches, whatever
 /// its row count. It keeps the u32 row fields exact and a payload
 /// decodable as one vector.
-inline constexpr uint32_t kMaxPayloadRows = (1u << 31) - 1;
+inline constexpr uint32_t kMaxPayloadRows = kMaxBlockRows;
 
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
 /// 8 bytes FOR base, 64 bytes body.
@@ -218,50 +219,22 @@ enum class NullTag : uint8_t {
 
 /// What a block of a Cell shuffle stream holds: every block on the wire - a
 /// ColumnarPayload or a CompositeRows block - starts with this byte.
-enum class CellBlockKind : uint8_t {
-  kPayload = 0,
-  kCompositeRows = 1,
-};
+using CellBlockKind = ShuffleBlockKind;
 
-/// A CompositeRows block carries CompositeRowVector rows - serialized
-/// aggregation state - as opaque bytes, row-framed as the V1 shuffle ships
-/// them:
-///
-///   kind         u8   kCompositeRows
-///   rowCount     u32
-///   decodedSize  u64  body bytes before compression
-///   stored       u64  body bytes that follow
-///   layout       u8   RunLayout::kCombined (compressed) or
-///                     kCombinedUncompressed
-///   body              rows back to back, each [size i32][size bytes]
-///
-/// The reader requires rowCount in [1, kMaxPayloadRows], decodedSize at least
-/// 4 * rowCount, a non-negative size per row, rows consuming the body
-/// exactly, stored = decodedSize for kCombinedUncompressed, and a codec for
-/// kCombined. The header size counts the kind byte, unlike
-/// kPayloadFixedHeaderBytes: the reader, past the kind byte, reads the
-/// rest of it.
-inline constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
+/// CompositeRows header length (counting the kind byte); see
+/// ShuffleBlockFormat.h.
+inline constexpr uint64_t kCompositeBlockHeaderBytes = kRowBlockHeaderBytes;
 
 /// The size prefix of a CompositeRows row. Rows lie back to back, so the
 /// prefix is in general unaligned.
 inline int32_t compositeRowSize(const void* row) {
-  return memory::loadUnaligned<int32_t>(row);
+  return framedRowSize(row);
 }
 
 /// Bytes of a CompositeRows row with its size prefix.
 inline uint64_t compositeRowBytes(const void* row) {
-  return sizeof(int32_t) + static_cast<uint64_t>(compositeRowSize(row));
+  return framedRowBytes(row);
 }
-
-/// A run's compression layout: all streams compressed as one buffer, each
-/// stream compressed on its own, or all streams stored uncompressed. A
-/// writer falls back to the stored form when compression does not pay.
-enum class RunLayout : uint8_t {
-  kCombined = 0x00,
-  kSeparate = 0x01,
-  kCombinedUncompressed = 0x02,
-};
 
 /// How one stream's bytes are produced and parsed.
 enum class StreamKind : uint8_t {
