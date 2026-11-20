@@ -20,6 +20,8 @@
 namespace bytedance::bolt::functions::sparksql {
 
 void registerBitmapFunctions(const std::string& prefix) {
+  registerFunction<BitmapBucketNumberFunction, int64_t, int64_t>(
+      {prefix + "bitmap_bucket_number"});
   registerFunction<BitmapCountFunction, int64_t, Varbinary>(
       {prefix + "bitmap_count"});
 }
