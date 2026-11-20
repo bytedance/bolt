@@ -35,13 +35,13 @@
 #include <memory>
 
 #include "bolt/expression/VectorWriters.h"
-#include "bolt/type/VariantValue.h"
-#include "bolt/vector/VariantVector.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/type/OpaqueCustomTypes.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance::bolt {
 using namespace bytedance::bolt::test;
 namespace {

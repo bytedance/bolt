@@ -40,12 +40,12 @@
 #include <bolt/vector/DecodedVector.h>
 #include <bolt/vector/SelectivityVector.h>
 #include "bolt/expression/VectorWriters.h"
-#include "bolt/type/VariantValue.h"
-#include "bolt/vector/VariantVector.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 #include "folly/container/F14Map.h"
 namespace bytedance::bolt {
 namespace {
@@ -235,8 +235,8 @@ TEST_F(MapWriterTest, writeThenCommitNullVarchar) {
 }
 
 TEST_F(MapWriterTest, writeThenCommitNullVariant) {
-  auto result = prepareResult(
-      std::make_shared<MapType>(MapType(BIGINT(), VARIANT())), 2);
+  auto result =
+      prepareResult(std::make_shared<MapType>(MapType(BIGINT(), VARIANT())), 2);
   exec::VectorWriter<Map<int64_t, Variant>> writer;
   writer.init(*result->as<MapVector>());
 
