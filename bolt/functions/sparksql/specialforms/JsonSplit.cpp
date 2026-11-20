@@ -625,11 +625,11 @@ void jsonToArray_SimdJson(
         result->setNull(row, true);
         offset = lastOffset;
         return;
-      } catch (const std::exception&) {
+      } catch (const std::exception& e) {
         arrayVector->setOffsetAndSize(row, lastOffset, 0);
         result->setNull(row, true);
         offset = lastOffset;
-        throw;
+        BOLT_FAIL("json_split exception occurs: {}", e.what());
       }
     }
   });
@@ -689,11 +689,11 @@ void jsonToArray_Sonic(
         result->setNull(row, true);
         offset = lastOffset;
         return;
-      } catch (const std::exception&) {
+      } catch (const std::exception& e) {
         arrayVector->setOffsetAndSize(row, lastOffset, 0);
         result->setNull(row, true);
         offset = lastOffset;
-        throw;
+        BOLT_FAIL("json_split exception occurs: {}", e.what());
       }
 
       arrayVector->setNull(row, jsonDoc.IsNull());

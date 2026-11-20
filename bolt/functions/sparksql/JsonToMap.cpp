@@ -147,8 +147,8 @@ class JsonToMapFunction : public exec::VectorFunction {
             throw;
           } catch (const std::bad_alloc& e) {
             BOLT_MEM_ALLOC_ERROR(e.what());
-          } catch (const std::exception&) {
-            return false;
+          } catch (const std::exception& e) {
+            BOLT_FAIL("Unexpected error while parsing JSON: {}", e.what());
           }
         };
 
