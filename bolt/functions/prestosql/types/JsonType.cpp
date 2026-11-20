@@ -33,6 +33,7 @@
 #include <ryu/ryu.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/encode/Base64.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/expression/EvalCtx.h"
 #include "bolt/expression/PeeledEncoding.h"
 #include "bolt/expression/StringWriter.h"
@@ -1267,6 +1268,9 @@ simdjson::error_code castFromJsonOneRow(
   simdjson::ondemand::document doc;
   if (auto error = simdjsonParse(input).get(doc)) {
     if (isFromJson) {
+      if (error == simdjson::MEMALLOC) {
+        BOLT_MEM_ALLOC_ERROR(simdjson::error_message(error));
+      }
       writer.commitNull();
       return simdjson::SUCCESS;
     }
@@ -1286,22 +1290,28 @@ simdjson::error_code castFromJsonOneRow(
       if (auto error =
               CastFromJsonTypedImpl<simdjson::ondemand::document&>::apply<kind>(
                   doc, writer.current(), /* isFromJson*/ true)) {
+        if (error == simdjson::MEMALLOC) {
+          BOLT_MEM_ALLOC_ERROR(simdjson::error_message(error));
+        }
         writer.commitNull();
       } else {
         writer.commit(true);
       }
     } catch (const simdjson::simdjson_error& e) {
+      if (e.error() == simdjson::MEMALLOC) {
+        BOLT_MEM_ALLOC_ERROR(e.what());
+      }
       LOG(INFO) << fmt::format(
           "encountered `simdjson::simdjson_error` exception while parsing json, json string : `{}`, exception msg : {} ",
           input,
           e.what());
       writer.commitNull();
+    } catch (const BoltRuntimeError&) {
+      throw;
     } catch (const std::exception& e) {
-      LOG(INFO) << fmt::format(
-          "encountered `std::exception` exception while parsing json, json string: `{}`, exception msg: {}",
-          input,
-          e.what());
-      writer.commitNull();
+      // EvalCtx treats unclassified std::exceptions as recoverable row errors.
+      // Convert unexpected failures to runtime errors to prevent writer reuse.
+      BOLT_FAIL("Unexpected error while parsing JSON: {}", e.what());
     }
   } else {
     SIMDJSON_TRY(

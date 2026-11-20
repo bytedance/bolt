@@ -44,6 +44,8 @@
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 #include "folly/container/F14Map.h"
 namespace bytedance::bolt {
 namespace {
@@ -194,6 +196,75 @@ TEST_F(MapWriterTest, writeThenCommitNull) {
   auto expexctedVector = makeMapVector<int64_t, int64_t>({{}, expected});
   expexctedVector->setNull(0, true);
   assertEqualVectors(result, expexctedVector);
+}
+
+TEST_F(MapWriterTest, writeThenCommitNullVarchar) {
+  auto result = prepareResult(
+      std::make_shared<MapType>(MapType(VARCHAR(), VARCHAR())), 2);
+  exec::VectorWriter<Map<Varchar, Varchar>> writer;
+  writer.init(*result->as<MapVector>());
+
+  {
+    writer.setOffset(0);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter += "stale"_sv;
+    valueWriter += "stale"_sv;
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    // add_item() must not commit the pending key/value of the null row.
+    auto* keys = result->as<MapVector>()->mapKeys()->asFlatVector<StringView>();
+    for (vector_size_t i = 0; i < keys->size(); ++i) {
+      EXPECT_NE(keys->valueAt(i).getString(), "stale");
+    }
+    keyWriter += "fresh"_sv;
+    valueWriter += "fresh"_sv;
+    writer.commit();
+  }
+  writer.finish();
+
+  map_pairs_t<StringView, StringView> expected = {{"fresh"_sv, "fresh"_sv}};
+  auto expectedVector = makeMapVector<StringView, StringView>({{}, expected});
+  expectedVector->setNull(0, true);
+  assertEqualVectors(result, expectedVector);
+}
+
+TEST_F(MapWriterTest, writeThenCommitNullVariant) {
+  auto result =
+      prepareResult(std::make_shared<MapType>(MapType(BIGINT(), VARIANT())), 2);
+  exec::VectorWriter<Map<int64_t, Variant>> writer;
+  writer.init(*result->as<MapVector>());
+
+  {
+    writer.setOffset(0);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter = 1;
+    valueWriter.copy_from(VariantValue{StringView("v1"), StringView("m1")});
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter = 2;
+    valueWriter.copy_from(VariantValue{StringView("v2"), StringView("m2")});
+    writer.commit();
+  }
+  writer.finish();
+
+  auto* maps = result->as<MapVector>();
+  auto* variants = maps->mapValues()->as<VariantVector>();
+  ASSERT_EQ(maps->sizeAt(1), 1);
+  auto variant = variants->valueAt(maps->offsetAt(1));
+  EXPECT_EQ(variant.value.getString(), "v2");
+  EXPECT_EQ(variant.metadata.getString(), "m2");
 }
 
 TEST_F(MapWriterTest, writeThenCommitNullNestedInRow) {

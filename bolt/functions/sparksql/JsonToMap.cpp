@@ -16,6 +16,7 @@
 
 #include <glog/logging.h>
 
+#include "bolt/common/memory/Memory.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/expression/VectorWriters.h"
 #include "bolt/functions/prestosql/json/SIMDJsonWrapper.h"
@@ -137,8 +138,17 @@ class JsonToMapFunction : public exec::VectorFunction {
               keyValues.insert_or_assign(key, view);
             }
             return true;
-          } catch (std::exception& e) {
+          } catch (const simdjson::simdjson_error& e) {
+            if (e.error() == simdjson::MEMALLOC) {
+              BOLT_MEM_ALLOC_ERROR(e.what());
+            }
             return false;
+          } catch (const BoltRuntimeError&) {
+            throw;
+          } catch (const std::bad_alloc& e) {
+            BOLT_MEM_ALLOC_ERROR(e.what());
+          } catch (const std::exception& e) {
+            BOLT_FAIL("Unexpected error while parsing JSON: {}", e.what());
           }
         };
 

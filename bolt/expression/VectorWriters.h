@@ -150,6 +150,11 @@ struct VectorWriter<
     proxy_.vector_->setNull(proxy_.offset_, true);
   }
 
+  void finalizeNull() override {
+    // Discard any partially written string so the next row starts clean.
+    proxy_.prepareForReuse(false);
+  }
+
   void commit(bool isSet) override {
     // this code path is called when the slice is top-level
     if (isSet) {
@@ -490,6 +495,12 @@ struct VectorWriter<Variant> : public VectorWriterBase {
     valueWriter_.commit(false);
     metadataWriter_.commit(false);
     variantVector_->setNull(offset_, true);
+  }
+
+  void finalizeNull() override {
+    // Discard partial value/metadata without committing the rejected row.
+    valueWriter_.finalizeNull();
+    metadataWriter_.finalizeNull();
   }
 
   void commit(bool isSet) override {
