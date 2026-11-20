@@ -34,29 +34,19 @@
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/dwio/common/Options.h"
+#include "bolt/exec/Split.h"
 #include "bolt/substrait/SubstraitToBoltExpr.h"
 namespace bytedance::bolt::substrait {
 
 /// This class is used to convert the Substrait plan into Bolt plan.
 class SubstraitBoltPlanConverter {
  public:
-  explicit SubstraitBoltPlanConverter(memory::MemoryPool* pool) : pool_(pool) {}
-  struct SplitInfo {
-    /// The Partition index.
-    u_int32_t partitionIndex;
-
-    /// The file paths to be scanned.
-    std::vector<std::string> paths;
-
-    /// The file starts in the scan.
-    std::vector<u_int64_t> starts;
-
-    /// The lengths to be scanned.
-    std::vector<u_int64_t> lengths;
-
-    /// The file format of the files to be scanned.
-    dwio::common::FileFormat format;
-  };
+  /// Set appendProject to false for BoltML replacement projections and its
+  /// legacy join layout hints. Standard Substrait keeps the default.
+  explicit SubstraitBoltPlanConverter(
+      memory::MemoryPool* pool,
+      bool appendProject = true)
+      : pool_(pool), appendProject_(appendProject) {}
 
   /// Convert Substrait AggregateRel into Bolt PlanNode.
   core::PlanNodePtr toBoltPlan(const ::substrait::AggregateRel& aggRel);
@@ -67,13 +57,12 @@ class SubstraitBoltPlanConverter {
   /// Convert Substrait FilterRel into Bolt PlanNode.
   core::PlanNodePtr toBoltPlan(const ::substrait::FilterRel& filterRel);
 
-  /// Convert Substrait ReadRel into Bolt PlanNode.
-  /// Index: the index of the partition this item belongs to.
-  /// Starts: the start positions in byte to read from the items.
-  /// Lengths: the lengths in byte to read from the items.
+  /// Convert Substrait ReadRel into Bolt PlanNode and collect exec::Splits
+  /// for TableScan if any. The produced splits preserve grouping semantics
+  /// (e.g., PaimonConnectorSplit wrapping multiple Hive splits).
   core::PlanNodePtr toBoltPlan(
       const ::substrait::ReadRel& readRel,
-      std::shared_ptr<SplitInfo>& splitInfo);
+      std::vector<exec::Split>& outSplits);
 
   /// Convert Substrait FetchRel into Bolt LimitNode or TopNNode according the
   /// different input of fetchRel.
@@ -101,8 +90,11 @@ class SubstraitBoltPlanConverter {
   /// in the detail field.
   core::PlanNodePtr toBoltPlan(const ::substrait::ExtensionSingleRel& rel);
 
+  /// Convert Substrait HashJoinRel into Bolt HashJoinNode.
+  core::PlanNodePtr toBoltPlan(const ::substrait::HashJoinRel& joinRel);
+
   /// Check the Substrait type extension only has one unknown extension.
-  bool checkTypeExtension(const ::substrait::Plan& substraitPlan);
+  static bool checkTypeExtension(const ::substrait::Plan& substraitPlan);
 
   /// Construct the function map between the index and the Substrait function
   /// name.
@@ -113,8 +105,8 @@ class SubstraitBoltPlanConverter {
     return functionMap_;
   }
 
-  /// Return the splitInfo map used by this plan converter.
-  const std::unordered_map<core::PlanNodeId, std::shared_ptr<SplitInfo>>&
+  /// Return the splits map used by this plan converter.
+  const std::unordered_map<core::PlanNodeId, std::vector<exec::Split>>&
   splitInfos() const {
     return splitInfoMap_;
   }
@@ -181,12 +173,15 @@ class SubstraitBoltPlanConverter {
   /// name. Will be constructed based on the Substrait representation.
   std::unordered_map<uint64_t, std::string> functionMap_;
 
-  /// Mapping from leaf plan node ID to splits.
-  std::unordered_map<core::PlanNodeId, std::shared_ptr<SplitInfo>>
-      splitInfoMap_;
+  /// Mapping from leaf plan node ID to exec::Splits.
+  std::unordered_map<core::PlanNodeId, std::vector<exec::Split>> splitInfoMap_;
 
   /// Memory pool.
   memory::MemoryPool* pool_;
+
+  // Whether project nodes should append new columns to existing ones or just
+  // replace all columns.
+  bool appendProject_;
 
   /// Helper function to convert the input of Substrait Rel to Bolt Node.
   template <typename T>

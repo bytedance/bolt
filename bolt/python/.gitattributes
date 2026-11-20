@@ -1,0 +1,6 @@
+# Generated Thrift bindings; FacebookBase.py is hand-written and excluded.
+boltml/third_party/hive_metastore/ThriftHiveMetastore.py linguist-generated=true linguist-vendored=true
+boltml/third_party/hive_metastore/ttypes.py linguist-generated=true linguist-vendored=true
+boltml/third_party/fb303/FacebookService.py linguist-generated=true linguist-vendored=true
+boltml/third_party/fb303/ttypes.py linguist-generated=true linguist-vendored=true
+boltml/third_party/fb303/constants.py linguist-generated=true linguist-vendored=true

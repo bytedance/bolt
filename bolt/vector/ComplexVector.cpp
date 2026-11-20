@@ -33,6 +33,7 @@
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/SimpleVector.h"
@@ -597,7 +598,7 @@ void ArrayVectorBase::copyRangesImpl(
         ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
           if (count > 0) {
             BOLT_DCHECK(BaseVector::length_ >= targetIndex + count);
-            totalCount += count;
+            totalCount = checkedPlus(totalCount, count);
           }
         });
     outRanges.reserve(totalCount);
@@ -610,6 +611,7 @@ void ArrayVectorBase::copyRangesImpl(
         }
         auto wrappedIndex = source->wrappedIndex(sourceIndex);
         auto copySize = sourceArray->sizeAt(wrappedIndex);
+        const auto newChildSize = checkedPlus(childSize, copySize);
 
         if (copySize > 0) {
           auto copyOffset = sourceArray->offsetAt(wrappedIndex);
@@ -619,7 +621,8 @@ void ArrayVectorBase::copyRangesImpl(
           if (!outRanges.empty() &&
               (outRanges.back().sourceIndex + outRanges.back().count ==
                copyOffset)) {
-            outRanges.back().count += copySize;
+            outRanges.back().count =
+                checkedPlus(outRanges.back().count, copySize);
           } else {
             outRanges.push_back({copyOffset, childSize, copySize});
           }
@@ -627,7 +630,7 @@ void ArrayVectorBase::copyRangesImpl(
 
         mutableOffsets[targetIndex] = childSize;
         mutableSizes[targetIndex] = copySize;
-        childSize += copySize;
+        childSize = newChildSize;
       }
     });
 
@@ -1105,6 +1108,32 @@ std::optional<int32_t> MapVector::compare(
   if (flags.equalsOnly &&
       rawSizes_[index] != otherMap->rawSizes_[wrappedOtherIndex]) {
     return 1;
+  }
+
+  if (kSparkCompatible && !flags.equalsOnly && flags.nullAsValue()) {
+    const auto size = rawSizes_[index];
+    const auto otherSize = otherMap->rawSizes_[wrappedOtherIndex];
+    if (size != otherSize) {
+      return flags.ascending ? size - otherSize : otherSize - size;
+    }
+    auto leftIndices = sortedKeyIndices(index);
+    auto rightIndices = otherMap->sortedKeyIndices(wrappedOtherIndex);
+    // Spark's Map ordering compares each key with its value before the next
+    // key. Nested nulls sort first ascending, independently of top-level NULLS.
+    flags.nullsFirst = flags.ascending;
+    for (vector_size_t i = 0; i < size; ++i) {
+      auto result = keys_->compare(
+          otherMap->keys_.get(), leftIndices[i], rightIndices[i], flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+      result = values_->compare(
+          otherMap->values_.get(), leftIndices[i], rightIndices[i], flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+    }
+    return 0;
   }
 
   auto leftIndices = sortedKeyIndices(index);

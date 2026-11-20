@@ -20,6 +20,7 @@
 #include <fmt/core.h>
 #include <type/BigDecimal.h>
 #include <type/StringView.h>
+#include <array>
 #include <sstream>
 #include <string>
 #include "bolt/type/Conversions.h"
@@ -28,6 +29,22 @@ using namespace bytedance::bolt::util;
 namespace bytedance::bolt {
 
 namespace {
+
+using BigInt = boost::multiprecision::cpp_int;
+
+constexpr int32_t kMaxCachedPowerOfFive = 340;
+
+const std::array<BigInt, kMaxCachedPowerOfFive + 1>& powersOfFive() {
+  static const auto powers = [] {
+    std::array<BigInt, kMaxCachedPowerOfFive + 1> values;
+    values[0] = 1;
+    for (int32_t i = 1; i <= kMaxCachedPowerOfFive; ++i) {
+      values[i] = values[i - 1] * 5;
+    }
+    return values;
+  }();
+  return powers;
+}
 
 std::string valueToString(int128_t value, int32_t& scale, int32_t& nDigits) {
   while (value > 0 && value % 10 == 0) {
@@ -68,39 +85,14 @@ int countBits(int64_t v) {
 
 } // namespace
 
-std::vector<boost::multiprecision::cpp_int> FloatingDecimal::b5p;
-
 boost::multiprecision::cpp_int FloatingDecimal::big5pow(int p) {
   BOLT_USER_CHECK(p >= 0);
 
-  bool include = b5p.size() > p;
-  if (!include) {
-    b5p.resize(p + 1);
+  if (p <= kMaxCachedPowerOfFive) {
+    return powersOfFive()[p];
   }
 
-  if (b5p[p] != 0) {
-    return b5p[p];
-  }
-
-  if (p <= maxLongFive) {
-    return (b5p[p] = long5pow[p]);
-  }
-
-  int q = p >> 1;
-  int r = p - q;
-  auto bigq = b5p[q];
-  if (bigq == 0) {
-    bigq = big5pow(q);
-  }
-  if (r <= maxLongFive) {
-    return (b5p[p] = bigq * long5pow[r]);
-  } else {
-    auto bigr = b5p[r];
-    if (bigr == 0) {
-      bigr = big5pow(r);
-    }
-    return (b5p[p] = bigq * bigr);
-  }
+  return boost::multiprecision::pow(BigInt{5}, p);
 }
 
 boost::multiprecision::cpp_int

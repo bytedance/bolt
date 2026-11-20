@@ -543,6 +543,54 @@ bool S3FileSystem::exists(std::string_view path) {
   return impl_->s3Client()->HeadObject(request).IsSuccess();
 }
 
+FileInfo S3FileSystem::fileInfo(std::string_view path) {
+  const auto objectPath = getPath(path);
+  const auto separator = objectPath.find('/');
+  const std::string bucket(objectPath.substr(0, separator));
+  std::string key = separator == std::string_view::npos
+      ? ""
+      : std::string(objectPath.substr(separator + 1));
+
+  if (!key.empty()) {
+    Aws::S3::Model::HeadObjectRequest request;
+    request.SetBucket(awsString(bucket));
+    request.SetKey(awsString(key));
+    const auto outcome = impl_->s3Client()->HeadObject(request);
+    if (outcome.IsSuccess()) {
+      const auto& metadata = outcome.GetResult();
+      const bool isDirectory = key.back() == '/';
+      return {
+          .isDirectory = isDirectory,
+          .size = isDirectory
+              ? 0
+              : static_cast<uint64_t>(metadata.GetContentLength()),
+          .modificationTimeMs = metadata.GetLastModified().Millis()};
+    }
+    if (outcome.GetError().GetResponseCode() !=
+        Aws::Http::HttpResponseCode::NOT_FOUND) {
+      BOLT_CHECK_AWS_OUTCOME(
+          outcome, "Failed to get S3 file metadata", bucket, key);
+    }
+  }
+
+  // Object stores can represent directories solely by their children's prefix.
+  const bool isBucket = key.empty();
+  if (!isBucket && key.back() != '/') {
+    key += '/';
+  }
+  Aws::S3::Model::ListObjectsRequest request;
+  request.SetBucket(awsString(bucket));
+  request.SetPrefix(awsString(key));
+  request.SetMaxKeys(1);
+  const auto outcome = impl_->s3Client()->ListObjects(request);
+  BOLT_CHECK_AWS_OUTCOME(
+      outcome, "Failed to get S3 directory metadata", bucket, key);
+  if (isBucket || !outcome.GetResult().GetContents().empty()) {
+    return {.isDirectory = true};
+  }
+  BOLT_FILE_NOT_FOUND_ERROR("S3 path not found: {}", path);
+}
+
 void S3FileSystem::mkdir(std::string_view path) {
   std::string bucket;
   std::string key;

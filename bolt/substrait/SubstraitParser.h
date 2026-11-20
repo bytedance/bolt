@@ -39,6 +39,8 @@
 #include "bolt/substrait/proto/substrait/type.pb.h"
 #include "bolt/substrait/proto/substrait/type_expressions.pb.h"
 
+#include <memory>
+#include <unordered_map>
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::substrait {
 
@@ -74,9 +76,13 @@ class SubstraitParser {
   /// Currently, the input types in the function specification are not used. But
   /// in the future, they should be used for the validation according the
   /// specifications in Substrait yaml files.
-  const std::string& findFunctionSpec(
+  static const std::string& findFunctionSpec(
       const std::unordered_map<uint64_t, std::string>& functionMap,
-      uint64_t id) const;
+      uint64_t id);
+
+  /// Find the Substrait function specification using the internal function map
+  /// set via setFunctionMap.
+  const std::string& findFunctionSpec(uint64_t id) const;
 
   /// This function is used get the types from the compound name.
   static std::vector<std::string> getSubFunctionTypes(
@@ -88,11 +94,41 @@ class SubstraitParser {
       const std::unordered_map<uint64_t, std::string>& functionMap,
       uint64_t id) const;
 
+  /// Find the Bolt function name using the internal function map set via
+  /// setFunctionMap.
+  std::string findBoltFunction(uint64_t id) const;
+
   /// Map the Substrait function keyword into Bolt function keyword.
   std::string mapToBoltFunction(const std::string& substraitFunction) const;
 
   /// Get input types from Substrait function signature.
   static std::vector<TypePtr> getInputTypes(const std::string& signature);
+
+ private:
+  /// Mapping from Substrait type anchors (references) to extension names.
+  /// Populated from Plan.extensions by the plan converter.
+  std::unordered_map<uint32_t, std::string> typeExtensions_{{0, "UNKNOWN"}};
+
+  /// Mapping from function anchors to function specifications set by plan
+  /// converter.
+  std::unordered_map<uint64_t, std::string> functionMap_;
+
+ public:
+  /// Set the map from type anchors to extension names.
+  void setTypeExtensionMap(
+      const std::unordered_map<uint32_t, std::string>& typeExtensions) {
+    typeExtensions_ = typeExtensions;
+  }
+
+  /// Set the map from function anchors to function specifications.
+  void setFunctionMap(
+      const std::unordered_map<uint64_t, std::string>& functionMap) {
+    functionMap_ = functionMap;
+  }
+
+  /// Resolve a type extension anchor to its declared name.
+  /// Throws if the anchor is unknown.
+  const std::string& getTypeExtensionName(uint32_t anchor) const;
 
  private:
   /// A map used for mapping Substrait function keywords into Bolt functions'
@@ -104,7 +140,9 @@ class SubstraitParser {
       {"subtract", "minus"},
       {"modulus", "mod"},
       {"not_equal", "neq"},
-      {"equal", "eq"}};
+      {"equal", "eq"},
+      // Normalize negated null-check into built-in is_not_null
+      {"NOT is_null", "is_not_null"}};
 };
 
 } // namespace bytedance::bolt::substrait

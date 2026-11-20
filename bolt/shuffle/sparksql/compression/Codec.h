@@ -29,6 +29,15 @@ enum class CodecType { UNCOMPRESSED, GZIP, SNAPPY, LZ4, LZ4_FRAME, ZSTD };
 constexpr int32_t kDefaultCompressionLevel =
     std::numeric_limits<int32_t>::max();
 
+// Arrow's sentinel for the codec's default compression level.
+constexpr int32_t kArrowDefaultCompressionLevel =
+    std::numeric_limits<int32_t>::min();
+
+constexpr bool isDefaultCompressionLevel(int32_t level) {
+  return level == kDefaultCompressionLevel ||
+      level == kArrowDefaultCompressionLevel;
+}
+
 /// Options for codec creation.
 /// Note on checksumEnabled support:
 /// - ZSTD: Fully supported. Uses ZSTD_c_checksumFlag for native checksum.
@@ -149,7 +158,7 @@ class Codec {
 
  protected:
   int32_t compressionLevel() const {
-    return options_.compressionLevel == kDefaultCompressionLevel
+    return isDefaultCompressionLevel(options_.compressionLevel)
         ? defaultCompressionLevel()
         : options_.compressionLevel;
   }

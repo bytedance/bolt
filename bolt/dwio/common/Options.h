@@ -31,6 +31,7 @@
 #pragma once
 
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_set>
 
@@ -185,6 +186,9 @@ class RowReaderOptions {
 
   int32_t decodeRepDefPageCount_{10};
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
+  // Number of levels per Parquet rep/def streaming window. Zero disables
+  // streaming and uses the legacy preload path.
+  int32_t parquetRepDefStreamingWindowSize_{2 * 1024};
   bool useColumnNamesForColumnMapping_{false};
 
   // Hard upper bound on the in-memory bytes a single batch is allowed to
@@ -516,6 +520,14 @@ class RowReaderOptions {
     return parquetRepDefMemoryLimit_;
   }
 
+  void setParquetRepDefStreamingWindowSize(int32_t size) {
+    parquetRepDefStreamingWindowSize_ = size;
+  }
+
+  int32_t getParquetRepDefStreamingWindowSize() const {
+    return parquetRepDefStreamingWindowSize_;
+  }
+
   RowReaderOptions& setUseColumnNamesForColumnMapping(bool flag) {
     useColumnNamesForColumnMapping_ = flag;
     return *this;
@@ -586,8 +598,10 @@ class RowReaderOptions {
        << disableFloatingPointToVarcharMetadataFilter_ << ", ";
     ss << "parquetReaderImplicitCastMask_=" << parquetReaderImplicitCastMask_
        << ", ";
-    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
+    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_ << ", ";
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
+    ss << "parquetRepDefStreamingWindowSize_="
+       << parquetRepDefStreamingWindowSize_ << ", ";
     ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";
     ss << "useColumnNamesForColumnMapping_="
        << (useColumnNamesForColumnMapping_ ? "true" : "false");
@@ -599,6 +613,10 @@ class RowReaderOptions {
     return result;
   }
 };
+
+// Shared by pending column loaders so their owner can defer early cleanup.
+// The token owns no reader resources. Reader options hold a weak reference.
+struct LazyLoadToken {};
 
 /**
  * Options for creating a Reader.
@@ -616,6 +634,7 @@ class ReaderOptions : public io::ReaderOptions {
   bool useColumnNamesForColumnMapping_{false};
   bool useNestedColumnNamesForColumnMapping_{false};
   std::shared_ptr<folly::Executor> ioExecutor_;
+  std::weak_ptr<LazyLoadToken> lazyLoadToken_;
 
  public:
   static constexpr uint64_t kDefaultFooterEstimatedSize = 1024 * 1024; // 1MB
@@ -643,6 +662,7 @@ class ReaderOptions : public io::ReaderOptions {
     filePreloadThreshold = other.filePreloadThreshold;
     fileColumnNamesReadAsLowerCase = other.fileColumnNamesReadAsLowerCase;
     useColumnNamesForColumnMapping_ = other.useColumnNamesForColumnMapping_;
+    lazyLoadToken_ = other.lazyLoadToken_;
     return *this;
   }
 
@@ -656,8 +676,8 @@ class ReaderOptions : public io::ReaderOptions {
         footerEstimatedSize(other.footerEstimatedSize),
         filePreloadThreshold(other.filePreloadThreshold),
         fileColumnNamesReadAsLowerCase(other.fileColumnNamesReadAsLowerCase),
-        useColumnNamesForColumnMapping_(other.useColumnNamesForColumnMapping_) {
-  }
+        useColumnNamesForColumnMapping_(other.useColumnNamesForColumnMapping_),
+        lazyLoadToken_(other.lazyLoadToken_) {}
 
   /**
    * Set the format of the file, such as "rc" or "dwrf".  The
@@ -725,6 +745,14 @@ class ReaderOptions : public io::ReaderOptions {
   ReaderOptions& setUseNestedColumnNamesForColumnMapping(bool flag) {
     useNestedColumnNamesForColumnMapping_ = flag;
     return *this;
+  }
+
+  void setLazyLoadToken(const std::shared_ptr<LazyLoadToken>& token) {
+    lazyLoadToken_ = token;
+  }
+
+  const std::weak_ptr<LazyLoadToken>& lazyLoadToken() const {
+    return lazyLoadToken_;
   }
 
   ReaderOptions& setIOExecutor(std::shared_ptr<folly::Executor> executor) {
@@ -831,6 +859,7 @@ struct WriterOptions : public ISerializable {
 
 struct ColumnReaderOptions {
   bool useColumnNamesForColumnMapping_{false};
+  std::weak_ptr<LazyLoadToken> lazyLoadToken;
 };
 
 ColumnReaderOptions makeColumnReaderOptions(const ReaderOptions& options);

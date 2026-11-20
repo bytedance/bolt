@@ -29,16 +29,24 @@
  */
 
 #include "bolt/common/base/SpillStats.h"
+#include <folly/Indestructible.h>
+#include <algorithm>
+#include <thread>
+#include <vector>
 #include "bolt/common/base/Counters.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/StatsReporter.h"
 #include "bolt/common/base/SuccinctPrinter.h"
 namespace bytedance::bolt::common {
 namespace {
+uint32_t spillStatsShardCount() {
+  return std::max(1u, std::thread::hardware_concurrency());
+}
+
 std::vector<folly::Synchronized<SpillStats>>& allSpillStats() {
-  static std::vector<folly::Synchronized<SpillStats>> spillStatsList(
-      std::thread::hardware_concurrency());
-  return spillStatsList;
+  static folly::Indestructible<std::vector<folly::Synchronized<SpillStats>>>
+      spillStatsList(spillStatsShardCount());
+  return *spillStatsList;
 }
 
 folly::Synchronized<SpillStats>& localSpillStats() {

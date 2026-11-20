@@ -30,9 +30,11 @@
 
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
 
+#include <azure/storage/files/datalake/datalake_responses.hpp>
 #include <fmt/format.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <glog/logging.h>
+#include <chrono>
 
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
@@ -49,6 +51,30 @@ AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
 
 std::string AbfsFileSystem::name() const {
   return "ABFS";
+}
+
+FileInfo AbfsFileSystem::fileInfo(std::string_view path) {
+  auto abfsPath = std::make_shared<AbfsPath>(path);
+  auto client =
+      AzureClientProviderFactories::getWriteFileClient(abfsPath, *config_);
+  try {
+    const auto properties = client->getProperties();
+    const auto modified = static_cast<std::chrono::system_clock::time_point>(
+        properties.LastModified);
+    return {
+        .isDirectory = properties.IsDirectory,
+        .size = properties.IsDirectory
+            ? 0
+            : static_cast<uint64_t>(properties.FileSize),
+        .modificationTimeMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                modified.time_since_epoch())
+                .count()};
+  } catch (Azure::Storage::StorageException& error) {
+    throwStorageExceptionWithOperationDetails(
+        "GetProperties", std::string(path), error);
+    throw;
+  }
 }
 
 std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(

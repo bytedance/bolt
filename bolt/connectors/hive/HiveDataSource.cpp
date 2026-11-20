@@ -75,6 +75,8 @@ HiveDataSource::HiveDataSource(
     reusableOutputPool_ =
         std::make_shared<ReusableOutputPool>(reusableOutputCount);
   }
+  parquetRepDefStreamingWindowSize_ =
+      queryConfig.parquetRepDefStreamingWindowSize();
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -367,6 +369,10 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
 
   auto splitReader = createSplitReader(split, isPartOfPaimonSplit);
   splitReader->configureReaderOptions();
+  if (!lazyLoadToken_) {
+    lazyLoadToken_ = std::make_shared<dwio::common::LazyLoadToken>();
+  }
+  splitReader->readerOptions().setLazyLoadToken(lazyLoadToken_);
   splitReader->rowReaderOptions().setAppendParquetRowNumberAndFileName(
       enable_parquet_rownum_and_filename);
 
@@ -386,6 +392,8 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
 
   splitReader->rowReaderOptions().setDecodeRepDefPageCount(
       decodeRepDefPageCount_);
+  splitReader->rowReaderOptions().setParquetRepDefStreamingWindowSize(
+      parquetRepDefStreamingWindowSize_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
   splitReader->rowReaderOptions().setParquetReaderImplicitCastMask(
@@ -535,9 +543,7 @@ void HiveDataSource::addSplit(
   split_ = split;
   std::vector<int> columnCacheBlackList;
 
-  if (splitReader_) {
-    splitReader_.reset();
-  }
+  releaseSplitReader();
 
   const auto& tableParameters = hiveTableHandle_->tableParameters();
   // append-only tables don't need to read additional fields
@@ -605,9 +611,7 @@ void HiveDataSource::addSplit(
   // will be used in evaluateRemainingFilter
   currentSplitStr_ = split->filePath;
 
-  if (splitReader_) {
-    splitReader_.reset();
-  }
+  releaseSplitReader();
 
   splitReader_ = createConfiguredSplitReader(split, false);
 }
@@ -630,6 +634,35 @@ vector_size_t getLength(std::shared_ptr<ConnectorSplit>& split) {
   }
 
   BOLT_FAIL("Unsupported split type for getting length");
+}
+
+void HiveDataSource::clearCachedOutput() {
+  // Returned vectors retain their own children and reusable-output leases.
+  output_.reset();
+  if (reusableOutputPool_) {
+    for (auto& slot : reusableOutputPool_->slots) {
+      slot.output.reset();
+    }
+  }
+}
+
+void HiveDataSource::releaseSplitReader() {
+  splitReader_.reset();
+  lazyLoadToken_.reset();
+}
+
+void HiveDataSource::close() {
+  clearCachedOutput();
+  releaseSplitReader();
+}
+
+void HiveDataSource::releaseFinalSplitResources() {
+  clearCachedOutput();
+  // ColumnLoader borrows the reader. Preserve the existing DataSource lifetime
+  // for any pending lazy load; close() releases deferred resources as usual.
+  if (!lazyLoadToken_ || lazyLoadToken_.use_count() == 1) {
+    releaseSplitReader();
+  }
 }
 
 std::shared_ptr<HiveDataSource::ReusableOutputLease>
@@ -876,7 +909,9 @@ void HiveDataSource::setFromDataSource(
   }
   source->scanSpec_->moveAdaptationFrom(*scanSpec_);
   scanSpec_ = std::move(source->scanSpec_);
+  releaseSplitReader();
   splitReader_ = std::move(source->splitReader_);
+  lazyLoadToken_ = std::move(source->lazyLoadToken_);
   // New io will be accounted on the stats of 'source'. Add the existing
   // balance to that.
   source->ioStats_->merge(*ioStats_);

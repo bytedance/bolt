@@ -31,7 +31,6 @@
 #pragma once
 
 #include <folly/Executor.h>
-
 #include "bolt/common/caching/FileGroupStats.h"
 #include "bolt/common/caching/ScanTracker.h"
 #include "bolt/common/caching/SsdCache.h"
@@ -62,6 +61,7 @@ struct CacheRequest {
   /// adjacent pieces.
   bool coalesces{true};
   const SeekableInputStream* FOLLY_NONNULL stream;
+  const SeekableInputStream* FOLLY_NULLABLE pairedStream{nullptr};
 };
 
 class CachedBufferedInput : public BufferedInput {
@@ -126,6 +126,10 @@ class CachedBufferedInput : public BufferedInput {
       bolt::common::Region region,
       const StreamIdentifier* FOLLY_NULLABLE si) override;
 
+  SeekableInputStreamPair enqueuePair(
+      bolt::common::Region region,
+      const StreamIdentifier* FOLLY_NULLABLE si) override;
+
   bool supportSyncLoad() const override {
     return false;
   }
@@ -173,9 +177,9 @@ class CachedBufferedInput : public BufferedInput {
   }
 
   // Returns the CoalescedLoad that contains the correlated loads for
-  // 'stream' or nullptr if none. Returns nullptr on all but first
-  // call for 'stream' since the load is to be triggered by the first
-  // access.
+  // 'stream' or nullptr if none. A stream can map to multiple loads when a
+  // large request is split. Returns nullptr after the first call for 'stream'
+  // since all mapped loads are triggered by the first access.
   std::shared_ptr<cache::CoalescedLoad> coalescedLoad(
       const SeekableInputStream* FOLLY_NONNULL stream);
 
@@ -234,7 +238,7 @@ class CachedBufferedInput : public BufferedInput {
   // Coalesced loads spanning multiple cache entries in one IO.
   folly::Synchronized<folly::F14FastMap<
       const SeekableInputStream*,
-      std::shared_ptr<cache::CoalescedLoad>>>
+      std::vector<std::shared_ptr<cache::CoalescedLoad>>>>
       coalescedLoads_;
 
   // Distinct coalesced loads in 'coalescedLoads_'.

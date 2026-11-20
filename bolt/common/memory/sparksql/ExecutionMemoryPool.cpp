@@ -557,6 +557,8 @@ bool ExecutionMemoryPool::triggerDynamicMemoryQuotaManager(
 void ExecutionMemoryPool::testingResetPoolSize(int64_t newSize) {
   MemoryMutexGuard guard(instance()->lock_);
   instance()->poolSize_ = newSize;
+  instance()->poolExtendSize_.reset();
+  instance()->memIncreaseSize_ = 0;
 }
 
 } // namespace bytedance::bolt::memory::sparksql

@@ -950,13 +950,74 @@ TEST_P(AggregationTest, hashmodes) {
       std::function<void(void*)>([&](void* newMode) {
         mode = *reinterpret_cast<BaseHashTable::HashMode*>(newMode);
       }));
-  assertQuery(
-      op,
-      "SELECT c0, c1, C2, C3, C4, C5, sum(1) FROM tmp "
-      " GROUP BY c0, c1, c2, c3, c4, c5");
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    mode = BaseHashTable::HashMode::kArray;
+    const auto task =
+        AssertQueryBuilder(op, duckDbQueryRunner_)
+            .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+            .assertResults(
+                "SELECT c0, c1, C2, C3, C4, C5, sum(1) FROM tmp "
+                " GROUP BY c0, c1, c2, c3, c4, c5");
+    if (!GetParam().useGPU) {
+      int32_t numAggregations = 0;
+      for (const auto& pipeline : task->taskStats().pipelineStats) {
+        for (const auto& operatorStats : pipeline.operatorStats) {
+          if (operatorStats.operatorType != "Aggregation") {
+            continue;
+          }
+          EXPECT_EQ(
+              operatorStats.runtimeStats.at("hashtable.hashModeHash").sum, 1);
+          EXPECT_EQ(
+              operatorStats.runtimeStats.count("hashtable.hashModeArray"), 0);
+          EXPECT_EQ(
+              operatorStats.runtimeStats.count(
+                  "hashtable.hashModeNormalizedKey"),
+              0);
+          ++numAggregations;
+        }
+      }
+      EXPECT_EQ(numAggregations, 1);
+    }
 #ifndef NDEBUG
-  EXPECT_EQ(mode, BaseHashTable::HashMode::kHash);
+    EXPECT_EQ(mode, BaseHashTable::HashMode::kHash);
 #endif
+  }
+}
+
+TEST_P(AggregationTest, simdHashPreservesStoredNullKeysAcrossBatches) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not use the SIMD hash table";
+  }
+
+  const auto targetBucket =
+      folly::hasher<int32_t>{}(std::numeric_limits<int32_t>::max()) & 2040;
+  std::vector<int32_t> collisionKeys;
+  for (int32_t key = 0; collisionKeys.size() < targetBucket; ++key) {
+    if ((folly::hasher<int32_t>{}(key)&2040) == 0) {
+      collisionKeys.push_back(key);
+    }
+  }
+
+  const auto regularKeys =
+      makeRowVector({makeFlatVector<int32_t>(collisionKeys)});
+  const auto nullKey =
+      makeRowVector({makeNullableFlatVector<int32_t>({std::nullopt})});
+  const auto maxKey = makeRowVector(
+      {makeFlatVector<int32_t>({std::numeric_limits<int32_t>::max()})});
+  createDuckDbTable({regularKeys, nullKey, maxKey});
+  const auto plan = PlanBuilder()
+                        .values({regularKeys, nullKey, maxKey})
+                        .singleAggregation({"c0"}, {"count(1)"})
+                        .planNode();
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    AssertQueryBuilder(plan, duckDbQueryRunner_)
+        .config(QueryConfig::kHashAdaptivityEnabled, false)
+        .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+        .maxDrivers(1)
+        .assertResults("SELECT c0, count(1) FROM tmp GROUP BY c0");
+  }
 }
 
 TEST_P(AggregationTest, rangeToDistinct) {
@@ -984,10 +1045,14 @@ TEST_P(AggregationTest, rangeToDistinct) {
                     GetParam().useGPU)
                 .planNode();
 
-  assertQuery(
-      op,
-      "SELECT c0, c1, c2, c3, c4, c5, sum(1) FROM tmp "
-      " GROUP BY c0, c1, c2, c3, c4, c5");
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    AssertQueryBuilder(op, duckDbQueryRunner_)
+        .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+        .assertResults(
+            "SELECT c0, c1, c2, c3, c4, c5, sum(1) FROM tmp "
+            " GROUP BY c0, c1, c2, c3, c4, c5");
+  }
 
   RowVectorPtr output = AssertQueryBuilder(op).copyResults(pool_.get());
 
@@ -2077,11 +2142,11 @@ TEST_P(AggregationTest, DISABLED_memoryAllocations) {
 
   task = assertQuery(plan, "SELECT c0, sum(c0 + c1) FROM tmp GROUP BY 1");
 
-  // Verify memory allocations. Aggregation should make 5 allocations: 1 for the
-  // hash table, 1 for the RowContainer holding accumulators, 3 for results (2
-  // for values and nulls buffers of the grouping key column, 1 for sum column).
+  // Verify memory allocations. Aggregation should make 4 allocations: 1 for the
+  // hash table, 1 for the RowContainer holding accumulators, 2 for results (1
+  // for values of the grouping key column, 1 for sum column).
   planStats = toPlanStats(task->taskStats());
-  ASSERT_EQ(5, planStats.at(aggNodeId).numMemoryAllocations);
+  ASSERT_EQ(4, planStats.at(aggNodeId).numMemoryAllocations);
 }
 
 TEST_P(AggregationTest, optimizedDistinctAggregationPath) {
@@ -2834,6 +2899,110 @@ TEST_P(AggregationTest, distinctWithSpilling) {
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 
+TEST_P(AggregationTest, thresholdSpillReleasesHashTable) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+
+  std::vector<RowVectorPtr> batches;
+  for (int32_t batch = 0; batch < 24; ++batch) {
+    batches.push_back(makeRowVector({
+        makeFlatVector<double>(
+            4'096,
+            [batch](auto row) {
+              return static_cast<double>(batch * 4'096 + row);
+            }),
+    }));
+  }
+  const auto plan =
+      PlanBuilder().values(batches).singleAggregation({"c0"}, {}).planNode();
+  const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(simdEnabled);
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::GroupingSet::addInputForActiveRows",
+        std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+          if (groupingSet->hasSpilled() && groupingSet->numRows() == 0) {
+            EXPECT_EQ(0, groupingSet->hashTableStats().capacity);
+            EXPECT_LT(groupingSet->testingPool().currentBytes(), 768 << 10);
+            EXPECT_EQ(0, groupingSet->testingPool().releasableReservation());
+          }
+        }));
+    auto spillDirectory = TempDirectoryPath::create();
+    auto task =
+        AssertQueryBuilder(plan)
+            .spillDirectory(spillDirectory->path)
+            .config(QueryConfig::kSpillEnabled, true)
+            .config(QueryConfig::kAggregationSpillEnabled, true)
+            .config(QueryConfig::kAggregationSpillMemoryThreshold, 768 << 10)
+            .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+            .assertResults(expected);
+    const auto spillCount = toPlanStats(task->taskStats())
+                                .at(plan->id())
+                                .customStats.at("spillRuns")
+                                .sum;
+    EXPECT_GT(spillCount, 0);
+    EXPECT_LT(spillCount, batches.size() / 2);
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
+}
+
+DEBUG_ONLY_TEST_P(AggregationTest, spillBypassReturnsToHashProbe) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  auto unique = makeRowVector({
+      makeFlatVector<std::string>(
+          1'000,
+          [](auto row) { return fmt::format("long_grouping_key_{}", row); },
+          [](auto row) { return row % 251 == 0; }),
+      makeFlatVector<double>(1'000, [](auto row) { return row; }),
+      makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
+  });
+  auto repeated = makeRowVector({
+      makeConstant<std::string>("long_grouping_key_0", 1'000),
+      makeConstant<double>(0, 1'000),
+      makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
+  });
+  const auto plan = PlanBuilder()
+                        .values({unique, repeated, unique, repeated})
+                        .singleAggregation({"c0", "c1"}, {"sum(c2) AS s"})
+                        .planNode();
+  auto expected = AssertQueryBuilder(plan).copyResults(pool());
+
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(simdEnabled);
+    int32_t numInputs = 0;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::GroupingSet::addInputForActiveRows",
+        std::function<void(GroupingSet*)>([&](GroupingSet* groupingSet) {
+          if (numInputs == 1 || numInputs == 2) {
+            EXPECT_EQ(
+                numInputs - 1,
+                groupingSet->getRuntimeStats().aggProbeBypassCount);
+            groupingSet->spill();
+            EXPECT_EQ(0, groupingSet->numRows());
+            EXPECT_EQ(0, groupingSet->hashTableStats().capacity);
+          } else if (numInputs == 3) {
+            EXPECT_EQ(1, groupingSet->getRuntimeStats().aggProbeBypassCount);
+            EXPECT_GT(groupingSet->hashTableStats().capacity, 0);
+          }
+          ++numInputs;
+        }));
+    auto spillDirectory = TempDirectoryPath::create();
+    auto task = AssertQueryBuilder(plan)
+                    .spillDirectory(spillDirectory->path)
+                    .config(QueryConfig::kSpillEnabled, true)
+                    .config(QueryConfig::kAggregationSpillEnabled, true)
+                    .config(QueryConfig::kRowBasedSpillMode, "compression")
+                    .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+                    .assertResults(expected);
+    EXPECT_EQ(4, numInputs);
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
+}
+
 TEST_P(AggregationTest, spillingForAggrsWithDistinct) {
   auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
@@ -3275,8 +3444,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringInputProcessing) {
       ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
       ASSERT_GT(reclaimerStats_.reclaimedBytes, 0);
       reclaimerStats_.reset();
-      // The hash table itself in the grouping set is not cleared so it still
-      // uses some memory.
+      // Spilling releases row storage and the lookup allocation.
       ASSERT_LT(op->pool()->currentBytes(), usedMemory);
     } else {
       BOLT_ASSERT_THROW(
@@ -3403,8 +3571,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
   ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
   ASSERT_GT(reclaimerStats_.reclaimedBytes, 0);
   reclaimerStats_.reset();
-  // The hash table itself in the grouping set is not cleared so it still
-  // uses some memory.
+  // Spilling releases row storage and the lookup allocation.
   ASSERT_LT(op->pool()->currentBytes(), usedMemory);
 
   driverWait.notify();

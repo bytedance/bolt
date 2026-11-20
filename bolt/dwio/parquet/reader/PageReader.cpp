@@ -32,6 +32,9 @@
 #include <lz4.h>
 #include <thrift/protocol/TCompactProtocol.h> // @manual
 #include <algorithm>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/time/Timer.h"
@@ -175,8 +178,8 @@ void copyRawDataPageV1RepDefs(
   auto offset = output.size();
   output.resize(offset + repDefs.size + kLenSize);
   BOLT_CHECK_GT(repDefs.size, 0);
-  *(reinterpret_cast<int32_t*>(output.data() + offset)) = numRepDefsInPage;
-  simd::memcpy(output.data() + offset + kLenSize, repDefs.data, repDefs.size);
+  folly::storeUnaligned<int32_t>(output.data() + offset, numRepDefsInPage);
+  std::memcpy(output.data() + offset + kLenSize, repDefs.data, repDefs.size);
 }
 
 void makeDataPageV1RepDefDecoders(
@@ -206,7 +209,173 @@ void makeDataPageV1RepDefDecoders(
         ::arrow::bit_util::NumRequiredBits(maxDefine));
   }
 }
+
+int32_t findTopLevelBoundary(
+    const int16_t* repetitionLevels,
+    int32_t numLevels,
+    int32_t topLevelRowsNeeded,
+    int32_t& topLevelRowsSeen) {
+  constexpr int32_t kBatch = xsimd::batch<int16_t>::size;
+  const auto zero = xsimd::broadcast<int16_t>(0);
+  int32_t i = 0;
+  for (; i + kBatch <= numLevels; i += kBatch) {
+    const auto levels = xsimd::load_unaligned(repetitionLevels + i);
+    auto mask = simd::toBitMask(levels == zero);
+    const auto topLevelRows = __builtin_popcount(mask);
+    const auto rowsBeforeBoundary = topLevelRowsNeeded - topLevelRowsSeen;
+    if (topLevelRows <= rowsBeforeBoundary) {
+      topLevelRowsSeen += topLevelRows;
+      continue;
+    }
+    for (int32_t row = 0; row < rowsBeforeBoundary; ++row) {
+      mask &= mask - 1;
+    }
+    topLevelRowsSeen = topLevelRowsNeeded;
+    return i + __builtin_ctz(mask);
+  }
+  for (; i < numLevels; ++i) {
+    if (repetitionLevels[i] == 0) {
+      if (topLevelRowsSeen == topLevelRowsNeeded) {
+        return i;
+      }
+      ++topLevelRowsSeen;
+    }
+  }
+  return numLevels;
+}
+
+int32_t countPresentLevels(
+    ::arrow::bit_util::BitReader& bitReader,
+    int32_t bitWidth,
+    int32_t numLevels,
+    int16_t presentLevel) {
+  constexpr int32_t kBatchSize = 64;
+  constexpr int32_t kSimdSize = xsimd::batch<int16_t>::size;
+  alignas(xsimd::default_arch::alignment()) int16_t levels[kBatchSize];
+  const auto present = xsimd::broadcast<int16_t>(presentLevel - 1);
+  int32_t count = 0;
+  while (numLevels > 0) {
+    const auto batchSize = std::min(numLevels, kBatchSize);
+    BOLT_CHECK_EQ(bitReader.GetBatch(bitWidth, levels, batchSize), batchSize);
+    int32_t i = 0;
+    for (; i + kSimdSize <= batchSize; i += kSimdSize) {
+      const auto values = xsimd::load_aligned(levels + i);
+      count += __builtin_popcount(simd::toBitMask(values > present));
+    }
+    for (; i < batchSize; ++i) {
+      count += levels[i] >= presentLevel ? 1 : 0;
+    }
+    numLevels -= batchSize;
+  }
+  return count;
+}
+
 } // namespace
+
+struct PageReader::StreamingRepDefState {
+  struct CachedDataPageV1 {
+    BufferPtr data;
+    uint64_t start;
+    int32_t compressedSize;
+    uint64_t retainedBytes;
+    bool containsDecompressedData;
+  };
+
+  struct Output {
+    LevelMode mode;
+    arrow::LevelInfo info;
+    arrow::ListLengthsState listState;
+    raw_vector<int32_t> lengths;
+    raw_vector<uint64_t> nulls;
+    int32_t size{0};
+    int32_t nullCount{0};
+
+    Output(
+        LevelMode outputMode,
+        const arrow::LevelInfo& levelInfo,
+        memory::MemoryPool* pool)
+        : mode(outputMode), info(levelInfo), lengths(pool), nulls(pool) {}
+
+    void reset() {
+      listState = {};
+      lengths.clear();
+      nulls.clear();
+      size = 0;
+      nullCount = 0;
+    }
+
+    void resizeLengths(int32_t capacity) {
+      lengths.resize(size + capacity);
+    }
+
+    arrow::ValidityBitmapInputOutput prepareValidity(int32_t capacity) {
+      const auto oldSize = nulls.size();
+      nulls.resize(bits::nwords(size + capacity));
+      if (nulls.size() > oldSize) {
+        std::memset(
+            nulls.data() + oldSize,
+            0,
+            (nulls.size() - oldSize) * sizeof(uint64_t));
+      }
+
+      arrow::ValidityBitmapInputOutput output;
+      output.values_read_upper_bound = capacity;
+      output.null_count = nullCount;
+      output.valid_bits = reinterpret_cast<uint8_t*>(nulls.data());
+      output.valid_bits_offset = size;
+      return output;
+    }
+
+    void commit(const arrow::ValidityBitmapInputOutput& output) {
+      size += output.values_read;
+      nullCount = output.null_count;
+    }
+
+    void finishLengths() {
+      lengths.resize(size);
+    }
+  };
+
+  explicit StreamingRepDefState(memory::MemoryPool* pool)
+      : definitionScratch(pool), repetitionScratch(pool) {}
+
+  void evictCachedDataPagesV1(uint64_t pageDataStart, bool includeCurrent) {
+    while (!cachedDataPagesV1.empty() &&
+           (cachedDataPagesV1.front().start < pageDataStart ||
+            (includeCurrent &&
+             cachedDataPagesV1.front().start == pageDataStart))) {
+      cachedDataPagesV1Bytes -= cachedDataPagesV1.front().retainedBytes;
+      cachedDataPagesV1.pop_front();
+    }
+  }
+
+  uint64_t pageStart{0};
+  uint64_t pageDataStart{0};
+  const char* FOLLY_NULLABLE bufferStart{nullptr};
+  const char* FOLLY_NULLABLE bufferEnd{nullptr};
+  BufferPtr pageBuffer;
+  BufferPtr decompressedData;
+  // V1 page bodies already materialized by the rep/def cursor and waiting for
+  // the value cursor. Account actual pool allocations against the existing
+  // per-column rep/def memory limit.
+  std::deque<CachedDataPageV1> cachedDataPagesV1;
+  uint64_t cachedDataPagesV1Bytes{0};
+  std::unique_ptr<::arrow::util::RleDecoder> repeatDecoder;
+  std::unique_ptr<::arrow::util::RleDecoder> defineDecoder;
+  raw_vector<int16_t> definitionScratch;
+  raw_vector<int16_t> repetitionScratch;
+  int32_t scratchBegin{0};
+  std::vector<Output> outputs;
+  int32_t levelsRemainingInPage{0};
+  int32_t bytesRemainingInPage{0};
+};
+
+void PageReader::StreamingRepDefStateDeleter::operator()(
+    StreamingRepDefState* state) const {
+  delete state;
+}
+
+PageReader::~PageReader() = default;
 
 void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
   defineDecoder_.reset();
@@ -243,7 +412,7 @@ void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
     // the exit of 'decodeRepDefs'.
     if (hasChunkRepDefs_ && !isTopLevel_ && maxRepeat_ > 0) {
       while (pageIndex_ + 1 >= static_cast<int32_t>(numLeavesInPage_.size()) &&
-             !preloadedRepDefs_.empty()) {
+             !usesStreamingRepDefs() && !preloadedRepDefs_.empty()) {
         loadMoreRepDefs();
       }
     }
@@ -458,13 +627,31 @@ void PageReader::setPageRowInfo(bool forRepDef) {
     numRowsInPage_ = numRepDefsInPage_;
   } else if (hasChunkRepDefs_) {
     ++pageIndex_;
+    if (usesStreamingRepDefs()) {
+      const auto relativePageIndex = pageIndex_ - numLeavesInPageBase_;
+      while (relativePageIndex >= numLeavesInPage_.size() &&
+             loadNextStreamingRepDefPage()) {
+      }
+    }
+    const auto relativePageIndex = pageIndex_ - numLeavesInPageBase_;
+    BOLT_CHECK_GE(
+        relativePageIndex,
+        0,
+        "Missing leaf count for already consumed non top level page {}",
+        pageIndex_);
     BOLT_CHECK_LT(
-        pageIndex_,
+        relativePageIndex,
         numLeavesInPage_.size(),
 
         "Seeking past known repdefs for non top level column page {}",
         pageIndex_);
-    numRowsInPage_ = numLeavesInPage_[pageIndex_];
+    numRowsInPage_ = numLeavesInPage_[relativePageIndex];
+    if (usesStreamingRepDefs() && relativePageIndex > 0) {
+      for (int32_t i = 0; i < relativePageIndex; ++i) {
+        numLeavesInPage_.pop_front();
+        ++numLeavesInPageBase_;
+      }
+    }
   } else {
     numRowsInPage_ = kRowsUnknown;
   }
@@ -472,14 +659,31 @@ void PageReader::setPageRowInfo(bool forRepDef) {
 
 void PageReader::readPageDefLevels() {
   BOLT_CHECK(kRowsUnknown == numRowsInPage_ || maxDefine_ > 1);
-  definitionLevels_.resize(numRepDefsInPage_);
   BOLT_CHECK_NOT_NULL(
       wideDefineDecoder_, "parquet read error with maxDefine = {}", maxDefine_);
-  wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
   leafNullsSize_ = 0;
   leafNullsAllValidPrefix_ = true;
   numLeafNullsConsumed_ = 0;
   erasedLeafNullWords_ = 0;
+  if (usesStreamingRepDefs()) {
+    definitionLevels_.resize(
+        std::min(numRepDefsInPage_, repDefStreamingWindowSize_));
+    int32_t decoded = 0;
+    while (decoded < numRepDefsInPage_) {
+      const auto batchSize =
+          std::min(numRepDefsInPage_ - decoded, repDefStreamingWindowSize_);
+      BOLT_CHECK_EQ(
+          wideDefineDecoder_->GetBatch(definitionLevels_.data(), batchSize),
+          batchSize);
+      leafNullsSize_ += appendLeafNulls(definitionLevels_.data(), batchSize);
+      decoded += batchSize;
+    }
+    numRowsInPage_ = leafNullsSize_;
+    return;
+  }
+
+  definitionLevels_.resize(numRepDefsInPage_);
+  wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
   numRowsInPage_ = appendLeafNullsFromLevels(0, numRepDefsInPage_);
   leafNullsSize_ = numRowsInPage_;
 }
@@ -502,8 +706,13 @@ void PageReader::prepareDataPageV1(
   ++pageOrdinal_;
   numRepDefsInPage_ = pageHeader.data_page_header.num_values;
   setPageRowInfo(row == kRepDefOnly);
+  int32_t compressedLen = pageHeader.compressed_page_size;
   if (row != kRepDefOnly && numRowsInPage_ != kRowsUnknown &&
       numRowsInPage_ + rowOfPage_ <= row) {
+    if (streamingRepDef_) {
+      auto& state = *streamingRepDef_;
+      state.evictCachedDataPagesV1(pageDataStart_, true);
+    }
     dwio::common::skipBytes(
         pageHeader.compressed_page_size,
         inputStream_.get(),
@@ -513,8 +722,37 @@ void PageReader::prepareDataPageV1(
     return;
   }
 
-  int32_t compressedLen = pageHeader.compressed_page_size;
-  pageData_ = readBytes(compressedLen, pageBuffer_);
+  BufferPtr cachedPage;
+  bool cachedPageIsDecompressed = false;
+  if (streamingRepDef_) {
+    BOLT_CHECK_NULL(cryptoCtx_.dataDecryptor);
+    auto& state = *streamingRepDef_;
+    state.evictCachedDataPagesV1(pageDataStart_, false);
+    if (!state.cachedDataPagesV1.empty() &&
+        state.cachedDataPagesV1.front().start == pageDataStart_) {
+      auto page = std::move(state.cachedDataPagesV1.front());
+      state.cachedDataPagesV1.pop_front();
+      state.cachedDataPagesV1Bytes -= page.retainedBytes;
+      BOLT_CHECK_EQ(page.compressedSize, compressedLen);
+      cachedPage = std::move(page.data);
+      cachedPageIsDecompressed = page.containsDecompressedData;
+    }
+  }
+  if (cachedPage) {
+    std::vector<uint64_t> positions{pageDataStart_ + compressedLen};
+    dwio::common::PositionProvider position(positions);
+    inputStream_->seekToPosition(position);
+    bufferStart_ = bufferEnd_ = nullptr;
+    if (cachedPageIsDecompressed) {
+      decompressedData_ = std::move(cachedPage);
+      pageData_ = decompressedData_->as<char>();
+    } else {
+      pageBuffer_ = std::move(cachedPage);
+      pageData_ = pageBuffer_->as<char>();
+    }
+  } else {
+    pageData_ = readBytes(compressedLen, pageBuffer_);
+  }
   if (cryptoCtx_.dataDecryptor != nullptr) {
     decryptPageData(compressedLen);
   }
@@ -523,8 +761,10 @@ void PageReader::prepareDataPageV1(
           pageHeader, compressedLen, keepRepDefRawData)) {
     return;
   }
-  pageData_ = decompressData(
-      pageData_, compressedLen, pageHeader.uncompressed_page_size);
+  if (!cachedPageIsDecompressed) {
+    pageData_ = decompressData(
+        pageData_, compressedLen, pageHeader.uncompressed_page_size);
+  }
   auto pageEnd = pageData_ + pageHeader.uncompressed_page_size;
 
   const auto repDefs = readDataPageV1RepDefs(
@@ -674,16 +914,15 @@ void PageReader::prepareDataPageV2(
     auto offset = refDefData.size();
     auto totalSize = offset + defineLength + repeatLength + 3 * kLenSize;
     refDefData.resize(totalSize);
-    *(reinterpret_cast<int32_t*>(refDefData.data() + offset)) =
-        numRepDefsInPage_;
-    *(reinterpret_cast<int32_t*>(refDefData.data() + offset + kLenSize)) =
-        repeatLength;
-    simd::memcpy(
+    folly::storeUnaligned<int32_t>(
+        refDefData.data() + offset, numRepDefsInPage_);
+    folly::storeUnaligned<int32_t>(
+        refDefData.data() + offset + kLenSize, repeatLength);
+    std::memcpy(
         refDefData.data() + offset + 2 * kLenSize, pageData_, repeatLength);
-    *(reinterpret_cast<int32_t*>(
-        refDefData.data() + offset + 2 * kLenSize + repeatLength)) =
-        defineLength;
-    simd::memcpy(
+    folly::storeUnaligned<int32_t>(
+        refDefData.data() + offset + 2 * kLenSize + repeatLength, defineLength);
+    std::memcpy(
         refDefData.data() + offset + 3 * kLenSize + repeatLength,
         pageData_ + repeatLength,
         defineLength);
@@ -708,6 +947,10 @@ void PageReader::prepareDataPageV2(
         defineLength,
         ::arrow::bit_util::NumRequiredBits(maxDefine_));
   }
+  if (row == kRepDefOnly) {
+    return;
+  }
+
   auto levelsSize = repeatLength + defineLength;
   pageData_ += levelsSize;
   if (pageHeader.data_page_header_v2.__isset.is_compressed ||
@@ -716,9 +959,6 @@ void PageReader::prepareDataPageV2(
         pageData_,
         pageHeader.compressed_page_size - levelsSize,
         pageHeader.uncompressed_page_size - levelsSize);
-  }
-  if (row == kRepDefOnly) {
-    return;
   }
 
   encodedDataSize_ = pageHeader.uncompressed_page_size - levelsSize;
@@ -1003,6 +1243,555 @@ int32_t parquetTypeBytes(thrift::Type::type type) {
 }
 } // namespace
 
+PageHeader PageReader::readStreamingPageHeader() {
+  auto& state = *streamingRepDef_;
+  if (state.bufferEnd == state.bufferStart) {
+    const void* buffer = nullptr;
+    int32_t size = 0;
+    BOLT_CHECK(
+        repDefInputStream_->Next(&buffer, &size),
+        "Reading past the end of the rep/def stream");
+    state.bufferStart = reinterpret_cast<const char*>(buffer);
+    state.bufferEnd = state.bufferStart + size;
+  }
+
+  auto transport = std::make_shared<thrift::ThriftStreamingTransport>(
+      repDefInputStream_.get(), state.bufferStart, state.bufferEnd);
+  apache::thrift::protocol::TCompactProtocolT<thrift::ThriftTransport> protocol(
+      transport);
+  PageHeader pageHeader;
+  const auto readBytes = pageHeader.read(&protocol);
+  state.pageDataStart = state.pageStart + readBytes;
+  return pageHeader;
+}
+
+const char* PageReader::readStreamingBytes(int32_t size, BufferPtr& copy) {
+  auto& state = *streamingRepDef_;
+  if (state.bufferEnd == state.bufferStart) {
+    const void* buffer = nullptr;
+    int32_t bufferSize = 0;
+    BOLT_CHECK(
+        repDefInputStream_->Next(&buffer, &bufferSize),
+        "Read past end of rep/def stream");
+    state.bufferStart = reinterpret_cast<const char*>(buffer);
+    state.bufferEnd = state.bufferStart + bufferSize;
+  }
+  if (state.bufferEnd - state.bufferStart >= size) {
+    state.bufferStart += size;
+    return state.bufferStart - size;
+  }
+  dwio::common::ensureCapacity<char>(copy, size, &pool_);
+  dwio::common::readBytes(
+      size,
+      repDefInputStream_.get(),
+      copy->asMutable<char>(),
+      state.bufferStart,
+      state.bufferEnd);
+  return copy->as<char>();
+}
+
+void PageReader::skipStreamingBytes(uint64_t size) {
+  if (size == 0) {
+    return;
+  }
+  auto& state = *streamingRepDef_;
+  const auto bufferedBytes = state.bufferStart == nullptr
+      ? 0
+      : static_cast<uint64_t>(state.bufferEnd - state.bufferStart);
+  if (bufferedBytes >= size) {
+    state.bufferStart += size;
+    return;
+  }
+
+  const auto bytesToSkip = size - bufferedBytes;
+  state.bufferStart = state.bufferEnd;
+  const auto beforeSkip = repDefInputStream_->ByteCount();
+  repDefInputStream_->SkipInt64(bytesToSkip);
+  BOLT_CHECK_EQ(
+      repDefInputStream_->ByteCount() - beforeSkip,
+      bytesToSkip,
+      "Reading past the end of the rep/def stream");
+}
+
+void PageReader::initializeStreamingOutputs() {
+  auto& state = *streamingRepDef_;
+  if (!state.outputs.empty()) {
+    return;
+  }
+
+  std::vector<std::pair<LevelMode, arrow::LevelInfo>> outputs;
+  bool hasRepeatedDescendant = false;
+  for (auto* node = type_.get(); node != nullptr;
+       node = node->parquetParent()) {
+    if (node->parquetParent() == nullptr) {
+      break;
+    }
+    const auto kind = node->type()->kind();
+    if (kind != TypeKind::ARRAY && kind != TypeKind::MAP &&
+        kind != TypeKind::ROW) {
+      continue;
+    }
+    if (kind == TypeKind::ARRAY || kind == TypeKind::MAP) {
+      hasRepeatedDescendant = true;
+    }
+    arrow::LevelInfo info;
+    auto mode = node->makeLevelInfo(info);
+    if (kind == TypeKind::ROW) {
+      mode = hasRepeatedDescendant ? LevelMode::kStructOverLists
+                                   : LevelMode::kNulls;
+    }
+    if (info.rep_level == 0 && info.def_level == 0) {
+      continue;
+    }
+    const auto duplicate =
+        std::find_if(outputs.begin(), outputs.end(), [&](const auto& output) {
+          return output.first == mode && output.second == info;
+        });
+    if (duplicate == outputs.end()) {
+      outputs.emplace_back(mode, info);
+    }
+  }
+  std::reverse(outputs.begin(), outputs.end());
+  for (const auto& [mode, info] : outputs) {
+    state.outputs.emplace_back(mode, info, &pool_);
+  }
+}
+
+void PageReader::resetStreamingOutputs() {
+  auto& state = *streamingRepDef_;
+  for (auto& output : state.outputs) {
+    output.reset();
+  }
+}
+
+void PageReader::appendStreamingLevels(
+    const int16_t* definitionLevels,
+    const int16_t* repetitionLevels,
+    int32_t numLevels) {
+  auto& state = *streamingRepDef_;
+  for (int32_t outputIndex = 0; outputIndex < state.outputs.size();
+       ++outputIndex) {
+    auto& output = state.outputs[outputIndex];
+    if (output.mode != LevelMode::kList &&
+        outputIndex + 1 < state.outputs.size()) {
+      auto& listOutput = state.outputs[outputIndex + 1];
+      if (listOutput.mode == LevelMode::kList) {
+        const auto maxNewValues = numLevels + 1;
+        listOutput.resizeLengths(maxNewValues);
+        auto listBits = listOutput.prepareValidity(maxNewValues);
+        auto structBits = output.prepareValidity(maxNewValues);
+        if (arrow::DefRepLevelsToListLengthsAndStructBitmap(
+                definitionLevels,
+                repetitionLevels,
+                numLevels,
+                listOutput.info,
+                output.info,
+                &listBits,
+                listOutput.lengths.data() + listOutput.size,
+                &structBits,
+                &listOutput.listState,
+                false)) {
+          BOLT_CHECK_EQ(listBits.values_read, structBits.values_read);
+          listOutput.commit(listBits);
+          listOutput.finishLengths();
+          output.commit(structBits);
+          ++outputIndex;
+          continue;
+        }
+      }
+    }
+
+    if (output.mode == LevelMode::kList) {
+      const auto maxNewValues = numLevels + 1;
+      output.resizeLengths(maxNewValues);
+      auto bits = output.prepareValidity(maxNewValues);
+      arrow::DefRepLevelsToListLengths(
+          definitionLevels,
+          repetitionLevels,
+          numLevels,
+          output.info,
+          &bits,
+          output.lengths.data() + output.size,
+          &output.listState,
+          false);
+      output.commit(bits);
+      output.finishLengths();
+      continue;
+    }
+
+    auto bits = output.prepareValidity(numLevels);
+    if (output.mode == LevelMode::kNulls) {
+      DefLevelsToBitmap(definitionLevels, numLevels, output.info, &bits);
+    } else {
+      DefRepLevelsToBitmap(
+          definitionLevels, repetitionLevels, numLevels, output.info, &bits);
+    }
+    output.commit(bits);
+  }
+}
+
+void PageReader::finishStreamingOutputs() {
+  auto& outputs = streamingRepDef_->outputs;
+  for (int32_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
+    auto& output = outputs[outputIndex];
+    if (output.mode != LevelMode::kList && outputIndex + 1 < outputs.size()) {
+      auto& listOutput = outputs[outputIndex + 1];
+      if (listOutput.mode == LevelMode::kList &&
+          listOutput.listState.has_open_list) {
+        listOutput.resizeLengths(1);
+        arrow::ValidityBitmapInputOutput listBits;
+        listBits.values_read_upper_bound = 1;
+        listBits.null_count = listOutput.nullCount;
+        arrow::ValidityBitmapInputOutput structBits;
+        structBits.values_read_upper_bound = 1;
+        structBits.null_count = output.nullCount;
+        if (arrow::DefRepLevelsToListLengthsAndStructBitmap(
+                nullptr,
+                nullptr,
+                0,
+                listOutput.info,
+                output.info,
+                &listBits,
+                listOutput.lengths.data() + listOutput.size,
+                &structBits,
+                &listOutput.listState,
+                true)) {
+          BOLT_CHECK_EQ(listBits.values_read, structBits.values_read);
+          listOutput.commit(listBits);
+          listOutput.finishLengths();
+          output.commit(structBits);
+          ++outputIndex;
+          continue;
+        }
+      }
+    }
+
+    if (output.mode == LevelMode::kList && output.listState.has_open_list) {
+      output.resizeLengths(1);
+      arrow::ValidityBitmapInputOutput bits;
+      bits.values_read_upper_bound = 1;
+      bits.null_count = output.nullCount;
+      arrow::DefRepLevelsToListLengths(
+          nullptr,
+          nullptr,
+          0,
+          output.info,
+          &bits,
+          output.lengths.data() + output.size,
+          &output.listState,
+          true);
+      output.commit(bits);
+      output.finishLengths();
+    }
+  }
+}
+
+int32_t PageReader::streamingOutputIndex(
+    LevelMode mode,
+    const arrow::LevelInfo& info) const {
+  BOLT_CHECK_NOT_NULL(streamingRepDef_);
+  for (int32_t i = 0; i < streamingRepDef_->outputs.size(); ++i) {
+    const auto& output = streamingRepDef_->outputs[i];
+    if (output.mode == mode && output.info == info) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int32_t PageReader::repDefOutputSize(
+    LevelMode mode,
+    const arrow::LevelInfo& info) const {
+  if (!usesStreamingRepDefs()) {
+    return repDefEnd_ - repDefBegin_;
+  }
+  const auto index = streamingOutputIndex(mode, info);
+  BOLT_CHECK_GE(
+      index,
+      0,
+      "No streaming rep/def output for mode {}, def {}, rep {}, ancestor def {}",
+      static_cast<int32_t>(mode),
+      info.def_level,
+      info.rep_level,
+      info.repeated_ancestor_def_level);
+  return streamingRepDef_->outputs[index].size;
+}
+
+bool PageReader::loadNextStreamingRepDefPage() {
+  auto& state = *streamingRepDef_;
+  BOLT_CHECK_EQ(
+      state.levelsRemainingInPage,
+      0,
+      "Cannot advance rep/def page with {} levels remaining",
+      state.levelsRemainingInPage);
+  state.repeatDecoder.reset();
+  state.defineDecoder.reset();
+  if (state.bytesRemainingInPage > 0) {
+    skipStreamingBytes(state.bytesRemainingInPage);
+    state.bytesRemainingInPage = 0;
+  }
+  state.pageBuffer.reset();
+  state.decompressedData.reset();
+  while (state.pageStart < chunkSize_) {
+    auto pageHeader = readStreamingPageHeader();
+    BOLT_CHECK_GE(pageHeader.compressed_page_size, 0);
+    BOLT_CHECK_GE(pageHeader.uncompressed_page_size, 0);
+    BOLT_CHECK_LE(state.pageDataStart, static_cast<uint64_t>(chunkSize_));
+    BOLT_CHECK_LE(
+        static_cast<uint64_t>(pageHeader.compressed_page_size),
+        static_cast<uint64_t>(chunkSize_) - state.pageDataStart,
+        "Page body extends past the end of the rep/def stream");
+    state.pageStart = state.pageDataStart + pageHeader.compressed_page_size;
+
+    if (pageHeader.type == thrift::PageType::DICTIONARY_PAGE ||
+        (pageHeader.type != thrift::PageType::DATA_PAGE &&
+         pageHeader.type != thrift::PageType::DATA_PAGE_V2)) {
+      skipStreamingBytes(pageHeader.compressed_page_size);
+      continue;
+    }
+
+    const auto isDataPageV1 = pageHeader.type == thrift::PageType::DATA_PAGE;
+    if (isDataPageV1) {
+      BOLT_CHECK(pageHeader.__isset.data_page_header);
+    } else {
+      BOLT_CHECK(pageHeader.__isset.data_page_header_v2);
+    }
+    const auto numValues = isDataPageV1
+        ? pageHeader.data_page_header.num_values
+        : pageHeader.data_page_header_v2.num_values;
+    BOLT_CHECK_GE(numValues, 0);
+    state.levelsRemainingInPage = numValues;
+    if (numValues == 0) {
+      skipStreamingBytes(pageHeader.compressed_page_size);
+      numLeavesInPage_.push_back(0);
+      continue;
+    }
+
+    const char* repDefData = nullptr;
+    const char* definitionData = nullptr;
+    uint32_t repeatLength = 0;
+    uint32_t defineLength = 0;
+    if (isDataPageV1) {
+      const auto compressedData =
+          readStreamingBytes(pageHeader.compressed_page_size, state.pageBuffer);
+      DataPageV1RepDefs repDefPrefix;
+      const auto uncompressedSize =
+          static_cast<uint32_t>(pageHeader.uncompressed_page_size);
+      bool hasFullyDecompressedPage =
+          codec_ == thrift::CompressionCodec::UNCOMPRESSED;
+      if (codec_ == thrift::CompressionCodec::UNCOMPRESSED) {
+        if (hasDataPageV1RepDefPrefix(
+                compressedData,
+                pageHeader.compressed_page_size,
+                uncompressedSize,
+                maxRepeat_,
+                maxDefine_,
+                repDefPrefix)) {
+          repDefData = compressedData;
+        }
+      } else if (codec_ == thrift::CompressionCodec::ZSTD) {
+        const auto startNs =
+            FOLLY_LIKELY(statis_ != nullptr) ? getCurrentTimeNano() : 0;
+        if (tryDecompressZstdPrefix(
+                compressedData,
+                state.decompressedData,
+                pageHeader.compressed_page_size,
+                uncompressedSize,
+                kRepDefPrefixOutputQuantum,
+                pool_,
+                [&](const char* data, uint32_t availableSize) {
+                  return hasDataPageV1RepDefPrefix(
+                      data,
+                      availableSize,
+                      uncompressedSize,
+                      maxRepeat_,
+                      maxDefine_,
+                      repDefPrefix);
+                },
+                repDefData) &&
+            FOLLY_LIKELY(statis_ != nullptr)) {
+          statis_->decompressDataTimeNs += getCurrentTimeNano() - startNs;
+        }
+      }
+      if (repDefData == nullptr) {
+        dwio::common::ensureCapacity<char>(
+            state.decompressedData, pageHeader.uncompressed_page_size, &pool_);
+        if (codec_ == thrift::CompressionCodec::LZ4 ||
+            codec_ == thrift::CompressionCodec::LZO) {
+          repDefData = decompressLz4AndLzo(
+              compressedData,
+              state.decompressedData,
+              pageHeader.compressed_page_size,
+              pageHeader.uncompressed_page_size,
+              pool_,
+              codec_);
+        } else if (codec_ == thrift::CompressionCodec::ZSTD) {
+          repDefData = bdZstdDecompression(
+              compressedData,
+              state.decompressedData,
+              pageHeader.compressed_page_size,
+              pageHeader.uncompressed_page_size,
+              pool_,
+              codec_);
+        } else {
+          repDefData = bdCodecDecompression(
+              compressedData,
+              state.decompressedData,
+              pageHeader.compressed_page_size,
+              pageHeader.uncompressed_page_size,
+              pool_,
+              codec_);
+        }
+        hasFullyDecompressedPage = true;
+      }
+      BufferPtr cachedPage;
+      if (hasFullyDecompressedPage && state.decompressedData) {
+        cachedPage = state.decompressedData;
+      } else {
+        cachedPage = state.pageBuffer;
+      }
+      if (cachedPage) {
+        const auto pageBytes = pool_.preferredSize(
+            cachedPage->capacity() + AlignedBuffer::kPaddedSize);
+        const auto cacheLimit =
+            static_cast<uint64_t>(std::max(repDefMemoryLimit_, 0));
+        if (pageBytes <= cacheLimit &&
+            state.cachedDataPagesV1Bytes <= cacheLimit - pageBytes) {
+          state.cachedDataPagesV1.push_back(
+              {std::move(cachedPage),
+               state.pageDataStart,
+               pageHeader.compressed_page_size,
+               pageBytes,
+               hasFullyDecompressedPage});
+          state.cachedDataPagesV1Bytes += pageBytes;
+        }
+      }
+      if (hasFullyDecompressedPage && state.decompressedData) {
+        state.pageBuffer.reset();
+      }
+      const auto repDefs = readDataPageV1RepDefs(
+          repDefData, uncompressedSize, maxRepeat_, maxDefine_);
+      repeatLength = repDefs.repeatSize;
+      state.repeatDecoder = std::make_unique<::arrow::util::RleDecoder>(
+          reinterpret_cast<const uint8_t*>(repDefs.repeatData),
+          repeatLength,
+          ::arrow::bit_util::NumRequiredBits(maxRepeat_));
+      defineLength = repDefs.defineSize;
+      definitionData = repDefs.defineData;
+      state.defineDecoder = std::make_unique<::arrow::util::RleDecoder>(
+          reinterpret_cast<const uint8_t*>(definitionData),
+          defineLength,
+          ::arrow::bit_util::NumRequiredBits(maxDefine_));
+    } else {
+      BOLT_CHECK_GE(
+          pageHeader.data_page_header_v2.repetition_levels_byte_length, 0);
+      BOLT_CHECK_GE(
+          pageHeader.data_page_header_v2.definition_levels_byte_length, 0);
+      repeatLength =
+          pageHeader.data_page_header_v2.repetition_levels_byte_length;
+      defineLength =
+          pageHeader.data_page_header_v2.definition_levels_byte_length;
+      const auto levelsSize = static_cast<int64_t>(repeatLength) + defineLength;
+      BOLT_CHECK_LE(levelsSize, pageHeader.compressed_page_size);
+      BOLT_CHECK_LE(levelsSize, pageHeader.uncompressed_page_size);
+      repDefData = readStreamingBytes(
+          static_cast<int32_t>(levelsSize), state.pageBuffer);
+      state.bytesRemainingInPage = pageHeader.compressed_page_size - levelsSize;
+      state.repeatDecoder = std::make_unique<::arrow::util::RleDecoder>(
+          reinterpret_cast<const uint8_t*>(repDefData),
+          repeatLength,
+          ::arrow::bit_util::NumRequiredBits(maxRepeat_));
+      definitionData = repDefData + repeatLength;
+      state.defineDecoder = std::make_unique<::arrow::util::RleDecoder>(
+          reinterpret_cast<const uint8_t*>(definitionData),
+          defineLength,
+          ::arrow::bit_util::NumRequiredBits(maxDefine_));
+    }
+
+    BOLT_CHECK_GT(state.levelsRemainingInPage, 0);
+    BOLT_CHECK_GT(repeatLength, 0);
+    BOLT_CHECK_GT(defineLength, 0);
+    numLeavesInPage_.push_back(countLeavesInDefinitionLevels(
+        reinterpret_cast<const uint8_t*>(definitionData),
+        defineLength,
+        state.levelsRemainingInPage));
+    return true;
+  }
+
+  state.pageBuffer.reset();
+  state.decompressedData.reset();
+  return false;
+}
+
+bool PageReader::consumeStreamingRepDefScratch(
+    int32_t topLevelRowsNeeded,
+    int32_t& topLevelRowsSeen) {
+  auto& state = *streamingRepDef_;
+  BOLT_CHECK_EQ(state.definitionScratch.size(), state.repetitionScratch.size());
+  BOLT_CHECK_LT(state.scratchBegin, state.repetitionScratch.size());
+  const auto scratchSize = state.repetitionScratch.size() - state.scratchBegin;
+  const auto* definitions = state.definitionScratch.data() + state.scratchBegin;
+  const auto* repetitions = state.repetitionScratch.data() + state.scratchBegin;
+  const auto boundary = findTopLevelBoundary(
+      repetitions, scratchSize, topLevelRowsNeeded, topLevelRowsSeen);
+  if (boundary > 0) {
+    leafNullsSize_ += appendLeafNulls(definitions, boundary);
+    appendStreamingLevels(definitions, repetitions, boundary);
+  }
+  state.scratchBegin += boundary;
+  if (boundary < scratchSize) {
+    return true;
+  }
+  state.definitionScratch.clear();
+  state.repetitionScratch.clear();
+  state.scratchBegin = 0;
+  return false;
+}
+
+void PageReader::decodeStreamingRepDefs(int32_t numTopLevelRows) {
+  hasChunkRepDefs_ = true;
+  if (!streamingRepDef_) {
+    streamingRepDef_.reset(new StreamingRepDefState(&pool_));
+  }
+  compactConsumedLeafNulls();
+
+  auto& state = *streamingRepDef_;
+  initializeStreamingOutputs();
+  resetStreamingOutputs();
+  int32_t topLevelRowsSeen = 0;
+  bool batchComplete = false;
+
+  if (!state.repetitionScratch.empty()) {
+    batchComplete =
+        consumeStreamingRepDefScratch(numTopLevelRows, topLevelRowsSeen);
+  }
+
+  while (!batchComplete) {
+    if (state.levelsRemainingInPage == 0 && !loadNextStreamingRepDefPage()) {
+      break;
+    }
+    const auto windowSize =
+        std::min(state.levelsRemainingInPage, repDefStreamingWindowSize_);
+    state.definitionScratch.resize(windowSize);
+    state.repetitionScratch.resize(windowSize);
+    state.scratchBegin = 0;
+    BOLT_CHECK_EQ(
+        state.defineDecoder->GetBatch(
+            state.definitionScratch.data(), windowSize),
+        windowSize);
+    BOLT_CHECK_EQ(
+        state.repeatDecoder->GetBatch(
+            state.repetitionScratch.data(), windowSize),
+        windowSize);
+    state.levelsRemainingInPage -= windowSize;
+    batchComplete =
+        consumeStreamingRepDefScratch(numTopLevelRows, topLevelRowsSeen);
+  }
+  finishStreamingOutputs();
+  repDefBegin_ = 0;
+  repDefEnd_ = 0;
+}
+
 void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
   seekToPage(kRepDefOnly, keepRepDefRawData);
   if (!keepRepDefRawData) {
@@ -1098,47 +1887,150 @@ void PageReader::preloadRepDefs() {
   cryptoCtx_.startDecryptWithDictionaryPage = startWithDictinoaryPage;
 }
 
+int32_t PageReader::countLeavesInDefinitionLevels(
+    const uint8_t* definitionLevels,
+    int32_t definitionLevelsSize,
+    int32_t numLevels) const {
+  if (leafInfo_.rep_level == 0) {
+    return numLevels;
+  }
+  auto bitReader =
+      ::arrow::bit_util::BitReader(definitionLevels, definitionLevelsSize);
+  const auto bitWidth = ::arrow::bit_util::NumRequiredBits(maxDefine_);
+  const auto presentLevel = leafInfo_.repeated_ancestor_def_level;
+  int32_t remaining = numLevels;
+  int32_t numLeaves = 0;
+  while (remaining > 0) {
+    uint32_t indicator = 0;
+    BOLT_CHECK(bitReader.GetVlqInt(&indicator), "Invalid definition RLE run");
+    const bool isLiteral = indicator & 1;
+    const uint32_t count = indicator >> 1;
+
+    if (isLiteral) {
+      BOLT_CHECK_GT(count, 0);
+      BOLT_CHECK_LE(count, static_cast<uint32_t>(INT32_MAX) / 8);
+      const auto literalCount =
+          std::min<int32_t>(remaining, static_cast<int32_t>(count * 8));
+      numLeaves +=
+          countPresentLevels(bitReader, bitWidth, literalCount, presentLevel);
+      remaining -= literalCount;
+    } else {
+      BOLT_CHECK_GT(count, 0);
+      BOLT_CHECK_LE(count, static_cast<uint32_t>(INT32_MAX));
+      uint64_t value = 0;
+      BOLT_CHECK(
+          bitReader.GetAligned(
+              static_cast<int>(::arrow::bit_util::CeilDiv(bitWidth, 8)),
+              &value),
+          "Invalid definition repeated run");
+      const auto repeatCount =
+          std::min<int32_t>(remaining, static_cast<int32_t>(count));
+      if (value >= presentLevel) {
+        numLeaves += repeatCount;
+      }
+      remaining -= repeatCount;
+    }
+  }
+  return numLeaves;
+}
+
+void PageReader::compactConsumedLeafNulls() {
+  constexpr int32_t WordBits = 64;
+  const int64_t erasedBits = erasedLeafNullWords_ * WordBits;
+  BOLT_CHECK_LE(numLeafNullsConsumed_, leafNullsSize_ + erasedBits);
+  const auto relativeConsumed = numLeafNullsConsumed_ - erasedBits;
+  if (relativeConsumed <= WordBits) {
+    return;
+  }
+
+  const auto consumedWords = bits::nwords(relativeConsumed) - 1;
+  const auto consumedBits = static_cast<int64_t>(consumedWords) * WordBits;
+  BOLT_CHECK_LE(consumedBits, leafNullsSize_);
+
+  if (!leafNullsAllValidPrefix_) {
+    const auto totalNullWords = bits::nwords(leafNullsSize_);
+    const auto unConsumedNullWords = totalNullWords - consumedWords;
+    if (unConsumedNullWords > 0) {
+      uint64_t* rawData = leafNulls_.data();
+      size_t copyBytes = unConsumedNullWords * sizeof(uint64_t);
+
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GLIBC__) && \
+    (__GLIBC__ * 100 + __GLIBC_MINOR__ < 233)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wrestrict"
+#endif
+      if (unConsumedNullWords < consumedWords) {
+        memcpy(rawData, rawData + consumedWords, copyBytes);
+      } else {
+        raw_vector<uint64_t> tmpBuffer;
+        tmpBuffer.resize(unConsumedNullWords);
+        uint64_t* tmpDest = tmpBuffer.data();
+        memcpy(tmpDest, rawData + consumedWords, copyBytes);
+        memcpy(rawData, tmpDest, copyBytes);
+      }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#else
+      memmove(rawData, rawData + consumedWords, copyBytes);
+#endif
+    }
+    leafNulls_.resize(unConsumedNullWords);
+  }
+
+  leafNullsSize_ -= consumedBits;
+  erasedLeafNullWords_ += consumedWords;
+  BOLT_CHECK(
+      leafNullsAllValidPrefix_ ||
+      leafNulls_.size() == bits::nwords(leafNullsSize_));
+}
+
 void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
-  if (definitionLevels_.empty() && maxDefine_ > 0) {
+  if (usesStreamingRepDefs()) {
+    decodeStreamingRepDefs(numTopLevelRows);
+    return;
+  }
+  if (!hasChunkRepDefs_ && maxDefine_ > 0) {
     preloadRepDefs();
   }
   repDefBegin_ = repDefEnd_;
   int32_t numLevels = definitionLevels_.size();
-  int32_t topFound = 0;
-  int32_t i = repDefBegin_;
-
-  auto foundTopLevel = [&]() {
-    for (; i < numLevels; ++i) {
-      if (repetitionLevels_[i] == 0) {
-        ++topFound;
-        if (topFound == numTopLevelRows + 1) {
-          break;
-        }
-      }
-    }
-    repDefEnd_ = i;
-  };
-
+  int32_t topLevelRowsSeen = 0;
+  bool boundaryFound = false;
   if (maxRepeat_ > 0) {
-    foundTopLevel();
-  } else {
-    repDefEnd_ = i + numTopLevelRows;
-  }
-  if (maxRepeat_ > 0 && maxDefine_ > 0) {
-    // definitionLevels_ has been consumed, decode more if any
-    while (repDefEnd_ == numLevels && topFound < numTopLevelRows + 1 &&
-           !preloadedRepDefs_.empty()) {
+    auto findBoundary = [&]() {
+      const auto numRemainingLevels = numLevels - repDefEnd_;
+      const auto boundary = findTopLevelBoundary(
+          repetitionLevels_.data() + repDefEnd_,
+          numRemainingLevels,
+          numTopLevelRows,
+          topLevelRowsSeen);
+      repDefEnd_ += boundary;
+      boundaryFound = boundary < numRemainingLevels;
+    };
+    findBoundary();
+    while (!boundaryFound && !preloadedRepDefs_.empty()) {
       loadMoreRepDefs();
       numLevels = definitionLevels_.size();
-      i = repDefEnd_;
-      foundTopLevel();
-      BOLT_CHECK(topFound == numTopLevelRows + 1 || repDefEnd_ == numLevels);
+      findBoundary();
+      BOLT_CHECK(boundaryFound || repDefEnd_ == numLevels);
     }
+  } else {
+    repDefEnd_ = repDefBegin_ + numTopLevelRows;
+  }
+  if (maxRepeat_ > 0 && maxDefine_ > 0) {
     // after topFound done, left decoded rep/def is less than 1 page, decode
     // more
     if (!numLeavesInPage_.empty() &&
-        numLevels - repDefEnd_ < numLeavesInPage_.back() &&
-        topFound == numTopLevelRows + 1 && !preloadedRepDefs_.empty()) {
+        numLevels - repDefEnd_ < numLeavesInPage_.back() && boundaryFound &&
+        !preloadedRepDefs_.empty()) {
       loadMoreRepDefs();
     }
   }
@@ -1286,34 +2178,33 @@ void PageReader::decodeRepDefsFromBuffer() {
 }
 
 int32_t PageReader::appendLeafNullsFromLevels(int32_t begin, int32_t end) {
+  return appendLeafNulls(definitionLevels_.data() + begin, end - begin);
+}
+
+int32_t PageReader::appendLeafNulls(
+    const int16_t* definitionLevels,
+    int32_t numLevels) {
   int64_t valuesRead = 0;
   if (leafNullsAllValidPrefix_ &&
       arrow::DefLevelsAreAllValid(
-          definitionLevels_.data() + begin,
-          end - begin,
-          leafInfo_,
-          end - begin,
-          &valuesRead)) {
+          definitionLevels, numLevels, leafInfo_, numLevels, &valuesRead)) {
     return static_cast<int32_t>(valuesRead);
   }
 
   const auto startOffset = leafNullsSize_;
-  leafNulls_.resize(bits::nwords(startOffset + end - begin));
+  leafNulls_.resize(bits::nwords(startOffset + numLevels));
   if (leafNullsAllValidPrefix_) {
     if (startOffset > 0) {
       bits::fillBits(leafNulls_.data(), 0, startOffset, bits::kNotNull);
     }
     leafNullsAllValidPrefix_ = false;
   }
-  return getLengthsAndNulls(
-      LevelMode::kNulls,
-      leafInfo_,
-      begin,
-      end,
-      end - begin,
-      nullptr,
-      leafNulls_.data(),
-      startOffset);
+  arrow::ValidityBitmapInputOutput bits;
+  bits.values_read_upper_bound = numLevels;
+  bits.valid_bits = reinterpret_cast<uint8_t*>(leafNulls_.data());
+  bits.valid_bits_offset = startOffset;
+  DefLevelsToBitmap(definitionLevels, numLevels, leafInfo_, &bits);
+  return static_cast<int32_t>(bits.values_read);
 }
 
 int32_t PageReader::getLengthsAndNulls(
@@ -1325,6 +2216,35 @@ int32_t PageReader::getLengthsAndNulls(
     int32_t* lengths,
     uint64_t* nulls,
     int64_t nullsStartIndex) const {
+  if (usesStreamingRepDefs()) {
+    const auto index = streamingOutputIndex(mode, info);
+    BOLT_CHECK_GE(
+        index,
+        0,
+        "No streaming rep/def output for mode {}, def {}, rep {}, ancestor def "
+        "{}",
+        static_cast<int32_t>(mode),
+        info.def_level,
+        info.rep_level,
+        info.repeated_ancestor_def_level);
+    const auto& output = streamingRepDef_->outputs[index];
+    BOLT_CHECK_GE(maxItems, output.size);
+    if (lengths != nullptr) {
+      BOLT_CHECK_EQ(
+          static_cast<int32_t>(mode), static_cast<int32_t>(LevelMode::kList));
+      BOLT_CHECK_EQ(output.lengths.size(), output.size);
+      memcpy(
+          lengths,
+          output.lengths.data(),
+          output.size * sizeof(output.lengths[0]));
+    }
+    if (nulls != nullptr) {
+      bits::copyBits(
+          output.nulls.data(), 0, nulls, nullsStartIndex, output.size);
+    }
+    return output.size;
+  }
+
   arrow::ValidityBitmapInputOutput bits;
   bits.values_read_upper_bound = maxItems;
   bits.values_read = 0;
@@ -1373,6 +2293,55 @@ bool PageReader::getListLengthsAndStructNulls(
     arrow::ValidityBitmapInputOutput* listBits,
     int32_t* lengths,
     arrow::ValidityBitmapInputOutput* structBits) const {
+  if (usesStreamingRepDefs()) {
+    const auto listIndex = streamingOutputIndex(LevelMode::kList, listInfo);
+    BOLT_CHECK_GE(
+        listIndex,
+        0,
+        "No streaming list output for def {}, rep {}, ancestor def {}",
+        listInfo.def_level,
+        listInfo.rep_level,
+        listInfo.repeated_ancestor_def_level);
+    const auto& listOutput = streamingRepDef_->outputs[listIndex];
+    auto structIndex =
+        streamingOutputIndex(LevelMode::kStructOverLists, structInfo);
+    if (structIndex < 0) {
+      structIndex = streamingOutputIndex(LevelMode::kNulls, structInfo);
+    }
+    BOLT_CHECK_GE(
+        structIndex,
+        0,
+        "No streaming struct output for def {}, rep {}, ancestor def {}",
+        structInfo.def_level,
+        structInfo.rep_level,
+        structInfo.repeated_ancestor_def_level);
+    const auto& structOutput = streamingRepDef_->outputs[structIndex];
+    BOLT_CHECK_EQ(listOutput.size, structOutput.size);
+    BOLT_CHECK_GE(listBits->values_read_upper_bound, listOutput.size);
+    BOLT_CHECK_GE(structBits->values_read_upper_bound, structOutput.size);
+    memcpy(
+        lengths,
+        listOutput.lengths.data(),
+        listOutput.size * sizeof(listOutput.lengths[0]));
+    bits::copyBits(
+        listOutput.nulls.data(),
+        0,
+        reinterpret_cast<uint64_t*>(listBits->valid_bits),
+        listBits->valid_bits_offset,
+        listOutput.size);
+    bits::copyBits(
+        structOutput.nulls.data(),
+        0,
+        reinterpret_cast<uint64_t*>(structBits->valid_bits),
+        structBits->valid_bits_offset,
+        structOutput.size);
+    listBits->values_read = listOutput.size;
+    listBits->null_count = listOutput.nullCount;
+    structBits->values_read = structOutput.size;
+    structBits->null_count = structOutput.nullCount;
+    return true;
+  }
+
   return arrow::DefRepLevelsToListLengthsAndStructBitmap(
       definitionLevels_.data() + begin,
       repetitionLevels_.data() + begin,
@@ -1456,8 +2425,15 @@ void PageReader::skip(int64_t numRows) {
     return;
   }
   auto toSkip = numRows;
-  if (firstUnvisited_ + numRows >= rowOfPage_ + numRowsInPage_) {
-    seekToPage(firstUnvisited_ + numRows);
+  const auto pageEnd = rowOfPage_ + numRowsInPage_;
+  const auto target = firstUnvisited_ + numRows;
+  // Rep/def levels after the last leaf can still describe empty or null
+  // parents. Leave a streaming reader at the exact page end so the next
+  // rep/def batch can consume these levels before advancing the data page.
+  const bool keepStreamingPage =
+      usesStreamingRepDefs() && numRows > 0 && target == pageEnd;
+  if (!keepStreamingPage && target >= pageEnd) {
+    seekToPage(target);
     if (hasChunkRepDefs_) {
       BOLT_CHECK_GE(rowOfPage_, 0);
       numLeafNullsConsumed_ = rowOfPage_;
@@ -1501,7 +2477,9 @@ int32_t PageReader::skipNulls(int32_t numValues) {
     return numValues;
   }
   if (!isTopLevel_ && leafNullsAllValidPrefix_) {
-    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    BOLT_CHECK_LE(
+        numLeafNullsConsumed_ + numValues,
+        erasedLeafNullWords_ * 64 + leafNullsSize_);
     numLeafNullsConsumed_ += numValues;
     return numValues;
   }
@@ -1579,7 +2557,9 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
   }
 
   if (leafNullsAllValidPrefix_) {
-    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    BOLT_CHECK_LE(
+        numLeafNullsConsumed_ + numValues,
+        erasedLeafNullWords_ * 64 + leafNullsSize_);
     numLeafNullsConsumed_ += numValues;
     buffer = nullptr;
     return nullptr;

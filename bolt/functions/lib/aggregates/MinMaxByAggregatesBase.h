@@ -373,8 +373,8 @@ class MinMaxByAggregateBase : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
 
-    decodedValue_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
+    decodedValue_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
 
     if (decodedIntermediateResult_.isConstantMapping() &&
         decodedIntermediateResult_.isNullAt(0)) {
@@ -474,8 +474,8 @@ class MinMaxByAggregateBase : public exec::Aggregate {
     auto baseRowVector =
         dynamic_cast<const RowVector*>(decodedIntermediateResult_.base());
 
-    decodedValue_.decode(*baseRowVector->childAt(0), rows);
-    decodedComparison_.decode(*baseRowVector->childAt(1), rows);
+    decodedValue_.decode(*baseRowVector->childAt(0));
+    decodedComparison_.decode(*baseRowVector->childAt(1));
 
     if (decodedIntermediateResult_.isConstantMapping()) {
       if (decodedIntermediateResult_.isNullAt(0)) {

@@ -84,7 +84,67 @@ class TestAzureClientProvider final : public AzureClientProvider {
   std::unique_ptr<AzureClientProvider> delegated_;
 };
 
+class MetadataDataLakeFileClient : public MockDataLakeFileClient {
+ public:
+  explicit MetadataDataLakeFileClient(std::string path)
+      : path_(std::move(path)) {}
+
+  Azure::Storage::Files::DataLake::Models::PathProperties getProperties()
+      override {
+    Azure::Storage::Files::DataLake::Models::PathProperties properties;
+    if (path_ == "missing") {
+      Azure::Storage::StorageException error("Path not found");
+      error.StatusCode = Azure::Core::Http::HttpStatusCode::NotFound;
+      throw error;
+    }
+    properties.IsDirectory = path_ == "directory";
+    properties.FileSize = 4;
+    properties.LastModified = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1'234'000}};
+    return properties;
+  }
+
+ private:
+  std::string path_;
+};
+
+class MetadataAzureClientProvider : public AzureClientProvider {
+ public:
+  std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>&,
+      const config::ConfigBase&) override {
+    BOLT_FAIL("File metadata must use Data Lake path properties");
+  }
+
+  std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase&) override {
+    return std::make_unique<MetadataDataLakeFileClient>(path->filePath());
+  }
+};
+
 } // namespace
+
+TEST(AbfsFileInfoTest, fileAndDirectoryMetadata) {
+  registerAzureClientProviderFactory("metadata", [](const std::string&) {
+    return std::make_unique<MetadataAzureClientProvider>();
+  });
+  AbfsFileSystem fs(std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{}));
+  const auto file =
+      fs.fileInfo("abfs://test@metadata.dfs.core.windows.net/file");
+  EXPECT_FALSE(file.isDirectory);
+  EXPECT_EQ(file.size, 4);
+  EXPECT_EQ(file.modificationTimeMs, 1'234'000);
+  const auto directory =
+      fs.fileInfo("abfs://test@metadata.dfs.core.windows.net/directory");
+  EXPECT_TRUE(directory.isDirectory);
+  EXPECT_EQ(directory.size, 0);
+  EXPECT_EQ(directory.modificationTimeMs, 1'234'000);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      fs.fileInfo("abfs://test@metadata.dfs.core.windows.net/missing"),
+      error_code::kFileNotFound);
+}
 
 class AbfsFileSystemTest : public testing::Test {
  public:

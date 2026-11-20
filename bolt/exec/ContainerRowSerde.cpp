@@ -29,8 +29,10 @@
  */
 
 #include "bolt/exec/ContainerRowSerde.h"
+#include "bolt/common/base/SparkCompatibility.h"
+#include "bolt/common/memory/MemoryResource.h"
+#include "bolt/type/FloatingPointUtil.h"
 
-#include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -145,9 +147,9 @@ void serializeMany(
       auto* constantVector = vector.asUnchecked<ConstantVector<T>>();
       if (!constantVector->isNullAt(0)) {
         if constexpr (std::is_same_v<T, __int128>) {
-          HashStringAllocator hashStringAllocator(vector.pool());
-          AlignedStlAllocator<T, sizeof(T)> allocator(&hashStringAllocator);
-          std::vector<T, AlignedStlAllocator<T, sizeof(T)>> values(
+          memory::SlabMemoryResource resource(vector.pool());
+          memory::SlabAllocator<T, sizeof(T)> allocator(&resource);
+          std::vector<T, memory::SlabAllocator<T, sizeof(T)>> values(
               size, constantVector->valueAt(0), allocator);
           stream.append<T>(values);
         } else {
@@ -525,6 +527,68 @@ std::vector<uint64_t> readNulls(ByteInputStream& in, int32_t size) {
   return nulls;
 }
 
+// Maps retain their keys-array / values-array wire format. Locate the value
+// array without materializing keys as vectors, including complex key types.
+void skipSerializedValue(ByteInputStream& in, const Type* type);
+
+void skipSerializedArray(ByteInputStream& in, const Type* elementType) {
+  const auto size = in.read<int32_t>();
+  BOLT_CHECK_GE(size, 0);
+  auto nulls = readNulls(in, size);
+  for (int32_t i = 0; i < size; ++i) {
+    if (!bits::isBitSet(nulls.data(), i)) {
+      skipSerializedValue(in, elementType);
+    }
+  }
+}
+
+template <TypeKind Kind>
+void skipSerializedValueImpl(ByteInputStream& in, const Type* type) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    const auto size = in.read<int32_t>();
+    BOLT_CHECK_GE(size, 0);
+    in.skip(size);
+  } else if constexpr (Kind == TypeKind::VARIANT) {
+    skipSerializedValueImpl<TypeKind::VARBINARY>(in, type);
+    skipSerializedValueImpl<TypeKind::VARBINARY>(in, type);
+  } else if constexpr (Kind == TypeKind::ARRAY) {
+    skipSerializedArray(in, type->childAt(0).get());
+  } else if constexpr (Kind == TypeKind::MAP) {
+    skipSerializedArray(in, type->childAt(0).get());
+    skipSerializedArray(in, type->childAt(1).get());
+  } else if constexpr (Kind == TypeKind::ROW) {
+    auto nulls = readNulls(in, type->size());
+    for (uint32_t i = 0; i < type->size(); ++i) {
+      if (!bits::isBitSet(nulls.data(), i)) {
+        skipSerializedValue(in, type->childAt(i).get());
+      }
+    }
+  } else {
+    in.skip(sizeof(typename TypeTraits<Kind>::NativeType));
+  }
+}
+
+void skipSerializedValue(ByteInputStream& in, const Type* type) {
+  BOLT_DYNAMIC_TYPE_DISPATCH(skipSerializedValueImpl, type->kind(), in, type);
+}
+
+std::vector<uint8_t>
+readSerializedMapKeys(ByteInputStream& in, const Type* keyType, int32_t size) {
+  const auto start = in.tellp();
+  auto nulls = readNulls(in, size);
+  for (int32_t i = 0; i < size; ++i) {
+    if (!bits::isBitSet(nulls.data(), i)) {
+      skipSerializedValue(in, keyType);
+    }
+  }
+  const auto bytes = in.tellp() - start;
+  BOLT_CHECK_LE(bytes, std::numeric_limits<int32_t>::max());
+  std::vector<uint8_t> keys(bytes);
+  in.seekp(start);
+  in.readBytes(keys.data(), keys.size());
+  return keys;
+}
+
 template <>
 void deserializeOne<TypeKind::ROW>(
     ByteInputStream& in,
@@ -869,9 +933,60 @@ std::optional<int32_t> compare<TypeKind::MAP>(
   auto wrappedIndex = right.wrappedIndex(index);
   auto size = map->sizeAt(wrappedIndex);
 
-  auto leftSize = left.peek<int32_t>();
-  if (flags.compareSizeFirst && leftSize != size) {
-    return flags.ascending ? (leftSize - size) : (size - leftSize);
+  if (kSparkCompatible && !flags.equalsOnly && flags.nullAsValue()) {
+    const auto leftSize = left.read<int32_t>();
+    BOLT_CHECK_GE(leftSize, 0);
+    if (leftSize != size) {
+      return flags.ascending ? leftSize - size : size - leftSize;
+    }
+    auto keys =
+        readSerializedMapKeys(left, map->type()->childAt(0).get(), size);
+    ByteInputStream keyStream(
+        {ByteRange{keys.data(), static_cast<int32_t>(keys.size()), 0}});
+    auto keyNulls = readNulls(keyStream, size);
+    BOLT_CHECK_EQ(left.read<int32_t>(), size);
+    auto valueNulls = readNulls(left, size);
+    auto rightIndices = map->sortedKeyIndices(wrappedIndex);
+    flags.nullsFirst = flags.ascending;
+    for (vector_size_t i = 0; i < size; ++i) {
+      const auto rightIndex = rightIndices[i];
+      const bool leftNull = bits::isBitSet(keyNulls.data(), i);
+      const bool rightNull = map->mapKeys()->isNullAt(rightIndex);
+      auto result = leftNull || rightNull
+          ? BaseVector::compareNulls(leftNull, rightNull, flags)
+          : compareSwitch(
+                keyStream,
+                *map->mapKeys()->wrappedVector(),
+                map->mapKeys()->wrappedIndex(rightIndex),
+                flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+      const bool leftValueNull = bits::isBitSet(valueNulls.data(), i);
+      const bool rightValueNull = map->mapValues()->isNullAt(rightIndex);
+      result = leftValueNull || rightValueNull
+          ? BaseVector::compareNulls(leftValueNull, rightValueNull, flags)
+          : compareSwitch(
+                left,
+                *map->mapValues()->wrappedVector(),
+                map->mapValues()->wrappedIndex(rightIndex),
+                flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+    }
+    return 0;
+  }
+
+  if (flags.compareSizeFirst) {
+    // ByteInputStream::peek advances across a range boundary. Preserve the
+    // cursor explicitly so the key-array comparator reads the same header.
+    const auto position = left.tellp();
+    const auto leftSize = left.read<int32_t>();
+    left.seekp(position);
+    if (leftSize != size) {
+      return flags.ascending ? (leftSize - size) : (size - leftSize);
+    }
   }
 
   std::vector<vector_size_t> indices(size);
@@ -1059,6 +1174,50 @@ std::optional<int32_t> compare<TypeKind::MAP>(
     ByteInputStream& right,
     const Type* type,
     CompareFlags flags) {
+  if (kSparkCompatible && !flags.equalsOnly && flags.nullAsValue()) {
+    const auto leftSize = left.read<int32_t>();
+    BOLT_CHECK_GE(leftSize, 0);
+    const auto rightSize = right.read<int32_t>();
+    BOLT_CHECK_GE(rightSize, 0);
+    if (leftSize != rightSize) {
+      return flags.ascending ? leftSize - rightSize : rightSize - leftSize;
+    }
+    auto leftKeys =
+        readSerializedMapKeys(left, type->childAt(0).get(), leftSize);
+    auto rightKeys =
+        readSerializedMapKeys(right, type->childAt(0).get(), rightSize);
+    ByteInputStream leftKeyStream(
+        {ByteRange{leftKeys.data(), static_cast<int32_t>(leftKeys.size()), 0}});
+    ByteInputStream rightKeyStream({ByteRange{
+        rightKeys.data(), static_cast<int32_t>(rightKeys.size()), 0}});
+    auto leftKeyNulls = readNulls(leftKeyStream, leftSize);
+    auto rightKeyNulls = readNulls(rightKeyStream, rightSize);
+    BOLT_CHECK_EQ(left.read<int32_t>(), leftSize);
+    BOLT_CHECK_EQ(right.read<int32_t>(), rightSize);
+    auto leftValueNulls = readNulls(left, leftSize);
+    auto rightValueNulls = readNulls(right, rightSize);
+    flags.nullsFirst = flags.ascending;
+    for (int32_t i = 0; i < leftSize; ++i) {
+      const bool leftNull = bits::isBitSet(leftKeyNulls.data(), i);
+      const bool rightNull = bits::isBitSet(rightKeyNulls.data(), i);
+      auto result = leftNull || rightNull
+          ? BaseVector::compareNulls(leftNull, rightNull, flags)
+          : compareSwitch(
+                leftKeyStream, rightKeyStream, type->childAt(0).get(), flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+      const bool leftValueNull = bits::isBitSet(leftValueNulls.data(), i);
+      const bool rightValueNull = bits::isBitSet(rightValueNulls.data(), i);
+      result = leftValueNull || rightValueNull
+          ? BaseVector::compareNulls(leftValueNull, rightValueNull, flags)
+          : compareSwitch(left, right, type->childAt(1).get(), flags);
+      if (!result.has_value() || result.value() != 0) {
+        return result;
+      }
+    }
+    return 0;
+  }
   auto result = compareArrays(left, right, type->childAt(0).get(), flags);
   if (result.has_value() && result.value() == 0) {
     return compareArrays(left, right, type->childAt(1).get(), flags);
@@ -1081,7 +1240,12 @@ uint64_t hashSwitch(ByteInputStream& stream, const Type* type);
 template <TypeKind Kind>
 uint64_t hashOne(ByteInputStream& stream, const Type* /*type*/) {
   using T = typename TypeTraits<Kind>::NativeType;
-  return folly::hasher<T>()(stream.read<T>());
+  const auto value = stream.read<T>();
+  if constexpr (std::is_floating_point_v<T>) {
+    return util::floating_point::NaNAwareHash<T>{}(value);
+  } else {
+    return folly::hasher<T>()(value);
+  }
 }
 
 template <>

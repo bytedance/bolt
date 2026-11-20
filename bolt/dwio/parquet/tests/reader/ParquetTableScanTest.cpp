@@ -42,6 +42,7 @@
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/dwio/parquet/reader/ParquetTypeWithId.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -181,6 +182,69 @@ void rewriteDateConvertedTypeToLogicalTypeOnly(const std::string& path) {
       removedDateConvertedType,
       "Failed to find DATE converted_type in Parquet footer: {}",
       path);
+
+  auto outputBuffer =
+      std::make_shared<apache::thrift::transport::TMemoryBuffer>();
+  apache::thrift::protocol::TCompactProtocol outputProtocol(outputBuffer);
+  metadata.write(&outputProtocol);
+  uint8_t* serializedFooter{nullptr};
+  uint32_t serializedFooterLength{0};
+  outputBuffer->getBuffer(&serializedFooter, &serializedFooterLength);
+
+  file.resize(footerOffset);
+  file.append(
+      reinterpret_cast<const char*>(serializedFooter), serializedFooterLength);
+  appendUint32LE(file, serializedFooterLength);
+  file.append("PAR1", 4);
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  BOLT_CHECK(out.good(), "Failed to open Parquet file for write: {}", path);
+  out.write(file.data(), file.size());
+}
+
+void rewriteStructAsDcMap(
+    const std::string& path,
+    const std::string& columnName,
+    const std::vector<std::string>& dynamicKeys) {
+  std::ifstream in(path, std::ios::binary);
+  BOLT_CHECK(in.good(), "Failed to open Parquet file for read: {}", path);
+  std::string file(
+      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  BOLT_CHECK_GE(file.size(), 12);
+  BOLT_CHECK_EQ(file.substr(file.size() - 4), "PAR1");
+
+  const auto footerLength = readUint32LE(file.data() + file.size() - 8);
+  BOLT_CHECK_LE(footerLength + 8, file.size());
+  const auto footerOffset = file.size() - 8 - footerLength;
+
+  thrift::FileMetaData metadata;
+  auto inputBuffer = std::make_shared<apache::thrift::transport::TMemoryBuffer>(
+      reinterpret_cast<uint8_t*>(file.data() + footerOffset),
+      footerLength,
+      apache::thrift::transport::TMemoryBuffer::OBSERVE);
+  apache::thrift::protocol::TCompactProtocol inputProtocol(inputBuffer);
+  metadata.read(&inputProtocol);
+
+  bool foundColumn = false;
+  for (auto& schemaElement : metadata.schema) {
+    if (schemaElement.name == columnName) {
+      schemaElement.__set_converted_type(thrift::ConvertedType::DCMAP);
+      thrift::LogicalType logicalType;
+      logicalType.__set_DCMAP(thrift::DCMapType{});
+      schemaElement.__set_logicalType(logicalType);
+      foundColumn = true;
+      break;
+    }
+  }
+  BOLT_CHECK(
+      foundColumn, "Failed to find column in Parquet footer: {}", columnName);
+
+  thrift::KeyValue dcMapKeys;
+  dcMapKeys.__set_key(
+      fmt::format("parquet.meta.dynamic.column.map.keys.of.{}", columnName));
+  dcMapKeys.__set_value(folly::join(",", dynamicKeys));
+  metadata.key_value_metadata.push_back(std::move(dcMapKeys));
+  metadata.__isset.key_value_metadata = true;
 
   auto outputBuffer =
       std::make_shared<apache::thrift::transport::TMemoryBuffer>();
@@ -913,6 +977,37 @@ TEST_F(ParquetTableScanTest, countStar) {
   assertQuery(plan, {split}, "SELECT 20");
 }
 
+TEST_F(ParquetTableScanTest, scanAggregationWithFilePreload) {
+  const vector_size_t kSize = 256 * 1024;
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+  });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto queryCtx = core::QueryCtx::create(executor_.get());
+  queryCtx->setConnectorSessionOverridesUnsafe(
+      kHiveConnectorId,
+      {{connector::hive::HiveConfig::kFilePreloadThreshold, "32MB"}});
+
+  auto plan = PlanBuilder(pool())
+                  .tableScan(asRowType(data->type()))
+                  .singleAggregation({}, {"sum(c0)"})
+                  .planNode();
+
+  std::shared_ptr<Task> task;
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .queryCtx(queryCtx)
+                    .copyResults(pool(), task);
+
+  const auto expectedSum = static_cast<int64_t>(kSize - 1) * kSize / 2;
+  assertEqualResults(
+      {makeRowVector({makeFlatVector<int64_t>({expectedSum})})}, {result});
+  ASSERT_TRUE(task->isFinished());
+  EXPECT_GT(getRuntimeStat(task, "storageReadBytes"), 0);
+}
+
 TEST_F(ParquetTableScanTest, decimalSubfieldFilter) {
   // decimal.parquet holds two columns (a: DECIMAL(5, 2), b: DECIMAL(20, 5)) and
   // 20 rows (10 rows per group). Data is in plain uncompressed format:
@@ -1045,6 +1140,41 @@ TEST_F(ParquetTableScanTest, nullMap) {
            makeNullableMapVector<std::string, std::string>({std::nullopt})}));
 
   assertSelectWithFilter({"i", "c"}, {}, "", "SELECT i, c FROM tmp");
+}
+
+TEST_F(ParquetTableScanTest, dcMapPreservesNullAndEmptyMaps) {
+  auto file = TempFilePath::create();
+  auto keyValues = makeNullableMapVector<std::string, std::string>(
+      {std::vector<std::pair<std::string, std::optional<std::string>>>{},
+       std::vector<std::pair<std::string, std::optional<std::string>>>{},
+       std::vector<std::pair<std::string, std::optional<std::string>>>{
+           {"static_key", "static_value"}}});
+  auto dynamicColumns = makeRowVector(
+      {"value_0"},
+      {makeNullableFlatVector<std::string>(
+          {std::nullopt, std::nullopt, "dynamic_value"})});
+  auto accounts = makeRowVector(
+      {"key_value", "dynamic_column"},
+      {keyValues, dynamicColumns},
+      [](vector_size_t row) { return row == 0; });
+  auto physicalData = makeRowVector({"accounts"}, {accounts});
+  writeToParquetFile(file->getPath(), {physicalData}, {});
+  rewriteStructAsDcMap(file->getPath(), "accounts", {"dynamic_key"});
+
+  auto logicalType = ROW({"accounts"}, {MAP(VARCHAR(), VARCHAR())});
+  auto expected = makeRowVector(
+      {"accounts"},
+      {makeNullableMapVector<std::string, std::string>(
+          {std::nullopt,
+           std::vector<std::pair<std::string, std::optional<std::string>>>{},
+           std::vector<std::pair<std::string, std::optional<std::string>>>{
+               {"static_key", "static_value"},
+               {"dynamic_key", "dynamic_value"}}})});
+
+  auto plan = PlanBuilder().tableScan(logicalType).planNode();
+  AssertQueryBuilder(plan)
+      .split(makeSplit(file->getPath()))
+      .assertResults(expected);
 }
 
 // Core dump is fixed.
@@ -1871,9 +2001,13 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"boolean_to_varchar",             BOOLEAN(),       VARCHAR(),          true},
 
     // ---- Reject: DECIMAL widening violations ----
+    // Scale-changing casts used to pass schema validation without rescaling
+    // decoded values. Reject them until rescaling is supported end to end.
     {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
     {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
     {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
+    {"decimal_widen_scale",            DECIMAL(10, 2),  DECIMAL(20, 5),     true},
+    {"decimal_widen_scale_to_long",    DECIMAL(10, 2),  DECIMAL(28, 5),     true},
 
     // ---- Reject: DECIMAL cross-family ----
     {"decimal_to_bigint",              DECIMAL(10, 2),  BIGINT(),           true},
@@ -1897,10 +2031,12 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"real_to_double",      REAL(),    DOUBLE(),   false},
 
     // ---- Accept: DECIMAL widening ----
+    // Same-scale short-to-long widening only changes the native storage width;
+    // the reader upcasts raw values from int64_t to int128_t without changing
+    // their decimal representation.
     {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
     {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
-    {"decimal_widen_both",            DECIMAL(10, 2),  DECIMAL(20, 5),     false},
-    {"decimal_widen_to_long_decimal", DECIMAL(10, 2),  DECIMAL(28, 5),     false},
+    {"decimal_short_to_long_same_scale", DECIMAL(13, 10), DECIMAL(28, 10), false},
 
     // ---- Accept: column-reader auto-cast int family -> VARCHAR ----
     //  (IntegerColumnReader::makeCastExpr; the cast path compiles in
@@ -1991,6 +2127,30 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
           << result->type()->toString();
     }
   }
+}
+
+TEST_F(ParquetTableScanTest, allowsStructuralMismatchForEmptyFile) {
+  auto fileType = ROW({"c0"}, {DOUBLE()});
+  auto emptyData = std::make_shared<RowVector>(
+      pool(),
+      fileType,
+      nullptr,
+      0,
+      std::vector<VectorPtr>{BaseVector::create(DOUBLE(), 0, pool())});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {emptyData}, WriterOptions{});
+
+  auto declaredType = ROW({"c0"}, {ARRAY(DOUBLE())});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(declaredType, {}, "", declaredType)
+                  .planNode();
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .copyResults(pool());
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->size(), 0);
+  EXPECT_TRUE(result->type()->equivalent(*declaredType));
 }
 
 // Targeted value-validation companion for the matrix above. The cases
@@ -2234,6 +2394,122 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     auto expected =
         makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // Verify widening DECIMAL(13, 10), stored as FIXED_LEN_BYTE_ARRAY(6), to
+  // DECIMAL(28, 10).
+  {
+    constexpr vector_size_t kSize = 1024;
+    constexpr vector_size_t kNumNulls = 268;
+    std::vector<std::optional<int64_t>> shortValues;
+    shortValues.reserve(kSize);
+    for (vector_size_t row = 0; row < kSize; ++row) {
+      if (row < kNumNulls) {
+        shortValues.push_back(std::nullopt);
+      } else {
+        shortValues.push_back(
+            (static_cast<int64_t>(row) - kSize / 2) * 1'000'000'000LL +
+            123'456'789LL);
+      }
+    }
+    shortValues[kNumNulls] = 9'999'999'999'999LL;
+    shortValues[kNumNulls + 1] = -9'999'999'999'999LL;
+
+    const auto fileType = DECIMAL(13, 10);
+    auto data = makeRowVector(
+        {"c0"}, {makeNullableFlatVector<int64_t>(shortValues, fileType)});
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writerOptions.storeDecimalAsInteger = false;
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    dwio::common::ReaderOptions readerOptions{pool()};
+    auto reader = std::make_unique<ParquetReader>(
+        std::make_unique<dwio::common::BufferedInput>(
+            std::make_shared<LocalReadFile>(file->getPath()),
+            readerOptions.getMemoryPool()),
+        readerOptions);
+    const auto parquetType = std::dynamic_pointer_cast<const ParquetTypeWithId>(
+        reader->typeWithId()->childAt(0));
+    ASSERT_NE(parquetType, nullptr);
+    EXPECT_EQ(
+        parquetType->parquetType_, thrift::Type::type::FIXED_LEN_BYTE_ARRAY);
+    EXPECT_EQ(parquetType->precision_, 13);
+    EXPECT_EQ(parquetType->scale_, 10);
+    EXPECT_EQ(parquetType->typeLength_, 6);
+    auto readAs = [&](const TypePtr& requestedType,
+                      const std::vector<std::string>& filters = {}) {
+      auto declared = ROW({"c0"}, {requestedType});
+      auto plan = PlanBuilder(pool())
+                      .tableScan(declared, filters, "", declared)
+                      .planNode();
+      return AssertQueryBuilder(plan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool());
+    };
+
+    std::vector<std::optional<int128_t>> sameScaleValues;
+    sameScaleValues.reserve(kSize);
+    for (const auto& value : shortValues) {
+      if (!value.has_value()) {
+        sameScaleValues.push_back(std::nullopt);
+      } else {
+        sameScaleValues.push_back(static_cast<int128_t>(*value));
+      }
+    }
+
+    auto sameScaleExpected = makeRowVector(
+        {"c0"},
+        {makeNullableFlatVector<int128_t>(sameScaleValues, DECIMAL(28, 10))});
+    EXPECT_TRUE(
+        assertEqualResults({sameScaleExpected}, {readAs(DECIMAL(28, 10))}));
+
+    BOLT_ASSERT_THROW(readAs(DECIMAL(28, 12)), kParquetTypeMappingErrorPrefix);
+
+    BOLT_ASSERT_THROW(
+        readAs(DECIMAL(28, 10), {"c0 >= cast(0 as DECIMAL(28, 10))"}),
+        "Cannot apply HUGEINT filter to physical BIGINT Parquet column c0");
+
+    auto nullExpected = makeRowVector(
+        {"c0"},
+        {makeNullableFlatVector<int128_t>(
+            std::vector<std::optional<int128_t>>(kNumNulls, std::nullopt),
+            DECIMAL(28, 10))});
+    EXPECT_TRUE(assertEqualResults(
+        {nullExpected}, {readAs(DECIMAL(28, 10), {"c0 IS NULL"})}));
+  }
+}
+
+TEST_F(ParquetTableScanTest, readUtf8AnnotatedByteArrayAsVarbinary) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
+
+  const std::vector<std::string> expectedValues = {
+      "127.0.0.1", "2001:db8::1", "spark-compatible"};
+  auto data = makeRowVector(
+      {"c0"}, {makeFlatVector<StringView>(expectedValues.size(), [&](auto row) {
+        return StringView(expectedValues[row]);
+      })});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  // VARCHAR is written as Parquet BYTE_ARRAY with UTF8/string annotation.
+  // Spark's Parquet reader accepts these bytes when the requested Spark type
+  // is BinaryType, so the Spark-compatible Bolt reader must do the same.
+  auto declared = ROW({"c0"}, {VARBINARY()});
+  auto plan =
+      PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .copyResults(pool());
+
+  ASSERT_NE(result, nullptr);
+  ASSERT_EQ(result->size(), expectedValues.size());
+  ASSERT_TRUE(result->type()->equivalent(*declared));
+  auto actualValues = result->childAt(0)->asFlatVector<StringView>();
+  for (auto row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(actualValues->valueAt(row), StringView(expectedValues[row]));
   }
 }
 

@@ -29,13 +29,76 @@
  */
 
 #include "bolt/exec/MemoryReclaimer.h"
+
+#include <functional>
+#include "bolt/buffer/Buffer.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/exec/Operator.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::memory;
+
+namespace {
+
+class ReclaimTestOperator : public Operator {
+ public:
+  explicit ReclaimTestOperator(DriverCtx* ctx)
+      : Operator(ctx, ROW({}, {}), 0, "0", "ReclaimTest") {}
+
+  bool needsInput() const override {
+    return false;
+  }
+
+  void addInput(RowVectorPtr /*input*/) override {}
+
+  RowVectorPtr getOutput() override {
+    return nullptr;
+  }
+
+  BlockingReason isBlocked(ContinueFuture* /*future*/) override {
+    return BlockingReason::kNotBlocked;
+  }
+
+  bool isFinished() override {
+    return true;
+  }
+
+  bool canReclaim() const override {
+    return reclaimEnabled;
+  }
+
+  void reclaim(
+      uint64_t /*targetBytes*/,
+      memory::MemoryReclaimer::Stats& /*stats*/) override {
+    onReclaim();
+  }
+
+  std::unique_ptr<memory::MemoryReclaimer> makeReclaimer() {
+    return Operator::MemoryReclaimer::create(operatorCtx()->driverCtx(), this);
+  }
+
+  bool reclaimEnabled{true};
+  std::function<void()> onReclaim;
+};
+
+class ExternalPoolReclaimTestOperator : public ReclaimTestOperator {
+ public:
+  explicit ExternalPoolReclaimTestOperator(DriverCtx* ctx)
+      : ReclaimTestOperator(ctx),
+        externalPool_(pool()->parent()->addLeafChild("external")) {}
+
+  memory::MemoryPool* externalReclaimPool() const override {
+    return externalPool_.get();
+  }
+
+ private:
+  const std::shared_ptr<memory::MemoryPool> externalPool_;
+};
+
+} // namespace
 
 class MemoryReclaimerTest : public OperatorTestBase {
  protected:
@@ -129,6 +192,156 @@ TEST_F(MemoryReclaimerTest, abortTest) {
       ASSERT_TRUE(aggregatePool->aborted());
     }
   }
+}
+
+TEST_F(MemoryReclaimerTest, operatorWithoutExternalPool) {
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
+  ReclaimTestOperator op(driver->driverCtx());
+  auto reclaimer = op.makeReclaimer();
+  auto sibling = op.pool()->parent()->addLeafChild("unrelated");
+  ASSERT_TRUE(sibling->maybeReserve(8 << 20));
+  const auto siblingReservation = sibling->reservedBytes();
+  fakeTask_->requestPause().wait();
+  ScopedMemoryArbitrationContext arbitrationContext;
+
+  // Exercise the default nullptr hook. Unrelated leaves must not contribute
+  // to either the candidate estimate or the reclaimed byte count.
+  for (bool releaseReservation : {false, true}) {
+    SCOPED_TRACE(releaseReservation);
+    auto allocation = AlignedBuffer::allocate<char>(1 << 20, op.pool());
+    ASSERT_TRUE(op.pool()->maybeReserve(8 << 20));
+    const auto before = op.pool()->reservedBytes();
+    uint64_t candidate{0};
+    ASSERT_TRUE(reclaimer->reclaimableBytes(*op.pool(), candidate));
+    EXPECT_EQ(candidate, before);
+
+    op.reclaimEnabled = false;
+    ASSERT_FALSE(reclaimer->reclaimableBytes(*op.pool(), candidate));
+    EXPECT_EQ(candidate, 0);
+    memory::MemoryReclaimer::Stats stats;
+    EXPECT_EQ(reclaimer->reclaim(op.pool(), 0, 0, stats), 0);
+    EXPECT_EQ(op.pool()->reservedBytes(), before);
+    op.reclaimEnabled = true;
+
+    op.onReclaim = [&]() {
+      allocation.reset();
+      if (releaseReservation) {
+        op.pool()->release();
+      }
+    };
+    const auto reclaimed = reclaimer->reclaim(op.pool(), 0, 0, stats);
+    EXPECT_EQ(reclaimed, before - op.pool()->reservedBytes());
+    EXPECT_EQ(stats.reclaimedBytes, reclaimed);
+    if (releaseReservation) {
+      EXPECT_EQ(reclaimed, before);
+    } else {
+      // The legacy path does not release idle reservation on the operator's
+      // behalf. Adding an optional external pool must preserve this behavior.
+      EXPECT_GT(op.pool()->reservedBytes(), 0);
+      EXPECT_LT(reclaimed, before);
+    }
+    EXPECT_EQ(sibling->reservedBytes(), siblingReservation);
+    op.pool()->release();
+  }
+  uint64_t candidate{1};
+  EXPECT_TRUE(reclaimer->reclaimableBytes(*op.pool(), candidate));
+  EXPECT_EQ(candidate, 0);
+  sibling->release();
+}
+
+TEST_F(MemoryReclaimerTest, operatorWithExternalPool) {
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
+  ExternalPoolReclaimTestOperator op(driver->driverCtx());
+  auto reclaimer = op.makeReclaimer();
+  auto* external = op.externalReclaimPool();
+  fakeTask_->requestPause().wait();
+  ScopedMemoryArbitrationContext arbitrationContext;
+  for (bool allocateFromOperator : {false, true}) {
+    SCOPED_TRACE(allocateFromOperator);
+    BufferPtr allocation;
+    if (allocateFromOperator) {
+      allocation = AlignedBuffer::allocate<char>(1 << 20, op.pool());
+      ASSERT_TRUE(op.pool()->maybeReserve(8 << 20));
+    }
+    auto externalAllocation = AlignedBuffer::allocate<char>(2 << 20, external);
+    ASSERT_TRUE(external->maybeReserve(8 << 20));
+    const auto before = op.pool()->reservedBytes() + external->reservedBytes();
+    uint64_t candidate{0};
+    ASSERT_TRUE(reclaimer->reclaimableBytes(*op.pool(), candidate));
+    EXPECT_EQ(candidate, before);
+    EXPECT_GT(candidate, 0);
+
+    op.onReclaim = [&]() {
+      allocation.reset();
+      externalAllocation.reset();
+    };
+    memory::MemoryReclaimer::Stats stats;
+    EXPECT_EQ(reclaimer->reclaim(op.pool(), 0, 0, stats), before);
+    EXPECT_EQ(stats.reclaimedBytes, before);
+    EXPECT_EQ(op.pool()->reservedBytes(), 0);
+    EXPECT_EQ(external->reservedBytes(), 0);
+  }
+}
+
+TEST_F(MemoryReclaimerTest, parentReclaimsOperatorWithOnlyExternalReservation) {
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
+  ExternalPoolReclaimTestOperator op(driver->driverCtx());
+  op.pool()->setReclaimer(op.makeReclaimer());
+  auto* parent = op.pool()->parent();
+  auto* external = op.externalReclaimPool();
+  auto allocation = AlignedBuffer::allocate<char>(2 << 20, external);
+  ASSERT_TRUE(external->maybeReserve(8 << 20));
+  ASSERT_EQ(op.pool()->reservedBytes(), 0);
+  ASSERT_EQ(external->reclaimer(), nullptr);
+  const auto before = op.pool()->reservedBytes() + external->reservedBytes();
+  ASSERT_GT(before, 0);
+  const auto candidate = parent->reclaimableBytes();
+  ASSERT_TRUE(candidate.has_value());
+  EXPECT_EQ(candidate.value(), before);
+
+  int reclaimCalls = 0;
+  op.onReclaim = [&]() {
+    ++reclaimCalls;
+    allocation.reset();
+  };
+  fakeTask_->requestPause().wait();
+  ScopedMemoryArbitrationContext arbitrationContext;
+  memory::MemoryReclaimer::Stats stats;
+  // The external leaf has no reclaimer and the operator leaf has no
+  // reservation. Only the operator's combined estimate can make it a
+  // parent-level candidate.
+  const auto reclaimed = parent->reclaim(1, 0, stats);
+  EXPECT_EQ(reclaimCalls, 1);
+  const auto after = op.pool()->reservedBytes() + external->reservedBytes();
+  EXPECT_EQ(after, 0);
+  EXPECT_EQ(reclaimed, before - after);
+  EXPECT_EQ(stats.reclaimedBytes, reclaimed);
+  EXPECT_EQ(parent->reservedBytes(), 0);
+}
+
+TEST_F(MemoryReclaimerTest, externalPoolGrowthOffsetsReclaimedBytes) {
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
+  ExternalPoolReclaimTestOperator op(driver->driverCtx());
+  auto reclaimer = op.makeReclaimer();
+  auto* external = op.externalReclaimPool();
+  auto allocation = AlignedBuffer::allocate<char>(1 << 20, op.pool());
+  BufferPtr externalAllocation;
+  const auto before = op.pool()->reservedBytes();
+  op.onReclaim = [&]() {
+    allocation.reset();
+    externalAllocation = AlignedBuffer::allocate<char>(8 << 20, external);
+  };
+  fakeTask_->requestPause().wait();
+  ScopedMemoryArbitrationContext arbitrationContext;
+  memory::MemoryReclaimer::Stats stats;
+  EXPECT_EQ(reclaimer->reclaim(op.pool(), 0, 0, stats), 0);
+  EXPECT_EQ(stats.reclaimedBytes, 0);
+  EXPECT_EQ(op.pool()->reservedBytes(), 0);
+  EXPECT_GT(external->reservedBytes(), before);
 }
 
 TEST(ReclaimableSectionGuard, basic) {

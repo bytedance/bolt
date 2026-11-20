@@ -18,6 +18,7 @@
 
 /// Separated from implementation details to reduce compiling time
 
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/exec/HybridSorter.h"
 #include "bolt/exec/RowContainer.h"
 #include "common/base/CompareFlags.h"
@@ -56,7 +57,7 @@ struct MetaRowsSorterWraper {
 };
 
 /// For Spill
-using SpillRows = std::vector<char*, memory::StlAllocator<char*>>;
+using SpillRows = std::vector<char*, memory::SlabAllocator<char*>>;
 
 /// For SortBuffer
 using BufferRows = std::vector<char*>;

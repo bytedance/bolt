@@ -63,7 +63,8 @@ TEST_F(TestStringDictionaryEncoder, AddKey) {
 
   for (const auto& testCase : testCases) {
     auto pool = memoryManager()->addLeafPool();
-    StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+    memory::SlabMemoryResource dictionaryResource{*pool};
+    StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
     std::vector<size_t> actualEncodedSequence{};
     for (const auto& key : testCase.addKeySequence) {
       actualEncodedSequence.push_back(stringDictEncoder.addKey(key, 0));
@@ -107,7 +108,8 @@ TEST_F(TestStringDictionaryEncoder, GetIndex) {
 
   for (const auto& testCase : testCases) {
     auto pool = memoryManager()->addLeafPool();
-    StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+    memory::SlabMemoryResource dictionaryResource{*pool};
+    StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
     for (const auto& key : testCase.addKeySequence) {
       stringDictEncoder.addKey(key, 0);
     }
@@ -156,7 +158,8 @@ TEST_F(TestStringDictionaryEncoder, GetCount) {
 
   for (const auto& testCase : testCases) {
     auto pool = memoryManager()->addLeafPool();
-    StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+    memory::SlabMemoryResource dictionaryResource{*pool};
+    StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
     for (const auto& key : testCase.addKeySequence) {
       stringDictEncoder.addKey(key, 0);
     }
@@ -210,7 +213,8 @@ TEST_F(TestStringDictionaryEncoder, GetStride) {
 
   for (const auto& testCase : testCases) {
     auto pool = memoryManager()->addLeafPool();
-    StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+    memory::SlabMemoryResource dictionaryResource{*pool};
+    StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
     for (const auto& kv : testCase.addKeySequence) {
       stringDictEncoder.addKey(kv.first, kv.second);
     }
@@ -233,7 +237,8 @@ std::string genPaddedIntegerString(size_t integer, size_t length) {
 
 TEST_F(TestStringDictionaryEncoder, Clear) {
   auto pool = memoryManager()->addLeafPool();
-  StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+  memory::SlabMemoryResource dictionaryResource{*pool};
+  StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
   std::string baseString{"jjkkll"};
   for (size_t i = 0; i != 2500; ++i) {
     stringDictEncoder.addKey(baseString + genPaddedIntegerString(i, 4), 0);
@@ -255,7 +260,8 @@ TEST_F(TestStringDictionaryEncoder, Clear) {
 
 TEST_F(TestStringDictionaryEncoder, MemBenchmark) {
   auto pool = memoryManager()->addLeafPool();
-  StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+  memory::SlabMemoryResource dictionaryResource{*pool};
+  StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
   std::string baseString{"jjkkll"};
   for (size_t i = 0; i != 10000; ++i) {
     stringDictEncoder.addKey(baseString + genPaddedIntegerString(i, 4), 0);
@@ -266,7 +272,8 @@ TEST_F(TestStringDictionaryEncoder, MemBenchmark) {
 
 TEST_F(TestStringDictionaryEncoder, Limit) {
   auto pool = memoryManager()->addLeafPool();
-  StringDictionaryEncoder encoder{*pool, *pool};
+  memory::SlabMemoryResource dictionaryResource{*pool};
+  StringDictionaryEncoder encoder{*pool, dictionaryResource};
   encoder.addKey(folly::StringPiece{"abc"}, 0);
   dwio::common::DataBuffer<char> buf{*pool};
   buf.resize(std::numeric_limits<uint32_t>::max());

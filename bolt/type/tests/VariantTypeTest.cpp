@@ -23,8 +23,8 @@ TEST(VariantTypeTest, Basic) {
   auto variantType = VARIANT();
   EXPECT_EQ(variantType->kind(), TypeKind::VARIANT);
   EXPECT_EQ(variantType->toString(), "VARIANT");
-  EXPECT_EQ(variantType->name(), "VARIANT");
-  EXPECT_EQ(variantType->kindName(), "VARIANT");
+  EXPECT_STREQ(variantType->name(), "VARIANT");
+  EXPECT_STREQ(variantType->kindName(), "VARIANT");
   // VARIANT is NOT a primitive type (it has composite storage via
   // VariantVector).
   EXPECT_FALSE(variantType->isPrimitiveType());

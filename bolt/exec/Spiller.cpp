@@ -288,7 +288,7 @@ Spiller::Spiller(
       typeName(type_));
   spillRuns_.reserve(state_.maxPartitions());
   for (int i = 0; i < state_.maxPartitions(); ++i) {
-    spillRuns_.emplace_back(*memory::spillMemoryPool());
+    spillRuns_.emplace_back(rowsResource_);
   }
   if (type_ == Type::kHashJoinProbeMatchFlag) {
     state_.setImmediateFlush(true);

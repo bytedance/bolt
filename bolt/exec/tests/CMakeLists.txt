@@ -43,6 +43,15 @@ add_test(
 
 target_link_libraries(aggregate_companion_functions_test PRIVATE bolt_gtest_main)
 
+add_executable(tpcds_plan_loader_test TpcdsPlanLoaderTest.cpp)
+add_test(
+  NAME tpcds_plan_loader_test
+  COMMAND
+    tpcds_plan_loader_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(tpcds_plan_loader_test PRIVATE bolt_gtest_main)
+
 add_executable(
   bolt_exec_test
   AddressableNonNullValueListTest.cpp
@@ -108,7 +117,11 @@ if(KERNEL_SUPPORTS_IO_URING)
   add_executable(iouring_spill_test AsyncSpillerTest.cpp)
 endif()
 
-add_executable(bolt_exec_aggregation_test AggregationTest.cpp)
+add_executable(
+  bolt_exec_aggregation_test
+  AggregationTest.cpp
+  HashTableSimdAggregationTest.cpp
+)
 
 add_executable(bolt_exec_spiller_test SpillerTest.cpp)
 
@@ -123,6 +136,7 @@ add_executable(
   HashBitRangeTest.cpp
   HashJoinBridgeTest.cpp
   HashJoinTest.cpp
+  HashTableSimdJoinTest.cpp
   HashPartitionFunctionTest.cpp
   HashTableTest.cpp
 )

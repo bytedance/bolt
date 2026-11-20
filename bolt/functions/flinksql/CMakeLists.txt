@@ -16,10 +16,13 @@
 bolt_add_library(
   bolt_functions_flink_impl
   HashCodeFunction.cpp
+  MapEqual.cpp
   ICURegexFunctions.cpp
   JsonFunctions.cpp
   RegexFunctions.cpp
   ElementAt.cpp
+  TemporalFunctions.cpp
+  specialforms/DecimalRound.cpp
   specialforms/FlinkCastExpr.cpp
 )
 

@@ -38,6 +38,7 @@ bolt_add_library(
   ParquetData.cpp
   ParquetFooterCache.cpp
   ParquetReader.cpp
+  ParquetReaderCast.cpp
   ParquetReaderUtil.cpp
   ParquetTypeWithId.cpp
   RepeatedColumnReader.cpp

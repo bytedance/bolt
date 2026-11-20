@@ -29,6 +29,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <limits>
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 using namespace bytedance::bolt;
 
@@ -427,7 +428,7 @@ TEST_F(VectorEstimateFlatSizeTest, arrayOfShortStrings) {
       ARRAY(VARCHAR()), 100, offsets, lengths, makeDict(elements));
   EXPECT_EQ(17536, array->retainedSize());
   EXPECT_EQ(2460, array->estimateFlatSize());
-  EXPECT_EQ(2784, flatten(array)->estimateFlatSize());
+  EXPECT_EQ(2432, flatten(array)->estimateFlatSize());
 }
 
 TEST_F(VectorEstimateFlatSizeTest, arrayOfLongStrings) {
@@ -453,7 +454,7 @@ TEST_F(VectorEstimateFlatSizeTest, arrayOfLongStrings) {
 
   EXPECT_EQ(73760, makeDict(array)->retainedSize());
   EXPECT_EQ(7334, makeDict(array)->estimateFlatSize());
-  // Flattened vector includes the original string buffers.
+  // Bulk copying flat elements retains buffers without recomputing stats.
   EXPECT_EQ(51840, flatten(makeDict(array))->estimateFlatSize());
 
   // Flat array with dictionary encoded elements.
@@ -464,8 +465,166 @@ TEST_F(VectorEstimateFlatSizeTest, arrayOfLongStrings) {
       ARRAY(VARCHAR()), 100, offsets, lengths, makeDict(elements));
   EXPECT_EQ(66592, array->retainedSize());
   EXPECT_EQ(7366, array->estimateFlatSize());
-  // Flattened vector includes the original string buffers.
-  EXPECT_EQ(51840, flatten(array)->estimateFlatSize());
+  EXPECT_EQ(4031, flatten(array)->estimateFlatSize());
+}
+
+TEST_F(
+    VectorEstimateFlatSizeTest,
+    dictionaryArrayFullCopyTracksLogicalStringBytes) {
+  // Match the failure shape: a small row count can still serialize past the
+  // signed 32-bit limit when each row repeats one shared large string.
+  constexpr vector_size_t kNumRows = 209;
+  constexpr size_t kStringSize = 10 * 1024 * 1024;
+  const std::string largeString(kStringSize, 'x');
+
+  // Build one ARRAY<VARCHAR> row with dictionary-encoded elements, then
+  // reference the row repeatedly through another dictionary. Flattening copies
+  // the encoded child StringViews row by row while retaining a single shared
+  // string buffer. The flat-size estimate must count every logical occurrence,
+  // not the shared buffer only once.
+  auto baseElements = makeFlatVector<StringView>(
+      1, [&](auto /*row*/) { return StringView(largeString); });
+  ASSERT_FALSE(baseElements->stringStats().has_value());
+  auto elementIndices = makeIndices(1, [](auto /*row*/) { return 0; });
+  auto elements = wrapInDictionary(elementIndices, 1, baseElements);
+
+  auto offsets = makeIndices(1, [](auto /*row*/) { return 0; });
+  auto lengths = makeIndices(1, [](auto /*row*/) { return 1; });
+  auto array = makeArrayVector(ARRAY(VARCHAR()), 1, offsets, lengths, elements);
+  auto indices = makeIndices(kNumRows, [](auto /*row*/) { return 0; });
+
+  VectorPtr flattened = wrapInDictionary(indices, kNumRows, array);
+  BaseVector::flattenVector(flattened);
+
+  auto* flattenedArray = flattened->as<ArrayVector>();
+  ASSERT_NE(flattenedArray, nullptr);
+  auto* flattenedElements =
+      flattenedArray->elements()->asFlatVector<StringView>();
+  ASSERT_NE(flattenedElements, nullptr);
+  ASSERT_EQ(flattenedElements->size(), kNumRows);
+  EXPECT_EQ(
+      flattenedElements->rawValues()[0].data(),
+      flattenedElements->rawValues()[kNumRows - 1].data());
+
+  const uint64_t logicalStringBytes =
+      static_cast<uint64_t>(kNumRows) * kStringSize;
+  EXPECT_GT(
+      logicalStringBytes,
+      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()));
+  EXPECT_LT(flattened->retainedSize(), logicalStringBytes);
+
+  ASSERT_TRUE(flattenedElements->stringStats().has_value());
+  EXPECT_EQ(flattenedElements->stringStats()->totalBytes, logicalStringBytes);
+  EXPECT_EQ(flattenedElements->stringStats()->maxLength, kStringSize);
+  EXPECT_GE(flattened->estimateFlatSize(), logicalStringBytes);
+}
+
+TEST_F(VectorEstimateFlatSizeTest, copyRangesTracksFullTargetCopy) {
+  constexpr vector_size_t kSize = 4;
+  constexpr size_t kStringSize = 64;
+  const std::string value(kStringSize, 'x');
+
+  auto target =
+      BaseVector::create<FlatVector<StringView>>(VARCHAR(), kSize, pool());
+  std::vector<BaseVector::CopyRange> fullCopy{{0, 0, kSize}};
+
+  // Encoded sources are copied row by row, so a full target copy can collect
+  // exact stats in the existing loop.
+  auto constantSource =
+      BaseVector::createConstant(VARCHAR(), variant(value), kSize, pool());
+  target->copyRanges(constantSource.get(), fullCopy);
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_EQ(target->stringStats()->totalBytes, kSize * kStringSize);
+  EXPECT_EQ(target->stringStats()->maxLength, kStringSize);
+
+  // A partial overwrite cannot produce stats for the complete target. It must
+  // invalidate the previous full-copy result instead of leaving it stale.
+  std::vector<BaseVector::CopyRange> partialCopy{{0, 1, 1}};
+  target->copyRanges(constantSource.get(), partialCopy);
+  EXPECT_FALSE(target->stringStats().has_value());
+
+  // Bulk copies do not compute missing source stats.
+  auto flatSource = makeFlatVector<StringView>(
+      kSize, [&](auto /*row*/) { return StringView(value); });
+  ASSERT_FALSE(flatSource->stringStats().has_value());
+  target->copyRanges(flatSource.get(), fullCopy);
+  EXPECT_FALSE(target->stringStats().has_value());
+
+  // Zero stats leave the cache unset, even after overwriting cached stats.
+  target->copyRanges(constantSource.get(), fullCopy);
+  ASSERT_TRUE(target->stringStats().has_value());
+  auto allNulls = BaseVector::createNullConstant(VARCHAR(), kSize, pool());
+  target->copyRanges(allNulls.get(), fullCopy);
+  EXPECT_FALSE(target->stringStats().has_value());
+
+  auto inlineSource =
+      BaseVector::createConstant(VARCHAR(), variant("abc"), kSize, pool());
+  target->copyRanges(inlineSource.get(), fullCopy);
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_EQ(target->stringStats()->totalBytes, 0);
+  EXPECT_EQ(target->stringStats()->maxLength, 3);
+
+  auto emptySource =
+      BaseVector::createConstant(VARCHAR(), variant(""), kSize, pool());
+  target->copyRanges(emptySource.get(), fullCopy);
+  EXPECT_FALSE(target->stringStats().has_value());
+
+  // Preparing an already writable target must invalidate cached stats too.
+  target->copyRanges(constantSource.get(), fullCopy);
+  ASSERT_TRUE(target->stringStats().has_value());
+  ASSERT_TRUE(target->values()->isMutable());
+  const auto* values = target->rawValues();
+  target->ensureWritable(SelectivityVector(kSize));
+  EXPECT_EQ(target->rawValues(), values);
+  EXPECT_FALSE(target->stringStats().has_value());
+  const std::string longerValue(1024, 'y');
+  target->set(0, StringView(longerValue));
+  EXPECT_EQ(target->valueAt(0), StringView(longerValue));
+  EXPECT_GE(target->estimateFlatSize(), longerValue.size());
+}
+
+TEST_F(VectorEstimateFlatSizeTest, copyRangesReusesOnlyFullIdentityFlatStats) {
+  const std::vector<std::string> values{
+      std::string(32, 'a'),
+      std::string(64, 'b'),
+      std::string(96, 'c'),
+      std::string(128, 'd')};
+  constexpr vector_size_t kSize = 4;
+  auto source = makeFlatVector<StringView>(
+      kSize, [&](auto row) { return StringView(values[row]); });
+  source->setStringViewStats(StringViewStats{320, 128});
+
+  auto target =
+      BaseVector::create<FlatVector<StringView>>(VARCHAR(), kSize, pool());
+
+  // A full identity copy may reuse the source stats. Adjacent ranges and a
+  // zero-length range are still an identity copy.
+  std::vector<BaseVector::CopyRange> splitIdentity{
+      {0, 0, 2}, {2, 2, 0}, {2, 2, 2}};
+  target->copyRanges(source.get(), splitIdentity);
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_EQ(
+      target->stringStats()->totalBytes, source->stringStats()->totalBytes);
+  EXPECT_EQ(target->stringStats()->maxLength, source->stringStats()->maxLength);
+
+  // Zero-length ranges are a no-op, including for cached target stats.
+  std::vector<BaseVector::CopyRange> noCopy{{-1, -1, 0}};
+  target->copyRanges(source.get(), noCopy);
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_EQ(target->stringStats()->totalBytes, 320);
+  EXPECT_EQ(target->stringStats()->maxLength, 128);
+
+  // Repeated subsets cannot inherit whole-source stats.
+  std::vector<BaseVector::CopyRange> repeatedPrefix{{0, 0, 2}, {0, 2, 2}};
+  target->copyRanges(source.get(), repeatedPrefix);
+  EXPECT_FALSE(target->stringStats().has_value());
+
+  // Copying a prefix from a larger source also cannot reuse whole-source
+  // stats, even though source and target indices match.
+  target->resize(2);
+  std::vector<BaseVector::CopyRange> prefixCopy{{0, 0, 2}};
+  target->copyRanges(source.get(), prefixCopy);
+  EXPECT_FALSE(target->stringStats().has_value());
 }
 
 TEST_F(VectorEstimateFlatSizeTest, mapOfInts) {

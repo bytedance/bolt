@@ -237,6 +237,7 @@ void HashBuild::setupTable() {
     dependentTypes.emplace_back(tableType_->childAt(i));
   }
   auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
+  const bool simdHashTableEnabled = queryConfig.simdHashTableEnabled();
   if (joinNode_->isRightJoin() || joinNode_->isFullJoin() ||
       joinNode_->isRightSemiProjectJoin()) {
     // Do not ignore null keys.
@@ -250,7 +251,9 @@ void HashBuild::setupTable() {
         queryConfig.minTableRowsForParallelJoinBuild(),
         pool(),
         queryConfig.enableJitRowEqVectors(),
-        hybridJoin_);
+        hybridJoin_,
+        queryConfig.useMonoAlloc(),
+        simdHashTableEnabled);
   } else {
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
@@ -267,7 +270,9 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          queryConfig.useMonoAlloc(),
+          simdHashTableEnabled);
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
@@ -280,7 +285,9 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          queryConfig.useMonoAlloc(),
+          simdHashTableEnabled);
     }
   }
   lookup_ = std::make_unique<HashLookup>(
@@ -600,10 +607,12 @@ void HashBuild::addInput(RowVectorPtr input) {
     noMoreInput();
     return;
   }
-  if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
-    spillRowBasedInput(); // spill previous input rows in hash tables.
-  } else {
-    spillInput(input);
+  if (spillEnabled()) {
+    if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
+      spillRowBasedInput(); // spill previous input rows in hash tables.
+    } else {
+      spillInput(input);
+    }
   }
 
   if (!activeRows_.hasSelections()) {
@@ -765,8 +774,7 @@ bool HashBuild::reserveMemory(
   const auto numRows = rows->numRows();
 
   auto [freeRows, outOfLineFreeBytes] = rows->freeSpace();
-  const auto outOfLineBytes =
-      rows->stringAllocator().retainedSize() - outOfLineFreeBytes;
+  const auto outOfLineBytes = rows->variableWidthUsedBytes();
   const auto outOfLineBytesPerRow =
       std::max<uint64_t>(1, numRows == 0 ? 0 : outOfLineBytes / numRows);
   const auto currentUsage = pool()->currentBytes();
@@ -850,10 +858,9 @@ bool HashBuild::reserveMemory(
 }
 
 void HashBuild::spillRowBasedInput() {
-  if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-    return;
-  }
-  if (!spillEnabled() || spiller_ == nullptr || !spiller_->isAnySpilled() ||
+  if (!spillEnabled() ||
+      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE ||
+      spiller_ == nullptr || !spiller_->isAnySpilled() ||
       !activeRows_.hasSelections() || spiller_->container()->numRows() == 0) {
     return;
   }
@@ -866,11 +873,9 @@ void HashBuild::spillRowBasedInput() {
 void HashBuild::spillInput(const RowVectorPtr& input) {
   BOLT_CHECK_EQ(input->size(), activeRows_.size());
 
-  if (spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
-    return;
-  }
-
-  if (!spillEnabled() || spiller_ == nullptr || !spiller_->isAnySpilled() ||
+  if (!spillEnabled() ||
+      spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE ||
+      spiller_ == nullptr || !spiller_->isAnySpilled() ||
       !activeRows_.hasSelections()) {
     return;
   }
@@ -1441,8 +1446,12 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
   // spilled file and use HashBuild::addInput(RowVectorPtr input) to add input
   // data, but spillInput(input) in addInput(RowVectorPtr input) will not
   // trigger spill again (OOM in end).
-  if (spiller_ != nullptr) {
-    auto maxPartitionRowCount = spiller_->maxPartitionRowCount();
+  // Peer spillers have already been moved to the last finishing builder.
+  // Their row counts are unavailable here, so only adapt repartitioning for
+  // a single builder until repartition bits are coordinated across builders.
+  if (spiller_ != nullptr && joinBridge_->numBuilders() == 1 &&
+      operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1) {
+    maxPartitionRowCount = spiller_->maxPartitionRowCount();
   }
   table_.reset();
   spiller_.reset();
@@ -1510,6 +1519,7 @@ void HashBuild::addRuntimeStats() {
   // Report range sizes and number of distinct values for the join keys.
   const auto& hashers = table_->hashers();
   const auto hashTableStats = table_->stats();
+  const auto hashMode = table_->hashMode();
   uint64_t asRange;
   uint64_t asDistinct;
   auto lockedStats = stats_.wlock();
@@ -1537,6 +1547,9 @@ void HashBuild::addRuntimeStats() {
     lockedStats->runtimeStats["hashtable.numTombstones"] =
         RuntimeMetric(hashTableStats.numTombstones);
   }
+  detail::addHashModeRuntimeStats(
+      lockedStats->runtimeStats,
+      std::optional<BaseHashTable::HashMode>{hashMode});
 
   // Add max spilling level stats if spilling has been triggered.
   if (spiller_ != nullptr && spiller_->isAnySpilled()) {

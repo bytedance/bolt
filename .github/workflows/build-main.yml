@@ -60,7 +60,7 @@ jobs:
       if: ${{ needs.changes.outputs.source_code == 'true' }}
       runs-on: [ self-hosted, medium ]
       container:
-        image: bolt-registry:5000/bolt-ci:20260114
+        image: bolt-registry:5000/bolt-ci:20260921
         volumes:
           - /data/ccache-data:/data/ccache-data
         options: --user root --init

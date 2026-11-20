@@ -28,8 +28,10 @@
  * --------------------------------------------------------------------------
  */
 
+#include <fmt/format.h>
 #include <limits>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
@@ -71,6 +73,79 @@ TEST_F(MinMaxByAggregateTest, minBy) {
   })};
 
   testAggregations(vectors, {}, {"spark_min_by(c0, c1)"}, expected);
+}
+
+TEST_F(MinMaxByAggregateTest, encodedIntermediateRows) {
+  auto wrapField = [&](const VectorPtr& field) {
+    auto reversed = BaseVector::wrapInDictionary(
+        nullptr, makeIndices({3, 2, 1, 0}), 4, field);
+    return BaseVector::wrapInDictionary(
+        nullptr, makeIndices({0, 1, 2, 3}), 4, reversed);
+  };
+  auto intermediate = makeRowVector({
+      wrapField(makeFlatVector<int64_t>({10, 20, 30, 40})),
+      wrapField(makeFlatVector<int64_t>({1, 2, 3, 4})),
+  });
+
+  auto testInput = [&](const VectorPtr& encoded,
+                       int64_t fullMin,
+                       int64_t fullMax,
+                       int64_t selectedMin,
+                       int64_t selectedMax) {
+    for (bool sparse : {false, true}) {
+      auto input = makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 0, 0}),
+          encoded,
+          makeFlatVector<bool>({true, !sparse, !sparse, true}),
+      });
+      for (bool grouped : {false, true}) {
+        SCOPED_TRACE(fmt::format("sparse={}, grouped={}", sparse, grouped));
+        const std::vector<std::string> keys = grouped
+            ? std::vector<std::string>{"c0"}
+            : std::vector<std::string>{};
+        // Feed encoded intermediate states directly to final aggregation so
+        // partial aggregation or serialization cannot flatten the fields.
+        auto plan = exec::test::PlanBuilder()
+                        .values({input})
+                        .finalAggregation(
+                            keys,
+                            {"spark_min_by(c1) FILTER (WHERE c2)",
+                             "spark_max_by(c1) FILTER (WHERE c2)"},
+                            {{BIGINT(), BIGINT()}, {BIGINT(), BIGINT()}})
+                        .planNode();
+        std::vector<VectorPtr> expected;
+        if (grouped) {
+          expected.push_back(makeFlatVector<int32_t>({0}));
+        }
+        expected.push_back(
+            makeFlatVector<int64_t>({sparse ? selectedMin : fullMin}));
+        expected.push_back(
+            makeFlatVector<int64_t>({sparse ? selectedMax : fullMax}));
+        exec::test::AssertQueryBuilder(plan).maxDrivers(1).assertResults(
+            makeRowVector(expected));
+      }
+    }
+  };
+
+  testInput(intermediate, 10, 40, 10, 40);
+  testInput(
+      BaseVector::wrapInDictionary(
+          nullptr, makeIndices({2, 0, 3, 1}), 4, intermediate),
+      10,
+      40,
+      20,
+      30);
+  testInput(BaseVector::wrapInConstant(4, 1, intermediate), 30, 30, 30, 30);
+  testInput(
+      BaseVector::wrapInDictionary(
+          makeNulls({true, false, false, false}),
+          makeIndices({2, 0, 3, 1}),
+          4,
+          intermediate),
+      10,
+      40,
+      30,
+      30);
 }
 
 TEST_F(MinMaxByAggregateTest, decimalCompare) {

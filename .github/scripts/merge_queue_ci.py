@@ -472,7 +472,7 @@ def upsert_gate_check(
     )
 
 
-def find_source_evidence(api, repository, run, expected_config):
+def find_source_evidence(api, repository, run, accepted_configs):
     workflow = workflow_filename(run.get("path"))
     prefix = (
         f"{SOURCE_ARTIFACT_PREFIX}-{workflow_key(workflow)}-{run['id']}-"
@@ -496,10 +496,10 @@ def find_source_evidence(api, repository, run, expected_config):
             f"Malformed source evidence artifact: {matches[0]['name']}"
         ) from error
     validate_sha(merge_sha, "merge SHA")
-    if evidence_config != expected_config:
+    if evidence_config not in accepted_configs:
         raise RuntimeError(
             f"CI configuration mismatch for run {run['id']}: "
-            f"{evidence_config} != {expected_config}"
+            f"{evidence_config} not in {sorted(accepted_configs)}"
         )
     validate_config_hash(evidence_config)
     return {
@@ -509,12 +509,19 @@ def find_source_evidence(api, repository, run, expected_config):
     }
 
 
-def reusable_pr_result(api, repository, runs, salt):
-    expected_config = config_hash(salt)
+def reusable_pr_result(api, repository, runs, salt, accepted_salts=()):
+    salts_by_config = {config_hash(value): value for value in (salt, *accepted_salts)}
     evidences = {
-        workflow: find_source_evidence(api, repository, run, expected_config)
+        workflow: find_source_evidence(api, repository, run, salts_by_config)
         for workflow, run in runs.items()
     }
+    configs = {evidence["config_hash"] for evidence in evidences.values()}
+    if len(configs) != 1:
+        raise RuntimeError(
+            f"CI workflows used different configurations: {sorted(configs)}"
+        )
+    # Preserve the tested configuration in the reusable result and artifact name.
+    tested_salt = salts_by_config[configs.pop()]
     merge_shas = {evidence["merge_sha"] for evidence in evidences.values()}
     if len(merge_shas) != 1:
         raise RuntimeError(f"CI workflows tested different merge commits: {merge_shas}")
@@ -531,7 +538,7 @@ def reusable_pr_result(api, repository, runs, salt):
         )
     base_sha = validate_sha(parents[0], "base SHA")
     tree_sha = validate_sha((commit.get("tree") or {}).get("sha"), "tree SHA")
-    result = make_fingerprint(tree_sha, base_sha, salt)
+    result = make_fingerprint(tree_sha, base_sha, tested_salt)
     result.update(
         {
             "event": "pull_request",
@@ -551,6 +558,7 @@ def reconcile_gate(
     salt,
     output,
     github_output=None,
+    accepted_salts=(),
 ):
     repository = validate_repository(repository)
     source_run = api.request(f"/repos/{repository}/actions/runs/{source_run_id}")
@@ -565,7 +573,7 @@ def reconcile_gate(
     validation_error = None
     if conclusion == "success" and event == "pull_request":
         try:
-            result = reusable_pr_result(api, repository, runs, salt)
+            result = reusable_pr_result(api, repository, runs, salt, accepted_salts)
         except GitHubApiError:
             raise
         except (KeyError, RuntimeError, TypeError, ValueError) as error:
@@ -828,6 +836,7 @@ def command_reconcile_gate(args):
         args.salt,
         args.output,
         github_output=args.github_output,
+        accepted_salts=args.accept_salt,
     )
     return 0
 
@@ -887,6 +896,12 @@ def build_parser():
     gate.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     gate.add_argument("--source-run-id", required=True)
     gate.add_argument("--salt", required=True)
+    gate.add_argument(
+        "--accept-salt",
+        action="append",
+        default=[],
+        help="Additional trusted CI configuration during migration (repeatable)",
+    )
     gate.add_argument("--output", required=True)
     gate.add_argument("--github-output")
     gate.set_defaults(func=command_reconcile_gate)

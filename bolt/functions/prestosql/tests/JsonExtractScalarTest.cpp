@@ -184,6 +184,18 @@ TEST_F(JsonExtractScalarTest, invalidPath) {
   EXPECT_THROW(jsonExtractScalar(R"({"k1":"v1"})", "$.k1."), BoltUserError);
   EXPECT_THROW(jsonExtractScalar(R"({"k1":"v1"})", "$.k1]"), BoltUserError);
   EXPECT_THROW(jsonExtractScalar(R"({"k1":"v1)", "$.k1]"), BoltUserError);
+
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kEnableSonicJsonExtractScalar, "false"}});
+  EXPECT_THROW(
+      jsonExtractScalar(R"({"outer":{"value":"result"}})", "$. outer. value"),
+      BoltUserError);
+  EXPECT_THROW(
+      jsonExtractScalar(R"({"outer":{"value":"result"}})", "$. outer"),
+      BoltUserError);
+  EXPECT_THROW(
+      jsonExtractScalar(R"({"outer":{"value":"result"}})", "$.outer. value"),
+      BoltUserError);
 }
 
 // simdjson, like Presto java, returns the large number as-is as a string,

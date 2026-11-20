@@ -35,8 +35,8 @@ class JsonSplitTest : public SparkFunctionBaseTest {
         std::vector<core::TypedExprPtr>{jsonField},
         "json_split");
 
-    bytedance::bolt::VectorPtr result = evaluate<ArrayVector>(
-        jsonSplitExpr, makeRowVector({"c0"}, {parameter}));
+    bytedance::bolt::VectorPtr result =
+        evaluate(jsonSplitExpr, makeRowVector({"c0"}, {parameter}));
     if (expected) {
       ::bytedance::bolt::test::assertEqualVectors(expected, result);
     }
@@ -56,8 +56,7 @@ class JsonSplitTest : public SparkFunctionBaseTest {
         std::vector<core::TypedExprPtr>{jsonField, typeField},
         "json_split");
 
-    auto result = evaluate<ArrayVector>(
-        jsonSplitExpr, makeRowVector({"c0"}, {parameter}));
+    auto result = evaluate(jsonSplitExpr, makeRowVector({"c0"}, {parameter}));
     if (expected) {
       ::bytedance::bolt::test::assertEqualVectors(expected, result);
     }
@@ -389,6 +388,70 @@ TEST_F(JsonSplitTest, testPerfComplex) {
       JsonSplitWithType(flatVector, MAP(VARCHAR(), VARCHAR()));
     }
   });
+}
+
+TEST_F(JsonSplitTest, testMalformedJson) {
+  auto values = makeNullableFlatVector<std::string>({
+      R"(["before"])",
+      R"(["invalid",])",
+      R"(["truncated","value")",
+      R"(["truncated",{"value": 1)",
+      R"(["after1","after2"])",
+  });
+
+  using OptionalArray = std::optional<std::vector<std::optional<std::string>>>;
+  auto expected =
+      makeNullableArrayVector<std::string>(std::vector<OptionalArray>{
+          std::vector<std::optional<std::string>>{"before"},
+          std::nullopt,
+          std::nullopt,
+          std::nullopt,
+          std::vector<std::optional<std::string>>{"after1", "after2"},
+      });
+
+  for (const auto useSonic : {true, false}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kEnableSonicJsonParse,
+          useSonic ? "true" : "false"}});
+    JsonSplitSimple(values, expected);
+  }
+}
+
+TEST_F(JsonSplitTest, testElementOffsetRestoredAfterRowFailure) {
+  auto values = makeFlatVector<std::string>({
+      R"([{"a":0}])",
+      R"([{"a":1},{invalid}])",
+      R"([{"a":2}])",
+  });
+
+  auto rowType = ROW({"a"}, {BIGINT()});
+  auto elements = makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 2})});
+  std::vector<vector_size_t> offsets{0, 1, 1};
+  auto expected = makeArrayVector(offsets, elements, {1});
+
+  for (const auto useSonic : {true, false}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kEnableSonicJsonParse,
+          useSonic ? "true" : "false"}});
+
+    JsonSplitWithType(values, rowType, expected);
+  }
+
+  auto timestampValues = makeFlatVector<std::string>({
+      R"(["2014-06-01T03:02:13+00"])",
+      R"(["2014-06-01T03:02:13+08","invalid"])",
+      R"(["2014-06-01T03:02:13-08"])",
+  });
+  auto timestampElements = makeFlatVector<Timestamp>(
+      {Timestamp(1401591733, 0), Timestamp(1401620533, 0)});
+  auto timestampExpected = makeArrayVector(offsets, timestampElements, {1});
+  for (const auto useSonic : {true, false}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kEnableSonicJsonParse,
+          useSonic ? "true" : "false"}});
+
+    JsonSplitWithType(timestampValues, TIMESTAMP(), timestampExpected);
+  }
 }
 
 } // namespace

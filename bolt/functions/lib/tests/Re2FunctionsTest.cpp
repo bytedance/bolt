@@ -402,6 +402,27 @@ TEST_F(Re2FunctionsTest, regexExtractBigintGroupId) {
   });
 }
 
+TEST_F(Re2FunctionsTest, regexExtractBigintGroupIdDoesNotNarrow) {
+  for (const auto groupId :
+       {int64_t{4294967296}, int64_t{4294967297}, int64_t{-4294967295}}) {
+    SCOPED_TRACE(groupId);
+    EXPECT_THROW(
+        evaluateOnce<std::string>(
+            "re2_extract(c0, c1, c2)",
+            std::optional<std::string>{"foo123"},
+            std::optional<std::string>{"foo([0-9]+)"},
+            std::optional<int64_t>{groupId}),
+        BoltException);
+    EXPECT_THROW(
+        evaluateOnce<std::string>(
+            fmt::format(
+                "re2_extract(c0, 'foo([0-9]+)', cast('{}' as bigint))",
+                groupId),
+            std::optional<std::string>{"foo123"}),
+        BoltException);
+  }
+}
+
 TEST_F(Re2FunctionsTest, regexExtractBatch) {
   VectorFunctionTester<std::string, std::string, std::string, int> re2Extract{
       "re2_extract(c0, c1, c2)"};
@@ -438,6 +459,61 @@ TEST_F(Re2FunctionsTest, regexExtractConstantPatternNoGroupId) {
 
   EXPECT_EQ(extract("a1 b2 c3", "\\d+"), "1");
   EXPECT_EQ(extract("a b245 c3", "\\d+"), "245");
+}
+
+TEST_F(Re2FunctionsTest, likeSignaturesAllowDynamicPattern) {
+  const auto signatures = likeSignatures();
+  ASSERT_EQ(signatures.size(), 2);
+  EXPECT_THAT(
+      signatures[0]->constantArguments(), ::testing::ElementsAre(false, false));
+  EXPECT_THAT(
+      signatures[1]->constantArguments(),
+      ::testing::ElementsAre(false, false, true));
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicPatterns) {
+  auto input = makeNullableFlatVector<std::string>(
+      {"axb", "axb", "xhelloy", "abcdef", std::nullopt, "abc"});
+  auto pattern = makeNullableFlatVector<std::string>(
+      {"a%b", "a_b", "%hello%", "%xyz%", "%a%", std::nullopt});
+
+  auto result = evaluate("like(c0, c1)", makeRowVector({input, pattern}));
+  auto expected = makeNullableFlatVector<bool>(
+      {true, true, true, false, std::nullopt, std::nullopt});
+
+  assertEqualVectors(expected, result);
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicPatternsWithConstantEscape) {
+  auto input =
+      makeNullableFlatVector<std::string>({"a_b", "a%b", "axb", std::nullopt});
+  auto pattern =
+      makeNullableFlatVector<std::string>({R"(a\_b)", R"(a\%b)", "a_b", "%"});
+
+  auto result = evaluate("like(c0, c1, '\\')", makeRowVector({input, pattern}));
+  auto expected =
+      makeNullableFlatVector<bool>({true, true, true, std::nullopt});
+
+  assertEqualVectors(expected, result);
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicLongPatterns) {
+  auto input = makeFlatVector<std::string>(
+      {"longfixedpatternvalue",
+       "longprefixpatternvalue",
+       "valuelongsuffixpattern",
+       "prefixlongsubstringpatternsuffix",
+       "a_long_generic_pattern_value"});
+  auto pattern = makeFlatVector<std::string>(
+      {"longfixedpatternvalue",
+       "longprefixpattern%",
+       "%longsuffixpattern",
+       "%longsubstringpattern%",
+       "%long_generic_pattern%"});
+
+  auto result = evaluate("like(c0, c1)", makeRowVector({input, pattern}));
+
+  assertEqualVectors(makeConstant(true, input->size()), result);
 }
 
 TEST_F(Re2FunctionsTest, likePattern) {

@@ -40,6 +40,9 @@
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::functions {
 
+std::shared_ptr<const DateTimeFormatterContext> getDateTimeFormatterContext(
+    const core::QueryConfig& config);
+
 inline constexpr int64_t kSecondsInDay = 86'400;
 inline constexpr int64_t kDaysInWeek = 7;
 extern const folly::F14FastMap<std::string, int8_t> kDayOfWeekNames;

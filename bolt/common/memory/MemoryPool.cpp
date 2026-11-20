@@ -1074,21 +1074,22 @@ bool MemoryPoolImpl::growCapacity(MemoryPool* requestor, uint64_t size) {
   BOLT_CHECK(requestor->isLeaf());
   ++numCapacityGrowths_;
 
+  bool grew{false};
   {
     MemoryPoolArbitrationSection arbitrationSection(requestor);
-    if (arbitrator_->growCapacity(this, size)) {
-      return true;
-    }
+    grew = arbitrator_->growCapacity(this, size);
   }
   // The memory pool might have been aborted during the time it leaves the
   // arbitration no matter the arbitration succeed or not.
   if (FOLLY_UNLIKELY(aborted())) {
     // Release the reservation committed by the memory arbitration on success.
-    decrementReservation(size);
+    if (grew) {
+      decrementReservation(size);
+    }
     BOLT_CHECK_NOT_NULL(abortError());
     std::rethrow_exception(abortError());
   }
-  return false;
+  return grew;
 }
 
 // Returns the needed reservation size. If there is sufficient unused memory

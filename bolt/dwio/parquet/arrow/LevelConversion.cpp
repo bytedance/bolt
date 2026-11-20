@@ -54,14 +54,15 @@ using ::arrow::internal::CpuInfo;
 using ::std::optional;
 
 optional<::arrow::internal::FirstTimeBitmapWriter> makeBitmapWriter(
-    ValidityBitmapInputOutput* output) {
+    ValidityBitmapInputOutput* output,
+    int64_t values_to_skip = 0) {
   if (output->valid_bits == nullptr) {
     return std::nullopt;
   }
   return ::arrow::internal::FirstTimeBitmapWriter(
       output->valid_bits,
-      output->valid_bits_offset,
-      output->values_read_upper_bound);
+      output->valid_bits_offset + values_to_skip,
+      std::max<int64_t>(output->values_read_upper_bound - values_to_skip, 0));
 }
 
 void writeValidityBit(
@@ -86,13 +87,24 @@ int64_t countContinuationRun(
     int64_t num_def_levels,
     int64_t start,
     LevelInfo level_info) {
-  int64_t run = 1;
-  while (start + run < num_def_levels &&
-         rep_levels[start + run] == level_info.rep_level &&
-         def_levels[start + run] >= level_info.repeated_ancestor_def_level) {
-    ++run;
+  constexpr int64_t kBatch = xsimd::batch<int16_t>::size;
+  const auto repLevel = xsimd::broadcast<int16_t>(level_info.rep_level);
+  const auto ancestorDefLevel =
+      xsimd::broadcast<int16_t>(level_info.repeated_ancestor_def_level - 1);
+  auto runEnd = start + 1;
+  for (; runEnd + kBatch <= num_def_levels; runEnd += kBatch) {
+    const auto reps = xsimd::load_unaligned(rep_levels + runEnd);
+    const auto defs = xsimd::load_unaligned(def_levels + runEnd);
+    if (!xsimd::all((reps == repLevel) & (defs > ancestorDefLevel))) {
+      break;
+    }
   }
-  return run;
+  while (runEnd < num_def_levels &&
+         rep_levels[runEnd] == level_info.rep_level &&
+         def_levels[runEnd] >= level_info.repeated_ancestor_def_level) {
+    ++runEnd;
+  }
+  return runEnd - start;
 }
 
 bool isSupportedDirectStructList(
@@ -175,7 +187,15 @@ class OffsetListOutput {
 
 class LengthListOutput {
  public:
-  explicit LengthListOutput(int32_t* lengths) : lengths_(lengths) {}
+  explicit LengthListOutput(
+      int32_t* lengths,
+      ListLengthsState* state = nullptr,
+      bool finalize = true)
+      : lengths_(lengths),
+        state_(state),
+        finalize_(finalize),
+        currentLength_(state == nullptr ? 0 : state->current_length),
+        haveCurrentList_(state != nullptr && state->has_open_list) {}
 
   void OnContinuationRun(int64_t run) {
     if (ARROW_PREDICT_FALSE(
@@ -187,16 +207,18 @@ class LengthListOutput {
   }
 
   void OnNewList(int16_t def_level, const LevelInfo& level_info) {
-    Finish();
+    finishCurrentList();
     haveCurrentList_ = true;
     currentLength_ = def_level >= level_info.def_level ? 1 : 0;
   }
 
   void Finish() {
-    if (haveCurrentList_) {
-      lengths_[valuesRead_++] = currentLength_;
-      currentLength_ = 0;
-      haveCurrentList_ = false;
+    if (finalize_) {
+      finishCurrentList();
+    }
+    if (state_ != nullptr) {
+      state_->current_length = currentLength_;
+      state_->has_open_list = haveCurrentList_;
     }
   }
 
@@ -213,7 +235,17 @@ class LengthListOutput {
   }
 
  private:
+  void finishCurrentList() {
+    if (haveCurrentList_) {
+      lengths_[valuesRead_++] = currentLength_;
+      currentLength_ = 0;
+      haveCurrentList_ = false;
+    }
+  }
+
   int32_t* lengths_;
+  ListLengthsState* state_;
+  bool finalize_;
   int64_t valuesRead_{0};
   int32_t currentLength_{0};
   bool haveCurrentList_{false};
@@ -226,14 +258,10 @@ void DefRepLevelsToListInfo(
     int64_t num_def_levels,
     LevelInfo level_info,
     ValidityBitmapInputOutput* output,
-    ListOutput& list_output) {
-  optional<::arrow::internal::FirstTimeBitmapWriter> valid_bits_writer;
-  if (output->valid_bits) {
-    valid_bits_writer.emplace(
-        output->valid_bits,
-        output->valid_bits_offset,
-        output->values_read_upper_bound);
-  }
+    ListOutput& list_output,
+    int64_t validity_values_to_skip = 0,
+    bool finalize_open_list = true) {
+  auto valid_bits_writer = makeBitmapWriter(output, validity_values_to_skip);
   for (int64_t x = 0; x < num_def_levels; ++x) {
     // Skip items that belong to empty or null ancestor lists and further nested
     // lists.
@@ -252,7 +280,7 @@ void DefRepLevelsToListInfo(
     } else {
       if (ARROW_PREDICT_FALSE(
               (valid_bits_writer.has_value() &&
-               valid_bits_writer->position() >=
+               valid_bits_writer->position() + validity_values_to_skip >=
                    output->values_read_upper_bound) ||
               list_output.valuesReadForBounds() >=
                   output->values_read_upper_bound)) {
@@ -280,6 +308,15 @@ void DefRepLevelsToListInfo(
       }
     }
   }
+  if (ARROW_PREDICT_FALSE(
+          finalize_open_list &&
+          list_output.valuesReadForBounds() >
+              output->values_read_upper_bound)) {
+    std::stringstream ss;
+    ss << "Definition levels exceeded upper bound: "
+       << output->values_read_upper_bound;
+    throw ParquetException(ss.str());
+  }
   list_output.Finish();
   if (valid_bits_writer.has_value()) {
     valid_bits_writer->Finish();
@@ -294,6 +331,85 @@ void DefRepLevelsToListInfo(
         "Null values with null_slot_usage > 1 not supported."
         "(i.e. FixedSizeLists with null values are not supported)");
   }
+}
+
+bool defRepLevelsToListLengthsAndStructBitmap(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo list_level_info,
+    LevelInfo struct_level_info,
+    ValidityBitmapInputOutput* list_output,
+    int32_t* lengths,
+    ValidityBitmapInputOutput* struct_output,
+    ListLengthsState* state,
+    bool finalize) {
+  if (!isSupportedDirectStructList(list_level_info, struct_level_info)) {
+    return false;
+  }
+
+  const auto validityValuesToSkip =
+      static_cast<int64_t>(state != nullptr && state->has_open_list);
+  auto listValidWriter = makeBitmapWriter(list_output, validityValuesToSkip);
+  auto structValidWriter =
+      makeBitmapWriter(struct_output, validityValuesToSkip);
+  LengthListOutput listLengths(lengths, state, finalize);
+
+  for (int64_t x = 0; x < num_def_levels; ++x) {
+    if (def_levels[x] < list_level_info.repeated_ancestor_def_level ||
+        rep_levels[x] > list_level_info.rep_level) {
+      continue;
+    }
+
+    if (rep_levels[x] == list_level_info.rep_level) {
+      const auto run = countContinuationRun(
+          def_levels, rep_levels, num_def_levels, x, list_level_info);
+      listLengths.OnContinuationRun(run);
+      x += run - 1;
+      continue;
+    }
+
+    checkFusedValuesReadUpperBound(
+        listLengths.valuesReadForBounds(), list_output, struct_output);
+    listLengths.OnNewList(def_levels[x], list_level_info);
+    writeValidityBit(
+        listValidWriter,
+        list_output,
+        def_levels[x] >= list_level_info.def_level - 1);
+    writeValidityBit(
+        structValidWriter,
+        struct_output,
+        def_levels[x] >= struct_level_info.def_level);
+  }
+  if (ARROW_PREDICT_FALSE(
+          finalize &&
+          (listLengths.valuesReadForBounds() >
+               list_output->values_read_upper_bound ||
+           listLengths.valuesReadForBounds() >
+               struct_output->values_read_upper_bound))) {
+    std::stringstream ss;
+    ss << "Definition levels exceeded upper bound: "
+       << std::min(
+              list_output->values_read_upper_bound,
+              struct_output->values_read_upper_bound);
+    throw ParquetException(ss.str());
+  }
+  listLengths.Finish();
+
+  if (listValidWriter.has_value()) {
+    listValidWriter->Finish();
+  }
+  if (structValidWriter.has_value()) {
+    structValidWriter->Finish();
+  }
+  list_output->values_read = listLengths.valuesRead();
+  struct_output->values_read = listLengths.valuesRead();
+  if (list_output->null_count > 0 && list_level_info.null_slot_usage > 1) {
+    throw ParquetException(
+        "Null values with null_slot_usage > 1 not supported."
+        "(i.e. FixedSizeLists with null values are not supported)");
+  }
+  return true;
 }
 
 struct AllValidResult {
@@ -340,7 +456,7 @@ bool DefLevelsAreAllValidNoRepeatedParent(
   int64_t i = 0;
   for (; i + kBatch <= num_def_levels; i += kBatch) {
     const auto levels = xsimd::load_unaligned(def_levels + i);
-    allValid &= simd::toBitMask(levels > validLevel) == ((1 << kBatch) - 1);
+    allValid &= xsimd::all(levels > validLevel);
   }
   for (; i < num_def_levels; ++i) {
     allValid &= def_levels[i] >= level_info.def_level;
@@ -443,6 +559,28 @@ void DefRepLevelsToListLengths(
       def_levels, rep_levels, num_def_levels, level_info, output, listOutput);
 }
 
+void DefRepLevelsToListLengths(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    ValidityBitmapInputOutput* output,
+    int32_t* lengths,
+    ListLengthsState* state,
+    bool finalize) {
+  const auto validityValuesToSkip = static_cast<int64_t>(state->has_open_list);
+  LengthListOutput listOutput(lengths, state, finalize);
+  DefRepLevelsToListInfo(
+      def_levels,
+      rep_levels,
+      num_def_levels,
+      level_info,
+      output,
+      listOutput,
+      validityValuesToSkip,
+      finalize);
+}
+
 bool DefRepLevelsToListLengthsAndStructBitmap(
     const int16_t* def_levels,
     const int16_t* rep_levels,
@@ -452,60 +590,41 @@ bool DefRepLevelsToListLengthsAndStructBitmap(
     ValidityBitmapInputOutput* list_output,
     int32_t* lengths,
     ValidityBitmapInputOutput* struct_output) {
-  if (!isSupportedDirectStructList(list_level_info, struct_level_info)) {
-    return false;
-  }
+  return defRepLevelsToListLengthsAndStructBitmap(
+      def_levels,
+      rep_levels,
+      num_def_levels,
+      list_level_info,
+      struct_level_info,
+      list_output,
+      lengths,
+      struct_output,
+      nullptr,
+      true);
+}
 
-  auto list_valid_writer = makeBitmapWriter(list_output);
-  auto struct_valid_writer = makeBitmapWriter(struct_output);
-  LengthListOutput listLengths(lengths);
-
-  for (int64_t x = 0; x < num_def_levels; ++x) {
-    if (def_levels[x] < list_level_info.repeated_ancestor_def_level ||
-        rep_levels[x] > list_level_info.rep_level) {
-      continue;
-    }
-
-    if (rep_levels[x] == list_level_info.rep_level) {
-      const auto run = countContinuationRun(
-          def_levels, rep_levels, num_def_levels, x, list_level_info);
-      listLengths.OnContinuationRun(run);
-      x += run - 1;
-      continue;
-    }
-
-    checkFusedValuesReadUpperBound(
-        listLengths.valuesReadForBounds(), list_output, struct_output);
-    listLengths.OnNewList(def_levels[x], list_level_info);
-    writeValidityBit(
-        list_valid_writer,
-        list_output,
-        def_levels[x] >= list_level_info.def_level - 1);
-    writeValidityBit(
-        struct_valid_writer,
-        struct_output,
-        def_levels[x] >= struct_level_info.def_level);
-  }
-  listLengths.Finish();
-
-  if (list_valid_writer.has_value()) {
-    list_valid_writer->Finish();
-    list_output->values_read = list_valid_writer->position();
-  } else {
-    list_output->values_read = listLengths.valuesRead();
-  }
-  if (struct_valid_writer.has_value()) {
-    struct_valid_writer->Finish();
-    struct_output->values_read = struct_valid_writer->position();
-  } else {
-    struct_output->values_read = listLengths.valuesRead();
-  }
-  if (list_output->null_count > 0 && list_level_info.null_slot_usage > 1) {
-    throw ParquetException(
-        "Null values with null_slot_usage > 1 not supported."
-        "(i.e. FixedSizeLists with null values are not supported)");
-  }
-  return true;
+bool DefRepLevelsToListLengthsAndStructBitmap(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo list_level_info,
+    LevelInfo struct_level_info,
+    ValidityBitmapInputOutput* list_output,
+    int32_t* lengths,
+    ValidityBitmapInputOutput* struct_output,
+    ListLengthsState* state,
+    bool finalize) {
+  return defRepLevelsToListLengthsAndStructBitmap(
+      def_levels,
+      rep_levels,
+      num_def_levels,
+      list_level_info,
+      struct_level_info,
+      list_output,
+      lengths,
+      struct_output,
+      state,
+      finalize);
 }
 
 void DefRepLevelsToBitmap(

@@ -37,6 +37,7 @@
 #include "bolt/common/base/Portability.h"
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/type/FloatingPointUtil.h"
 namespace bytedance::bolt::exec {
 
 #define VALUE_ID_TYPE_DISPATCH(TEMPLATE_FUNC, typeKind, ...)             \
@@ -78,7 +79,11 @@ inline uint64_t hashOne(DecodedVector& decoded, vector_size_t index) {
 
   // Inlined for scalars.
   using T = typename KindToFlatVector<Kind>::HashRowType;
-  return folly::hasher<T>()(decoded.valueAt<T>(index));
+  if constexpr (std::is_floating_point_v<T>) {
+    return util::floating_point::NaNAwareHash<T>{}(decoded.valueAt<T>(index));
+  } else {
+    return folly::hasher<T>()(decoded.valueAt<T>(index));
+  }
 }
 
 template <TypeKind Kind>
@@ -95,8 +100,9 @@ FLATTEN void VectorHasher::hashValues(
     });
   } else if (decoded_.mayHaveNulls()) {
     auto hashVec = result;
-    std::vector<uint64_t> hashVector(rows.end(), kNullHash);
+    std::vector<uint64_t> hashVector;
     if (mix) {
+      hashVector.resize(rows.end(), kNullHash);
       hashVec = hashVector.data();
     } else {
       rows.applyToSelected(
@@ -104,7 +110,7 @@ FLATTEN void VectorHasher::hashValues(
     }
     rows.applyToSelected(
         [&](vector_size_t row) { hashVec[row] = hashOne<Kind>(decoded_, row); },
-        decoded_.nulls());
+        decoded_.nulls(&rows));
     if (mix) {
       rows.applyToSelected([&](vector_size_t row) {
         result[row] = bits::hashMix(result[row], hashVec[row]);
@@ -356,7 +362,8 @@ bool VectorHasher::computeValueIdsForRows(
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask,
-    raw_vector<uint64_t>& result) {
+    raw_vector<uint64_t>& result,
+    bool stringsAreContiguous) {
   return VALUE_ID_TYPE_DISPATCH(
       makeValueIdsForRows,
       typeKind_,
@@ -365,7 +372,8 @@ bool VectorHasher::computeValueIdsForRows(
       offset,
       nullByte,
       nullMask,
-      result.data());
+      result.data(),
+      stringsAreContiguous);
 }
 
 template <>
@@ -375,16 +383,20 @@ bool VectorHasher::makeValueIdsForRows<TypeKind::VARCHAR>(
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask,
-    uint64_t* result) {
+    uint64_t* result,
+    bool stringsAreContiguous) {
   for (int32_t i = 0; i < numGroups; ++i) {
     if (isNullAt(groups[i], nullByte, nullMask)) {
       if (multiplier_ == 1) {
         result[i] = 0;
       }
     } else {
+      auto value = valueAt<StringView>(groups[i], offset);
       std::string storage;
-      auto id = valueId<StringView>(HashStringAllocator::contiguousString(
-          valueAt<StringView>(groups[i], offset), storage));
+      if (!stringsAreContiguous) {
+        value = HashStringAllocator::contiguousString(value, storage);
+      }
+      auto id = valueId(value);
       if (id == kUnmappable) {
         return false;
       }

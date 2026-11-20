@@ -35,6 +35,9 @@
 #include <date/tz.h>
 #include <gmock/gmock.h>
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -260,6 +263,129 @@ TEST(DateTimeUtilTest, fromTimestampString) {
       fromTimestampString("2020-04-23 04:23:37+09:00", nullptr));
 }
 
+TEST(DateTimeUtilTest, fromDatetimeMicrosecondUnits) {
+  EXPECT_EQ(Timestamp(0, 1000), fromDatetime(0, 1));
+  EXPECT_EQ(Timestamp(86'401, 123'456'000), fromDatetime(1, 1'123'456));
+  EXPECT_EQ(Timestamp(-1, 999'999'000), fromDatetime(-1, 86'399'999'999));
+  EXPECT_EQ(Timestamp(86'400, 1000), fromDatetime(0, 86'400'000'001));
+}
+
+TEST(DateTimeUtilTest, timestampFractionalPrecision) {
+  const std::vector<std::pair<std::string, uint64_t>> fractions = {
+      {"", 0},
+      {".1", 100'000'000},
+      {".12", 120'000'000},
+      {".123", 123'000'000},
+      {".1234", 123'400'000},
+      {".12345", 123'450'000},
+      {".123456", 123'456'000},
+      {".1234567", 123'456'700},
+      {".12345678", 123'456'780},
+      {".123456789", 123'456'789},
+      {".000000001", 1},
+      {".9999999999", 999'999'999},
+      {"." + std::string(64, '9'), 999'999'999}};
+  const std::vector<std::pair<std::string, int64_t>> dates = {
+      {"0000-01-01 00:00:00", -62'167'219'200},
+      {"1969-12-31 23:59:59", -1},
+      {"1970-01-01 00:00:00", 0},
+      {"9999-12-31 23:59:59", 253'402'300'799}};
+  for (const auto& [date, seconds] : dates) {
+    for (const auto& [fraction, nanos] : fractions) {
+      const auto input = date + fraction;
+      SCOPED_TRACE(input);
+      bool invalid = false;
+      EXPECT_EQ(
+          Timestamp(seconds, nanos),
+          fromTimestampStringNanos(input.data(), input.size(), &invalid));
+      EXPECT_FALSE(invalid);
+      EXPECT_EQ(
+          Timestamp(seconds, nanos / 1000 * 1000),
+          fromTimestampString(input.data(), input.size(), nullptr));
+      const auto zoned = input + " America/Los_Angeles";
+      EXPECT_EQ(
+          fromTimestampWithTimezoneStringNanos(zoned.data(), zoned.size()),
+          std::make_pair(
+              Timestamp(seconds, nanos),
+              tz::getTimeZoneID("America/Los_Angeles")));
+      EXPECT_EQ(
+          fromTimestampWithTimezoneString(zoned.data(), zoned.size()),
+          std::make_pair(
+              Timestamp(seconds, nanos / 1000 * 1000),
+              tz::getTimeZoneID("America/Los_Angeles")));
+    }
+  }
+  EXPECT_EQ(123'456, fromTimeString("00:00:00.123456789012345", nullptr));
+  EXPECT_EQ(-123'456, fromTimeString("-00:00:00.123456789012345", nullptr));
+}
+
+TEST(DateTimeUtilTest, fromTimestampStringNanos) {
+  EXPECT_EQ(Timestamp(0, 0), fromTimestampStringNanos("1970-01-01", nullptr));
+  EXPECT_EQ(
+      Timestamp(-1, 999'999'999),
+      fromTimestampStringNanos("1969-12-31T23:59:59.999999999Z", nullptr));
+  EXPECT_EQ(
+      Timestamp(-19'800, 123'456'789),
+      fromTimestampStringNanos("1970-01-01 00:00:00.123456789+05:30", nullptr));
+  EXPECT_EQ(
+      Timestamp(12'600, 123'456'789),
+      fromTimestampStringNanos(
+          "1970-01-01 00:00:00.123456789Z-03:30", nullptr));
+  EXPECT_EQ(
+      Timestamp(86'400, 1),
+      fromTimestampStringNanos("1970-01-01 23:59:60.000000001", nullptr));
+  EXPECT_EQ(
+      Timestamp(3'661, 123'456'789),
+      fromTimestampStringNanos(" 1970-1-1 1:1:1.123456789  ", nullptr));
+
+  const std::string bounded = "1970-01-01 00:00:00.123456789trailing";
+  EXPECT_EQ(
+      Timestamp(0, 123'456'789),
+      fromTimestampStringNanos(bounded.data(), bounded.size() - 8, nullptr));
+
+  if (kSparkCompatible) {
+    EXPECT_EQ(Timestamp(0, 0), fromTimestampStringNanos("1970", nullptr));
+    EXPECT_EQ(
+        Timestamp(3'660, 0),
+        fromTimestampStringNanos("1970-01-01 01:01", nullptr));
+  } else {
+    EXPECT_EQ(
+        Timestamp(0, 1),
+        fromTimestampStringNanos("1970/1/1 0:0:0.000000001", nullptr));
+    EXPECT_EQ(
+        Timestamp(-62'167'219'200, 1),
+        fromTimestampStringNanos(
+            "0001-01-01 (BC) 00:00:00.000000001", nullptr));
+  }
+}
+
+TEST(DateTimeUtilTest, fromTimestampStringNanosInvalid) {
+  for (const auto* input :
+       {"",
+        " ",
+        "2023-02-29 00:00:00.123456789",
+        "1970-01-01 24:00:00",
+        "1970-01-01 00:00:61",
+        "1970-01-01 00:00:00.123456789x",
+        "1970-01-01 00:00:00.123456789012345x",
+        "1970-01-01 00:00:00.123456789+00:00:00"}) {
+    SCOPED_TRACE(input);
+    EXPECT_THROW(fromTimestampStringNanos(input, nullptr), BoltUserError);
+    bool invalid = false;
+    EXPECT_EQ(Timestamp(), fromTimestampStringNanos(input, &invalid));
+    EXPECT_TRUE(invalid);
+    EXPECT_EQ(std::nullopt, fromTimestampWithTimezoneStringNanos(input));
+  }
+  EXPECT_EQ(
+      std::nullopt,
+      fromTimestampWithTimezoneStringNanos(
+          "1970-01-01 00:00:00.123456789 Unknown/Zone"));
+  EXPECT_EQ(
+      fromTimestampWithTimezoneStringNanos(
+          "1970-01-01 00:00:00.123456789+05:30"),
+      std::make_pair(Timestamp(0, 123'456'789), tz::getTimeZoneID("+05:30")));
+}
+
 TEST(DateTimeUtilTest, fromTimestampStrInvalid) {
   // Needs at least a date.
   EXPECT_THROW(fromTimestampString("", nullptr), BoltUserError);
@@ -375,6 +501,50 @@ TEST(DateTimeUtilTest, toGMT) {
   // which are both equivalent to 2019-03-10 10:00:00 UTC.
   ts = fromTimestampString("2019-03-10 02:00:00", nullptr);
   EXPECT_THROW(ts.toGMT(*laZone), BoltUserError);
+}
+
+TEST(DateTimeUtilTest, toGMTGapPolicies) {
+  auto* la = tz::locateZone("America/Los_Angeles");
+  const auto local = Timestamp(
+      fromTimestampString("2019-03-10 02:30:00", nullptr).getSeconds(),
+      123456789);
+  auto timestamp = local;
+  bool hasError = false;
+  timestamp.toGMT(*la, &hasError);
+  EXPECT_TRUE(hasError);
+  EXPECT_EQ(timestamp, local);
+  EXPECT_THROW(timestamp.toGMT(*la), BoltUserError);
+
+  timestamp.toGMT(*la, TimestampGapPolicy::kShiftForward, &hasError);
+  EXPECT_FALSE(hasError);
+  EXPECT_EQ(
+      timestamp,
+      Timestamp(
+          fromTimestampString("2019-03-10 10:30:00", nullptr).getSeconds(),
+          123456789));
+
+  auto* toronto = tz::locateZone("America/Toronto");
+  timestamp = fromTimestampString("1919-03-31 00:00:00", nullptr);
+  auto shifted = timestamp;
+  shifted.toGMT(*toronto, TimestampGapPolicy::kShiftForward);
+  EXPECT_EQ(shifted, fromTimestampString("1919-03-31 05:00:00", nullptr));
+  timestamp.toGMT(*toronto, TimestampGapPolicy::kNextValidSecond);
+  EXPECT_EQ(timestamp, fromTimestampString("1919-03-31 04:30:00", nullptr));
+
+  for (const auto policy :
+       {TimestampGapPolicy::kReject,
+        TimestampGapPolicy::kShiftForward,
+        TimestampGapPolicy::kNextValidSecond}) {
+    timestamp = fromTimestampString("2019-11-03 01:30:00.123456", nullptr);
+    timestamp.toGMT(*la, policy);
+    EXPECT_EQ(
+        timestamp, fromTimestampString("2019-11-03 08:30:00.123456", nullptr));
+
+    timestamp = fromTimestampString("1970-01-01 00:00:00.123456", nullptr);
+    timestamp.toGMT(*tz::locateZone("+05:30"), policy);
+    EXPECT_EQ(
+        timestamp, fromTimestampString("1969-12-31 18:30:00.123456", nullptr));
+  }
 }
 
 TEST(DateTimeUtilTest, toTimezone) {

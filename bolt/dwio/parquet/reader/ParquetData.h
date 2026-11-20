@@ -64,6 +64,7 @@ class ParquetParams : public dwio::common::FormatParams {
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
       int32_t parquetRepDefMemoryLimit,
+      int32_t parquetRepDefStreamingWindowSize,
       int64_t parquetReaderImplicitCastMask = 0)
       : FormatParams(pool, stats),
         parquetReaderImplicitCastMask(parquetReaderImplicitCastMask),
@@ -76,7 +77,8 @@ class ParquetParams : public dwio::common::FormatParams {
             disableFloatingPointToVarcharMetadataFilter),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
-        parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {}
+        parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit),
+        parquetRepDefStreamingWindowSize_(parquetRepDefStreamingWindowSize) {}
 
   // ParquetReaderImplicitCastMask selecting implicit casts to block.
   int64_t parquetReaderImplicitCastMask{0};
@@ -107,6 +109,7 @@ class ParquetParams : public dwio::common::FormatParams {
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
   const int32_t parquetRepDefMemoryLimit_;
+  const int32_t parquetRepDefStreamingWindowSize_;
 };
 
 /// Format-specific data created for each leaf column of a Parquet rowgroup.
@@ -122,7 +125,8 @@ class ParquetData : public dwio::common::FormatData {
       bool enableMetadataFilter,
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
-      int32_t parquetRepDefMemoryLimit)
+      int32_t parquetRepDefMemoryLimit,
+      int32_t parquetRepDefStreamingWindowSize)
       : pool_(pool),
         type_(std::static_pointer_cast<const ParquetTypeWithId>(type)),
         rowGroups_(rowGroups),
@@ -135,7 +139,8 @@ class ParquetData : public dwio::common::FormatData {
         enableMetadataFilter_(enableMetadataFilter),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
-        parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {
+        parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit),
+        parquetRepDefStreamingWindowSize_(parquetRepDefStreamingWindowSize) {
     rowGroupOffsets_ = std::vector<int64_t>(rowGroups_.size());
     rowGroupOffsets_[0] = 0;
     for (int32_t i = 1; i < rowGroups_.size(); ++i) {
@@ -333,6 +338,8 @@ class ParquetData : public dwio::common::FormatData {
   // Streams for this column in each of 'rowGroups_'. Will be created on or
   // ahead of first use, not at construction.
   std::vector<std::unique_ptr<dwio::common::SeekableInputStream>> streams_;
+  std::vector<std::unique_ptr<dwio::common::SeekableInputStream>>
+      repDefStreams_;
   std::vector<int64_t> rowGroupOffsets_;
 
   const uint32_t maxDefine_;
@@ -358,6 +365,7 @@ class ParquetData : public dwio::common::FormatData {
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
   const int32_t parquetRepDefMemoryLimit_;
+  const int32_t parquetRepDefStreamingWindowSize_;
 };
 
 } // namespace bytedance::bolt::parquet

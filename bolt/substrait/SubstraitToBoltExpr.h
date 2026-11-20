@@ -31,25 +31,36 @@
 #pragma once
 
 #include <fmt/format.h>
+#include <memory>
+
 #include "bolt/core/Expressions.h"
 #include "bolt/functions/FunctionRegistry.h"
 #include "bolt/substrait/SubstraitParser.h"
 #include "bolt/vector/ComplexVector.h"
+
 namespace bytedance::bolt::substrait {
 
 /// This class is used to convert Substrait representations to Bolt
 /// expressions.
 class SubstraitBoltExprConverter {
  public:
-  /// subParser: A Substrait parser used to convert Substrait representations
-  /// into recognizable representations. functionMap: A pre-constructed map
-  /// storing the relations between the function id and the function name.
+  /// Uses the parser's function and type extensions when converting
+  /// expressions.
+  explicit SubstraitBoltExprConverter(
+      memory::MemoryPool* pool,
+      const std::shared_ptr<SubstraitParser>& substraitParser)
+      : pool_(pool),
+        substraitParser_(substraitParser),
+        functionSignatureMap_(getFunctionSignatures()) {}
+
+  /// Converts expressions using a pre-constructed function anchor map. The map
+  /// must outlive this converter, and subsequent updates remain visible.
   explicit SubstraitBoltExprConverter(
       memory::MemoryPool* pool,
       const std::unordered_map<uint64_t, std::string>& functionMap)
-      : pool_(pool),
-        functionMap_(functionMap),
-        functionSignatureMap_(getFunctionSignatures()) {}
+      : SubstraitBoltExprConverter(pool, std::make_shared<SubstraitParser>()) {
+    functionMap_ = &functionMap;
+  }
 
   /// Convert Substrait Field into Bolt Field Expression.
   std::shared_ptr<const core::FieldAccessTypedExpr> toBoltExpr(
@@ -85,16 +96,19 @@ class SubstraitBoltExprConverter {
   ArrayVectorPtr literalsToArrayVector(
       const ::substrait::Expression::Literal& listLiteral);
 
+  /// Convert map literal to MapVector.
+  MapVectorPtr literalsToMapVector(
+      const ::substrait::Expression::Literal& mapLiteral);
+
   /// Memory pool.
   memory::MemoryPool* pool_;
 
   /// The Substrait parser used to convert Substrait representations into
   /// recognizable representations.
-  SubstraitParser substraitParser_;
+  std::shared_ptr<SubstraitParser> substraitParser_;
 
-  /// The map storing the relations between the function id and the function
-  /// name.
-  std::unordered_map<uint64_t, std::string> functionMap_;
+  /// Optional externally owned function map for the compatibility constructor.
+  const std::unordered_map<uint64_t, std::string>* functionMap_{nullptr};
 
   /// The map storing the relations between the function name and the function
   /// signature.

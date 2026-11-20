@@ -1,7 +1,11 @@
 FROM gcc:12
 
-ENV CMAKE_VERSION=3.31.8
-ENV MOLD_VERSION=2.40.4
+ENV CMAKE_VERSION=3.31.10
+ENV MOLD_VERSION=2.42.1
+
+ARG GCC_VERSION=16.2.0
+ARG CLANG_VERSION=22.1.8
+ARG TOOLCHAIN_BUILD_DIR=/tmp/toolchain-build
 
 ARG DEB_REGION=""
 ARG https_proxy=""
@@ -13,24 +17,16 @@ RUN if [ "$DEB_REGION" != "" ]; then \
 fi
 
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
     curl \
-    tar
-
-RUN arch=$(arch) && \
-    https_proxy=${https_proxy} \
-    curl -L -# -o /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-${arch}.tar.gz  && \
-    tar -xzvf /tmp/cmake.tar.gz -C /opt && \
-    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/cmake /usr/local/bin/cmake && \
-    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/ctest /usr/local/bin/ctest && \
-    rm /tmp/cmake.tar.gz
-
-RUN apt-get update && apt-get install -y \
+    libgmp-dev \
+    libmpc-dev \
+    libmpfr-dev \
+    wget \
+    tar \
     sudo \
     bash \
-    vim-tiny \
     vim \
-    sudo \
     git \
     gdb \
     python3 \
@@ -39,13 +35,16 @@ RUN apt-get update && apt-get install -y \
     ssh-client \
     ninja-build \
     bison \
+    flex \
+    gawk \
+    bzip2 \
+    xz-utils \
     maven \
     net-tools \
     telnet \
     ssh \
     rsync \
     openssh-server \
-    lld \
     ccache \
     binutils-dev \
     make \
@@ -62,17 +61,99 @@ RUN apt-get update && apt-get install -y \
 
 RUN ln -sf /bin/bash /bin/sh
 
-RUN https_proxy=${https_proxy} curl -L -O --output-dir /tmp https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$(arch)-linux.tar.gz
-RUN cd /tmp && \
-    sudo tar -C /usr/local --strip-components=1 -xzf mold-$MOLD_VERSION-$(arch)-linux.tar.gz
+# Replace the base image's GCC in /usr/local, including static and shared libraries.
+RUN set -eux; \
+    mkdir -p "${TOOLCHAIN_BUILD_DIR}"; \
+    cd "${TOOLCHAIN_BUILD_DIR}"; \
+    wget --progress=dot:mega \
+        "https://mirrors.aliyun.com/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.gz"; \
+    tar -xzf "gcc-${GCC_VERSION}.tar.gz"; \
+    mkdir -p "${TOOLCHAIN_BUILD_DIR}/gcc-build-${GCC_VERSION}"; \
+    cd "${TOOLCHAIN_BUILD_DIR}/gcc-build-${GCC_VERSION}"; \
+    "${TOOLCHAIN_BUILD_DIR}/gcc-${GCC_VERSION}/configure" \
+        --prefix=/usr/local \
+        --libdir=/usr/local/lib64 \
+        --enable-languages=c,c++ \
+        --enable-static \
+        --enable-shared \
+        --disable-checking \
+        --disable-multilib; \
+    make -j "$(nproc)" || { \
+        find . -path '*/libatomic/config.log' -exec tail -n 300 {} \;; \
+        exit 1; \
+    }; \
+    make install-strip; \
+    ln -sf /usr/local/bin/gcc /usr/local/bin/gcc-16; \
+    ln -sf /usr/local/bin/g++ /usr/local/bin/g++-16; \
+    system_libdir="/lib/$(arch)-linux-gnu"; \
+    cp -a --remove-destination /usr/local/lib64/libstdc++.so* "${system_libdir}/"; \
+    cp -a --remove-destination /usr/local/lib64/libgcc_s.so* "${system_libdir}/"; \
+    ldconfig; \
+    gcc-16 --version; \
+    g++-16 --version; \
+    rm -rf "${TOOLCHAIN_BUILD_DIR:?}"/*
 
-# Add mold's ld as the first on the path
-env PATH=/usr/local/libexec/mold:$PATH
+RUN arch=$(arch) && \
+    https_proxy=${https_proxy} \
+    curl -L -# -o /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-${arch}.tar.gz  && \
+    tar -xzvf /tmp/cmake.tar.gz -C /opt && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/cmake /usr/local/bin/cmake && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/ctest /usr/local/bin/ctest && \
+    rm /tmp/cmake.tar.gz
+
+# Install Clang 22 and the CI tools that are distributed with LLVM.
+# and replace system's ld to avoid llvm-core building errors
+COPY assets/patches/llvm-pr220492.patch /tmp/llvm-pr220492.patch
+RUN set -eux; \
+    mkdir -p "${TOOLCHAIN_BUILD_DIR}"; \
+    cd "${TOOLCHAIN_BUILD_DIR}"; \
+    wget --progress=dot:mega -O "llvm-project-${CLANG_VERSION}.tar.gz" \
+        "https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-${CLANG_VERSION}.tar.gz"; \
+    tar -xzf "llvm-project-${CLANG_VERSION}.tar.gz"; \
+    cd "llvm-project-llvmorg-${CLANG_VERSION}"; \
+    git apply --check /tmp/llvm-pr220492.patch; \
+    git apply /tmp/llvm-pr220492.patch; \
+    rm /tmp/llvm-pr220492.patch; \
+    cd "${TOOLCHAIN_BUILD_DIR}"; \
+    cmake -S "llvm-project-llvmorg-${CLANG_VERSION}/llvm" -B llvm-build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="/opt/clang-${CLANG_VERSION}" \
+        -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
+        -DLLVM_DISTRIBUTION_COMPONENTS="clang;clang-resource-headers;clang-tidy;lld;llvm-ar;llvm-ranlib" \
+        -DLLVM_BUILD_TESTS=OFF \
+        -DLLVM_INCLUDE_TESTS=OFF \
+        -DLLVM_BUILD_DOCS=OFF \
+        -DLLVM_INCLUDE_DOCS=OFF \
+        -DLLVM_BUILD_EXAMPLES=OFF \
+        -DLLVM_INCLUDE_EXAMPLES=OFF; \
+    cmake --build llvm-build --target install-distribution-stripped \
+        --parallel "$(nproc)"; \
+    ln -sf "/opt/clang-${CLANG_VERSION}/bin/clang" /usr/local/bin/clang-22; \
+    ln -sf "/opt/clang-${CLANG_VERSION}/bin/clang++" /usr/local/bin/clang++-22; \
+    clang-22 --version; \
+    clang++-22 --version; \
+    /opt/clang-${CLANG_VERSION}/bin/clang-tidy --version; \
+    /opt/clang-${CLANG_VERSION}/bin/ld.lld --version; \
+    ln -sf /opt/clang-${CLANG_VERSION}/bin/ld.lld $(which ld); \
+    test -x "/opt/clang-${CLANG_VERSION}/bin/llvm-ar"; \
+    test -x "/opt/clang-${CLANG_VERSION}/bin/llvm-ranlib"; \
+    rm -rf "${TOOLCHAIN_BUILD_DIR:?}"/*
+
+ENV PATH="/opt/clang-${CLANG_VERSION}/bin:${PATH}"
+
+RUN set -eux; \
+    mold_archive="/tmp/mold-${MOLD_VERSION}-$(arch)-linux.tar.gz"; \
+    https_proxy=${https_proxy} curl -fL -o "${mold_archive}" \
+        "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-$(arch)-linux.tar.gz"; \
+    tar -C /usr/local --strip-components=1 -xzf "${mold_archive}"; \
+    rm "${mold_archive}"
+
 
 # License header check tool
 RUN https_proxy=${https_proxy} curl -L -# -o /tmp/skywalking-eyes-bin.tgz https://dlcdn.apache.org/skywalking/eyes/0.8.0/skywalking-license-eye-0.8.0-bin.tgz && \
     mkdir -p /opt/skywalking-license-eye && \
-    sudo tar -C /opt/skywalking-license-eye --strip-components=1 -xzf /tmp/skywalking-eyes-bin.tgz
+    sudo tar -C /opt/skywalking-license-eye --strip-components=1 -xzf /tmp/skywalking-eyes-bin.tgz && \
+    rm /tmp/skywalking-eyes-bin.tgz
 
 ENV PATH="/opt/skywalking-license-eye/bin/linux:${PATH}"
 
@@ -101,31 +182,6 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
 USER $USERNAME
-
-RUN conan profile detect && \
-    sed -i 's/gnu14/gnu17/g' ~/.conan2/profiles/default
-
-# Configure default conan profile to use the mold linker
-RUN cat >> ~/.conan2/profiles/default <<EOF
-
-[conf]
-tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
-tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
-EOF
-
-RUN cat > ~/.conan2/profiles/clang-profile <<EOF
-[settings]
-arch=$( [ "$arch" = "aarch64" ] && echo "armv8" || echo "$arch" )
-build_type=Release
-compiler=clang
-compiler.cppstd=17
-compiler.libcxx=libstdc++11
-compiler.version=16
-os=Linux
-
-[conf]
-tools.build:compiler_executables={"c": "clang", "cpp": "clang++"}
-EOF
 
 # Generate Locales
 RUN sudo sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && \

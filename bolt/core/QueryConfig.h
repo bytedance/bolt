@@ -31,6 +31,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
 #include "bolt/vector/TypeAliases.h"
@@ -180,6 +181,11 @@ class QueryConfig {
   static constexpr const char* kHashAggregationCompositeOutputEnabled =
       "hashaggregation_composite_output_enabled";
 
+  // Store row strings in per-container monotonic resources for aggregation,
+  // hash join and sorting. Individual row erasure does not reclaim strings;
+  // clearing or destroying the container releases them.
+  static constexpr const char* kUseMonoAlloc = "use_mono_alloc";
+
   static constexpr const char* kHashAggregationUniqueRowOpt =
       "hashaggregation_unique_row_opt";
 
@@ -247,6 +253,33 @@ class QueryConfig {
   /// Global enable spilling flag.
   static constexpr const char* kSpillEnabled = "spill_enabled";
 
+  /// Enables the task-level BufferManager for operators that opt in.
+  static constexpr const char* kBufferManagerEnabled = "buffer_manager_enabled";
+
+  /// Maximum size in bytes of each BufferManager bucket file. Does not apply
+  /// to dedicated files for records larger than the largest bucket.
+  static constexpr const char* kBufferManagerSpillFileSize =
+      "buffer_manager_spill_file_size";
+
+  /// Maximum number of files held by each bucket in a task's BufferManager.
+  static constexpr const char* kBufferManagerSpillMaxFilesPerBucket =
+      "buffer_manager_spill_max_files_per_bucket";
+
+  /// BufferManager spill codec, independent of the legacy operator spill
+  /// codec. Defaults to zstd; an explicit empty value is a compatibility alias
+  /// for zstd. Use none to disable compression.
+  static constexpr const char* kBufferManagerSpillCompressionKind =
+      "buffer_manager_spill_compression_kind";
+
+  /// Optional level for the selected BufferManager spill codec. Unset keeps
+  /// the codec's default; ignored when compression is disabled.
+  static constexpr const char* kBufferManagerSpillCompressionLevel =
+      "buffer_manager_spill_compression_level";
+
+  /// Enables BufferManager-backed streaming Window build for pre-sorted input.
+  static constexpr const char* kBmStreamingWindowBuildEnabled =
+      "bm_streaming_window_build_enabled";
+
   /// Aggregation spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kAggregationSpillEnabled =
       "aggregation_spill_enabled";
@@ -261,6 +294,15 @@ class QueryConfig {
 
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
+
+  static constexpr const char* kOrderByRadixSortEnabled =
+      "order_by_radix_sort_enabled";
+
+  /// If true, use the legacy SortBuffer when an OrderBy sorting key is REAL or
+  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW.
+  static constexpr const char*
+      kOrderByRadixSortFallbackForFloatingPointKeysEnabled =
+          "order_by_radix_sort_fallback_for_floating_point_keys_enabled";
 
   /// Support orderBy spilling in output stage
   static constexpr const char* kOrderBySpillInOutputStageEnabled =
@@ -415,6 +457,13 @@ class QueryConfig {
   static constexpr const char* kPrestoArrayAggIgnoreNulls =
       "presto.array_agg.ignore_nulls";
 
+  /// If false, size function returns null for null input.
+  static constexpr const char* kSparkLegacySizeOfNull =
+      "spark.sql.legacy.sizeOfNull";
+
+  /// If true, Spark SQL ANSI mode is enabled.
+  static constexpr const char* kSparkAnsiEnabled = "spark.sql.ansi.enabled";
+
   /// If true, array_agg() aggregation function will ignore nulls in the input.
   static constexpr const char* kPrestoSetAggIgnoreNulls =
       "presto.set_agg.ignore_nulls";
@@ -473,6 +522,12 @@ class QueryConfig {
   /// table build.
   static constexpr const char* kMinTableRowsForParallelJoinBuild =
       "min_table_rows_for_parallel_join_build";
+
+  /// If true, enable SIMD-specialized hash table paths for the main
+  /// HashAggregation and HashJoin hash tables. Other hash table users keep the
+  /// scalar default unless they explicitly opt in.
+  static constexpr const char* kSimdHashTableEnabled =
+      "simd_hash_table_enabled";
 
   static constexpr const char* kExchangeCompression = "exchange_compression";
 
@@ -548,6 +603,37 @@ class QueryConfig {
 
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
+
+  /// Whether the caller's JVM supports standalone month text without the
+  /// Java 8 formatting defect. Spark rejects LLL/LLLL when false (the default).
+  static constexpr const char* kSparkDatetimeStandaloneMonthText =
+      "spark.datetime_standalone_month_text_enabled";
+
+  /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
+  static constexpr const char* kDateTimeFormatterDefaultTimezone =
+      "date_time_formatter_default_timezone";
+  /// Zone used for hybrid/Gregorian calendar conversion; defaults to the
+  /// formatter's zone. For LEGACY parsing, Gluten must pass the JVM default
+  /// zone for Spark 3.3 and the formatter's zone for Spark 3.5.
+  static constexpr const char* kDateTimeFormatterRebaseTimezone =
+      "date_time_formatter_rebase_timezone";
+  /// Both values describe the SimpleDateFormat window captured by the caller.
+  static constexpr const char* kSparkLegacyTimestampParserPivotMillis =
+      "spark.legacy_timestamp_parser_pivot_millis";
+  static constexpr const char* kSparkLegacyTimestampParserPivotYear =
+      "spark.legacy_timestamp_parser_pivot_year";
+  /// Semicolon-separated zone=seconds entries for Java TimeZone raw offsets.
+  static constexpr const char* kSparkLegacyTimestampParserTimezoneRawOffsets =
+      "spark.legacy_timestamp_parser_timezone_raw_offsets";
+
+  /// If true, base64() chunks its output into 76-character lines separated by
+  /// CRLF; if false, it returns a single unchunked string. Mirrors
+  /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true
+  /// there). Spark <= 3.2 always returns unchunked output and Spark
+  /// 3.3.0-3.5.1 always chunks. Bolt defaults to false, matching
+  /// Spark <= 3.2.
+  static constexpr const char* kSparkChunkBase64StringEnabled =
+      "spark.chunk_base64_string_enabled";
 
   static constexpr const char* kThrowExceptionWhenEncounterBadJson =
       "throw_exception_when_encounter_bad_json";
@@ -630,6 +716,11 @@ class QueryConfig {
       "parquet_reader_implicit_cast_mask";
 
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
+
+  /// Number of levels per Parquet rep/def streaming window. Zero disables
+  /// streaming and uses the legacy preload path.
+  static constexpr const char* kParquetRepDefStreamingWindowSize =
+      "parquet_repdef_streaming_window_size";
 
   /// If true, reorder rows by containerId during hybrid join extraction for
   /// better cache locality. Can be disabled for testing to get deterministic
@@ -748,6 +839,13 @@ class QueryConfig {
   static constexpr const char* kEnableFlinkCompatible =
       "compatible.flink.enable";
 
+  /// java_map (default) uses boxed-key equality and visits only left key
+  /// groups. sql_keys uses SQL key equality and requires both sides' key
+  /// groups. Both modes require equal entry counts and keep the last duplicate
+  /// value.
+  static constexpr const char* kFlinkMapEqualityMode =
+      "flink_map_equality_mode";
+
   static constexpr const char* kFlinkJniUdfTaskInfo = "flink.jni.udf.task.info";
 
   static constexpr const char* kEnableSonicJsonSplit = "sonic.json_split";
@@ -859,6 +957,10 @@ class QueryConfig {
 
   bool isHashAggregationCompositeOutputEnabled() const {
     return get<bool>(kHashAggregationCompositeOutputEnabled, false);
+  }
+
+  bool useMonoAlloc() const {
+    return get<bool>(kUseMonoAlloc, true);
   }
 
   bool isUniqueRowOptimizationEnabled() const {
@@ -1075,6 +1177,30 @@ class QueryConfig {
     return get<bool>(kSpillEnabled, false);
   }
 
+  bool bufferManagerEnabled() const {
+    return get<bool>(kBufferManagerEnabled, false);
+  }
+
+  int64_t bufferManagerSpillFileSize() const {
+    return get<int64_t>(kBufferManagerSpillFileSize, 2LL << 30);
+  }
+
+  int64_t bufferManagerSpillMaxFilesPerBucket() const {
+    return get<int64_t>(kBufferManagerSpillMaxFilesPerBucket, 64);
+  }
+
+  std::string bufferManagerSpillCompressionKind() const {
+    return get<std::string>(kBufferManagerSpillCompressionKind, "zstd");
+  }
+
+  std::optional<int32_t> bufferManagerSpillCompressionLevel() const {
+    return get<int32_t>(kBufferManagerSpillCompressionLevel);
+  }
+
+  bool bmStreamingWindowBuildEnabled() const {
+    return get<bool>(kBmStreamingWindowBuildEnabled, false);
+  }
+
   config::AB_MODE spillUringEnabled() const {
 #ifdef IO_URING_SUPPORTED
     if (config::checkKernelVersion(5, 1, 0)) {
@@ -1154,6 +1280,15 @@ class QueryConfig {
   /// spillEnabled()!
   bool orderBySpillEnabled() const {
     return get<bool>(kOrderBySpillEnabled, true);
+  }
+
+  bool orderByRadixSortEnabled() const {
+    return get<bool>(kOrderByRadixSortEnabled, false);
+  }
+
+  bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {
+    return get<bool>(
+        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, false);
   }
 
   bool orderBySpillInOutputStageEnabled() const {
@@ -1353,6 +1488,8 @@ class QueryConfig {
     return get<bool>(kPrestoArrayAggIgnoreNulls, false);
   }
 
+  bool sparkLegacySizeOfNull() const;
+
   bool prestoSetAggIgnoreNulls() const {
     return get<bool>(kPrestoSetAggIgnoreNulls, false);
   }
@@ -1478,6 +1615,10 @@ class QueryConfig {
 
   uint32_t minTableRowsForParallelJoinBuild() const {
     return get<uint32_t>(kMinTableRowsForParallelJoinBuild, 1'000);
+  }
+
+  bool simdHashTableEnabled() const {
+    return get<bool>(kSimdHashTableEnabled, false);
   }
 
   bool isExchangeCompressionEnabled() const {
@@ -1688,6 +1829,10 @@ class QueryConfig {
     return get<bool>(kEnableFlinkCompatible, false);
   }
 
+  std::string flinkMapEqualityMode() const {
+    return get<std::string>(kFlinkMapEqualityMode, "java_map");
+  }
+
   std::string getFlinkJniUdfTaskInfo() const {
     return get<std::string>(kFlinkJniUdfTaskInfo, "");
   }
@@ -1744,6 +1889,10 @@ class QueryConfig {
     return get<int64_t>(kParquetReaderImplicitCastMask, 0);
   }
 
+  int32_t parquetRepDefStreamingWindowSize() const {
+    return get<int32_t>(kParquetRepDefStreamingWindowSize, 2 * 1024);
+  }
+
   bool enableDynamicConcurrencyAdjustment() const {
     return get<bool>(kDynamicConcurrencyAdjustmentEnabled, false);
   }
@@ -1778,6 +1927,10 @@ class QueryConfig {
 
   bool sparkLegacyStatisticalAggregate() const {
     return get<bool>(kSparkLegacyStatisticalAggregate, false);
+  }
+
+  bool sparkChunkBase64StringEnabled() const {
+    return get<bool>(kSparkChunkBase64StringEnabled, false);
   }
 
   /// Test-only method to override the current query config properties.

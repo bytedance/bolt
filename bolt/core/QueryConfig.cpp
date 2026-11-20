@@ -53,6 +53,14 @@ QueryConfig::QueryConfig(std::unordered_map<std::string, std::string>&& values)
           << ", queueSize=" << this->morselDrivenPrimedQueueSize() << ")";
 }
 
+bool QueryConfig::sparkLegacySizeOfNull() const {
+  const auto legacySizeOfNull = get<bool>(kSparkLegacySizeOfNull, true);
+  if (!::bytedance::bolt::kSparkCompatible) {
+    return legacySizeOfNull;
+  }
+  return legacySizeOfNull && !get<bool>(kSparkAnsiEnabled, false);
+}
+
 uint64_t QueryConfig::maxSpillBytes() const {
   static constexpr uint64_t kDefault =
       ::bytedance::bolt::kSparkCompatible ? 0UL : 100UL << 30;

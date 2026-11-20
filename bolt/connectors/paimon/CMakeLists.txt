@@ -15,6 +15,7 @@
 bolt_add_library(
     bolt_connector_paimon
     PaimonConnector.cpp
+    PaimonBoltFileSystem.cpp
     PaimonConfig.cpp
     PaimonDataSource.cpp
     PaimonFilterTranslator.cpp
@@ -22,16 +23,11 @@ bolt_add_library(
     BoltMemoryPool.h
 )
 
-if(${BOLT_ENABLE_HDFS})
-  target_sources(bolt_connector_paimon PRIVATE PaimonBoltHdfsFileSystem.cpp)
-endif()
-
 target_link_libraries(
   bolt_connector_paimon
   PUBLIC
     bolt_common_io
     bolt_connector
-    $<$<BOOL:${BOLT_ENABLE_HDFS}>:bolt_hdfs>
     bolt_dwio_parquet_reader
     bolt_dwio_parquet_writer
     bolt_file
@@ -41,7 +37,6 @@ target_link_libraries(
     arrow::arrow
     Paimon::core
     $<LINK_LIBRARY:WHOLE_ARCHIVE,Paimon::format_avro>
-    $<LINK_LIBRARY:WHOLE_ARCHIVE,Paimon::fs_local>
   PRIVATE
     Paimon::libavrocpp
 )

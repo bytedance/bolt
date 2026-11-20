@@ -54,6 +54,7 @@ bolt_add_library(
   partitioner/Partitioning.cpp
   partitioner/RoundRobinPartitioner.cpp
   partitioner/SinglePartitioner.cpp
+  Options.cpp
   Payload.cpp
   ShuffleColumnarToRowConverter.cpp
   ShuffleMemoryPool.cpp

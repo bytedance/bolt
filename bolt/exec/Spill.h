@@ -40,6 +40,7 @@
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/exec/RowBasedCompare.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/SpillFile.h"
@@ -897,7 +898,7 @@ class SpillState {
   // append row based data to partition
   uint64_t appendToPartition(
       uint32_t partition,
-      const std::vector<char*, memory::StlAllocator<char*>>& rows,
+      const std::vector<char*, memory::SlabAllocator<char*>>& rows,
       RowTypePtr type,
       const RowFormatInfo& info);
 

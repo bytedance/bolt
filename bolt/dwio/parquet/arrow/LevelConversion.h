@@ -181,6 +181,11 @@ struct PARQUET_EXPORT ValidityBitmapInputOutput {
   int64_t valid_bits_offset = 0;
 };
 
+struct PARQUET_EXPORT ListLengthsState {
+  int32_t current_length = 0;
+  bool has_open_list = false;
+};
+
 //  Converts def_levels to validity bitmaps for non-list arrays and structs that
 //  have at least one member that is not a list and has no list descendents. For
 //  lists use DefRepLevelsToList and structs where all descendants contain a
@@ -236,6 +241,20 @@ void PARQUET_EXPORT DefRepLevelsToListLengths(
     ValidityBitmapInputOutput* output,
     int32_t* lengths);
 
+// Incremental variant of DefRepLevelsToListLengths. Keeps the current list
+// open across calls unless finalize is true. output->values_read reports only
+// finalized lengths produced by this call. A validity bit for the open list
+// may be written at valid_bits_offset + values_read.
+void PARQUET_EXPORT DefRepLevelsToListLengths(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    ValidityBitmapInputOutput* output,
+    int32_t* lengths,
+    ListLengthsState* state,
+    bool finalize);
+
 // Reconstructs list lengths/list validity and the validity bitmap of a direct
 // nullable struct parent in one pass over the same def/rep levels. Returns
 // false if the two LevelInfo values do not describe a supported direct
@@ -249,6 +268,20 @@ bool PARQUET_EXPORT DefRepLevelsToListLengthsAndStructBitmap(
     ValidityBitmapInputOutput* list_output,
     int32_t* lengths,
     ValidityBitmapInputOutput* struct_output);
+
+// Incremental variant for a direct struct -> list relationship. Keeps the
+// current list open across calls unless finalize is true.
+bool PARQUET_EXPORT DefRepLevelsToListLengthsAndStructBitmap(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo list_level_info,
+    LevelInfo struct_level_info,
+    ValidityBitmapInputOutput* list_output,
+    int32_t* lengths,
+    ValidityBitmapInputOutput* struct_output,
+    ListLengthsState* state,
+    bool finalize);
 
 // Reconstructs a validity bitmap for a struct every member is a list or has
 // a list descendant.  See documentation on DefLevelsToBitmap for when more

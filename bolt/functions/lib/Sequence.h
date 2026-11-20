@@ -26,7 +26,11 @@ namespace bytedance::bolt::functions {
 template <typename T, typename K>
 class SequenceFunction : public exec::VectorFunction {
  public:
+  /// Presto's per-row limit on the number of generated entries.
   static constexpr int32_t kMaxResultEntries = 10'000;
+
+  explicit SequenceFunction(int32_t maxResultEntries = kMaxResultEntries)
+      : maxResultEntries_(maxResultEntries) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -36,13 +40,13 @@ class SequenceFunction : public exec::VectorFunction {
       VectorPtr& result) const override;
 
  private:
-  static vector_size_t checkArguments(
+  vector_size_t checkArguments(
       DecodedVector* startVector,
       DecodedVector* stopVector,
       DecodedVector* stepVector,
       vector_size_t row,
       bool isDate,
-      bool isYearMonth);
+      bool isYearMonth) const;
 
   static void writeToElements(
       T* elements,
@@ -61,6 +65,8 @@ class SequenceFunction : public exec::VectorFunction {
       vector_size_t row,
       bool isDate,
       bool isYearMonth);
+
+  const int32_t maxResultEntries_;
 };
 
 } // namespace bytedance::bolt::functions

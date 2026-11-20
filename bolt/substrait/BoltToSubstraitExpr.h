@@ -42,7 +42,9 @@ class BoltToSubstraitExprConvertor {
  public:
   explicit BoltToSubstraitExprConvertor(
       const SubstraitExtensionCollectorPtr& extensionCollector)
-      : extensionCollector_(extensionCollector) {}
+      : typeConvertor_(
+            std::make_shared<BoltToSubstraitTypeConvertor>(extensionCollector)),
+        extensionCollector_(extensionCollector) {}
 
   /// Convert Bolt Expression to Substrait Expression.
   /// @param arena Arena to use for allocating Substrait plan objects.

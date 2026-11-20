@@ -30,12 +30,16 @@ class FlinkCastExpr : public exec::CastExpr {
       exec::ExprPtr&& expr,
       bool trackCpuUsage,
       bool nullOnFailure)
-      : exec::CastExpr(type, std::move(expr), trackCpuUsage, nullOnFailure) {}
+      : exec::CastExpr(type, std::move(expr), trackCpuUsage, nullOnFailure),
+        nullOnFailure_(nullOnFailure) {}
 
   void evalSpecialForm(
       const SelectivityVector& rows,
       exec::EvalCtx& context,
       VectorPtr& result) override;
+
+ private:
+  const bool nullOnFailure_;
 };
 
 class FlinkCastCallToSpecialForm : public exec::CastCallToSpecialForm {

@@ -29,9 +29,82 @@
  */
 #include "bolt/functions/lib/TimeUtils.h"
 #include <boost/algorithm/string/case_conv.hpp>
+#include <charconv>
 
 #include "bolt/functions/lib/TimeUtils.h"
 namespace bytedance::bolt::functions {
+
+std::shared_ptr<const DateTimeFormatterContext> getDateTimeFormatterContext(
+    const core::QueryConfig& config) {
+  const auto defaultZone = config.get<std::string>(
+      core::QueryConfig::kDateTimeFormatterDefaultTimezone);
+  const auto rebaseZone = config.get<std::string>(
+      core::QueryConfig::kDateTimeFormatterRebaseTimezone);
+  const auto pivotMillis = config.get<int64_t>(
+      core::QueryConfig::kSparkLegacyTimestampParserPivotMillis);
+  const auto pivotYear = config.get<int32_t>(
+      core::QueryConfig::kSparkLegacyTimestampParserPivotYear);
+  const auto rawOffsets = config.get<std::string>(
+      core::QueryConfig::kSparkLegacyTimestampParserTimezoneRawOffsets);
+  if (!defaultZone && !rebaseZone && !pivotMillis && !pivotYear &&
+      !rawOffsets) {
+    return nullptr;
+  }
+  BOLT_USER_CHECK_EQ(
+      pivotMillis.has_value(),
+      pivotYear.has_value(),
+      "Both timestamp parser pivot milliseconds and year must be supplied");
+  auto context = std::make_shared<DateTimeFormatterContext>();
+  auto locate = [](std::string_view name) {
+    if (name.starts_with("GMT+") || name.starts_with("GMT-")) {
+      name.remove_prefix(3);
+    }
+    return tz::locateZone(name);
+  };
+  if (defaultZone) {
+    context->defaultTimezone = locate(*defaultZone);
+  }
+  if (rebaseZone) {
+    context->rebaseTimezone = locate(*rebaseZone);
+  }
+  if (pivotMillis) {
+    BOLT_USER_CHECK_GT(
+        *pivotYear, 0, "Timestamp parser pivot year must be positive");
+    context->twoDigitYearStart = Timestamp::fromMillis(*pivotMillis);
+    context->twoDigitYearStartYear = *pivotYear;
+  }
+  if (rawOffsets) {
+    std::string_view remaining(*rawOffsets);
+    while (!remaining.empty()) {
+      const auto end = remaining.find(';');
+      const auto entry = remaining.substr(0, end);
+      const auto separator = entry.find('=');
+      BOLT_USER_CHECK(
+          separator != std::string_view::npos && separator > 0,
+          "Invalid timestamp parser raw offset: {}",
+          entry);
+      const auto value = entry.substr(separator + 1);
+      int32_t seconds;
+      const auto parsed =
+          std::from_chars(value.data(), value.data() + value.size(), seconds);
+      BOLT_USER_CHECK(
+          parsed.ec == std::errc{} &&
+              parsed.ptr == value.data() + value.size() && seconds >= -86400 &&
+              seconds <= 86400,
+          "Invalid timestamp parser raw offset: {}",
+          entry);
+      if (const auto* zone =
+              tz::locateZone(entry.substr(0, separator), false)) {
+        context->timezoneRawOffsets.insert_or_assign(zone->id(), seconds);
+      }
+      if (end == std::string_view::npos) {
+        break;
+      }
+      remaining.remove_prefix(end + 1);
+    }
+  }
+  return context;
+}
 
 const folly::F14FastMap<std::string, int8_t> kDayOfWeekNames{
     {"th", 0},       {"fr", 1},     {"sa", 2},       {"su", 3},

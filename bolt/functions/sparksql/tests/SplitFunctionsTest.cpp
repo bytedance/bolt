@@ -189,6 +189,26 @@ TEST_F(SplitTest, EmptyDelimeter) {
   }
 }
 
+TEST_F(SplitTest, EmptyDelimiterNonBmp) {
+  if constexpr (kSparkVersion < SparkVersion::SPARK_3_4) {
+    testSplit(
+        {"🍊", "A🍊中"}, "", {{{"?", "?", ""}}, {{"A", "?", "?", "中", ""}}});
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A🍊中"}}}, 1);
+    testSplit({"🍊", "A🍊中"}, "", {{{"?", "?"}}, {{"A", "🍊中"}}}, 2);
+    testSplit({"🍊", "A🍊中"}, "", {{{"?", "?", ""}}, {{"A", "?", "?中"}}}, 3);
+    testSplit(
+        {"🍊", "A🍊中"}, "", {{{"?", "?", ""}}, {{"A", "?", "?", "中"}}}, 4);
+    testSplit(
+        {"🍊", "A🍊中"}, "", {{{"?", "?", ""}}, {{"A", "?", "?", "中", ""}}}, 5);
+  } else {
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A", "🍊", "中"}}});
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A"}}}, 1);
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A", "🍊"}}}, 2);
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A", "🍊", "中"}}}, 3);
+    testSplit({"🍊", "A🍊中"}, "", {{{"🍊"}}, {{"A", "🍊", "中"}}}, 4);
+  }
+}
+
 TEST_F(SplitTest, EmptyInput) {
   testSplit({""}, "delimiter", {{{""}}});
 }

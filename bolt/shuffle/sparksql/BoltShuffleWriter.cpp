@@ -736,10 +736,20 @@ arrow::Status BoltShuffleWriter::stop() {
     stat();
   } else {
     setSplitState(SplitState::kStop);
-    RETURN_NOT_OK(tryEvict());
+    partitionWriter_->setRowFormat(true);
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      RETURN_NOT_OK(partitionWriter_->stop(
+          &metrics_, [this](uint32_t partitionId) -> arrow::Status {
+            if (partitionId >= sortedRows_.size()) {
+              return arrow::Status::OK();
+            }
+            auto& rows = sortedRows_[partitionId];
+            return partitionWriter_->writeFinal(
+                partitionId, rows, getTotalRowBytes(rows), true);
+          }));
+      compositeRowVectorConverter_->reset();
+      boltPool_->release();
     }
   }
   metrics_.useV2 = 0;
@@ -842,8 +852,10 @@ arrow::Status BoltShuffleWriter::doSplit(
     RETURN_NOT_OK(evictPartitionBuffers(pid, /*reuseBuffer=*/false));
     variableMemoryUsage_[pid] = 0;
   }
-  if (pool_ != spillArrowPool_) {
-    // try evict all cached payload if using different spill pool
+  // Complex, uncompressed payloads may retain buffers allocated directly from
+  // the spill pool. Keep the legacy batch drain for those writers until their
+  // buffers can also be retained in task-accounted memory.
+  if (hasComplexType_ && pool_ != spillArrowPool_) {
     evictCachedPayload(std::numeric_limits<int64_t>::max());
   }
   maxVariableMemoryUsage_ = *std::max_element(
@@ -1675,7 +1687,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
+            allBuffers.push_back(sliceBufferWithParentManager(
                 buffers[kValidityBufferIndex],
                 0,
                 arrow::bit_util::BytesForBits(numRows)));
@@ -1693,7 +1705,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryLengthBufferIndex],
             arrow::Status::Invalid("Offset buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(sliceBufferWithParentManager(
               buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
         } else {
           RETURN_NOT_OK(buffers[kBinaryLengthBufferIndex]->Resize(
@@ -1707,7 +1719,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryValueBufferIndex],
             arrow::Status::Invalid("Value buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(sliceBufferWithParentManager(
               buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
         } else if (valueBufferSize > 0) {
           RETURN_NOT_OK(
@@ -1738,7 +1750,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
+            allBuffers.push_back(sliceBufferWithParentManager(
                 buffers[kValidityBufferIndex],
                 0,
                 arrow::bit_util::BytesForBits(numRows)));
@@ -1774,7 +1786,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         }
         if (reuseBuffers) {
           auto slicedValueBuffer =
-              arrow::SliceBuffer(valueBuffer, 0, valueBufferSize);
+              sliceBufferWithParentManager(valueBuffer, 0, valueBufferSize);
           allBuffers.push_back(std::move(slicedValueBuffer));
         } else {
           RETURN_NOT_OK(buffers[kFixedWidthValueBufferIndex]->Resize(
@@ -1963,7 +1975,7 @@ arrow::Status BoltShuffleWriter::resizePartitionBuffer(
           binaryBuf.lengthPtr = lengthBuffer->mutable_data();
           break;
         }
-        auto valueOffset = 0;
+        uint64_t valueOffset = 0;
         // If preserve data, the new valueBufferSize should not be smaller than
         // the current offset.
         if (preserveData) {

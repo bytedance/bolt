@@ -229,20 +229,20 @@ void FlatVector<StringView>::acquireSharedStringBuffers(
           "unexpected encoding inside acquireSharedStringBuffers: {}",
           source->toString());
   }
-  // if stringbuffers_.size() reach the integer multiple of logFreq, LOG the
-  // memory information of this vector
+  // Only scan retained buffers when verbose diagnostics are requested.
   constexpr auto logFreq = 1024;
-  if (stringBuffers_.size() / logFreq > bufferCount / logFreq) {
+  if (VLOG_IS_ON(1) &&
+      stringBuffers_.size() / logFreq > bufferCount / logFreq) {
     uint64_t totalCapacity = 0, totalSize = 0;
-    for (auto buffer : stringBuffers_) {
+    for (const auto& buffer : stringBuffers_) {
       totalSize += buffer->size();
       totalCapacity += buffer->capacity();
     }
-    LOG(INFO) << "FlatVector string buffers count: " << stringBuffers_.size()
-              << ", before acquire: " << bufferCount
-              << ", totalSize: " << totalSize
-              << ", totalCapacity: " << totalCapacity
-              << ", pool name: " << pool_->name();
+    VLOG(1) << "FlatVector string buffers count: " << stringBuffers_.size()
+            << ", before acquire: " << bufferCount
+            << ", totalSize: " << totalSize
+            << ", totalCapacity: " << totalCapacity
+            << ", pool name: " << pool_->name();
   }
 }
 

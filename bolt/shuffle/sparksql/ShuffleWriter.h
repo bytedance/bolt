@@ -75,6 +75,10 @@ class ShuffleWriter {
     return metrics_.totalBytesEvicted;
   }
 
+  int64_t totalSpillFiles() const {
+    return metrics_.totalSpillFiles;
+  }
+
   int64_t totalWriteTime() const {
     return metrics_.totalWriteTime;
   }

@@ -46,9 +46,9 @@ Bolt uses **Conan 2** for dependency management and a Makefile to drive its buil
 
 - **OS**: Linux (Ubuntu 20.04+, CentOS 7+) or macOS (Experimental).
 
-- **Compiler**: GCC 10+ or Clang 16+ (Must support C++17).
+- **Compiler**: **Clang 22 is required**. CI validates this Clang toolchain; newer GCC versions are not covered by CI. macOS support remains experimental.
 - **Build Tools**: CMake 3.25+, Ninja.
-- **Dependency Manager**: Conan 2.0+.
+- **Dependency Manager**: Conan 2.33.0+.
 
 ### Setup Options
 
@@ -61,20 +61,48 @@ scripts/setup-dev-env.sh
 ```
 **⚠️ Important: What this script does** This script is "opinionated" and performs the following actions. Please review them to ensure they fit your workflow:
 
-1. **Python Environment (Miniconda)**:
+1. **LLVM Toolchain**:
+   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses Clang 22 only when LLD, libc++, and libc++abi are also usable; otherwise, installs the complete LLVM toolchain.
+   - On Debian/Ubuntu supported by [apt.llvm.org](https://apt.llvm.org/), installs LLVM 22 using the official installer's `all` option, including Clang, LLD, LLDB, clangd, LLVM development tools, libc++, libc++abi, OpenMP, compiler-rt, libunwind, and Polly. Also installs the matching LLVM BOLT package and its runtime development files, which the official installer's `all` option omits. Requires root or `sudo`.
+   - On Linux, builds patched LLD 22.1.8 under `/opt/clang-22.1.8` with the repository's `llvm-pr220492.patch` and selects that linker for the Conan profile.
+   - On macOS, installs or upgrades Homebrew `llvm@22` and `lld`. Homebrew must already be installed.
+   - Sets `clang`, `clang++`, `lld`, and `ld.lld` to the installed LLVM version using `update-alternatives` on Debian/Ubuntu. On macOS, adds the Homebrew LLVM and LLD directories to the shell configuration. Use `ld.lld --version` on Linux or `ld64.lld --version` on macOS; `lld` itself is the generic driver.
+   - Configures the Conan `build-profile` and `host-profile` with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If a complete Clang 22 toolchain is not found, installs LLVM 22.
+   - Other Linux distributions require manual compiler installation.
+2. **Python Environment (Miniconda)**:
    - Checks for `~/miniconda3`.
    - **If missing**: Automatically downloads and installs Miniconda locally.
    - **Shell Modification**: Appends the Miniconda path to your shell configuration file (`~/.bashrc` or `~/.zshrc`).
    - Installs Python dependencies (including `conan`) into this environment.
-2. **Conan Configuration**:
-   - Sets the C++ standard to `gnu17` in the default Conan profile.
+3. **Conan Configuration**:
+   - Sets the C++ standard to `gnu23` in both Conan profiles.
    - **Clones & Patches Recipes**: Calls `install-bolt-deps.sh` to download a specific version of `conan-center-index` to `~/.conan2/conan-center-index` and applies Bolt-specific patches (required for `folly`, `arrow`, etc.).
    - Configures local Conan remotes to prioritize these patched recipes.
-3. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
+4. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
 
 #### Option 2: Manual Setup (For Advanced Users)
 
 If you prefer to manage your own Python environment (e.g., via system packages, pyenv, or poetry) or use a specific compiler, you can skip the setup script. However, you **must** still configure the Conan dependencies manually.
+
+Install Clang 22 and libc++ using your platform's package manager. On Linux,
+build LLD 22.1.8 with `.github/runners/assets/patches/llvm-pr220492.patch` and
+install it under `/opt/clang-22.1.8`. After installing the Python dependencies
+below, select the compiler and patched linker explicitly, for example:
+
+```bash
+python scripts/configure-conan-profile.py \
+  --compiler clang-22 --linker /opt/clang-22.1.8/bin/ld.lld
+```
+
+The compiler and linker options also accept absolute paths. Newer compiler
+versions and GCC are not covered by CI; validate such configurations yourself.
+
+The script generates `build-profile` and `host-profile` in Conan's profiles
+directory. PGO settings apply only to `host-profile`; LTO applies to both.
+Use `--profile NAME` to regenerate just one named profile instead.
+The Makefile selects each profile independently, falling back to `default`
+only when the corresponding file is absent. Override them with
+`BUILD_PROFILE=NAME` and `HOST_PROFILE=NAME`.
 
 1. **Install Python Dependencies**:
 
@@ -161,7 +189,7 @@ Vscode guide in [English](./doc/vscode-config-en.md) or [Chinese](./doc/vscode-c
 
 To maintain consistent code quality and style, please run the following checks before submitting your changes.
 
-- **C++ Standard**: We use **C++17**.
+- **C++ Standard**: We use **C++23** for all building Bolt code.
 
 - **Formatting**: We use `clang-format-14`.
 

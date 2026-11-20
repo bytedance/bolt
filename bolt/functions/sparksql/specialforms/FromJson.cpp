@@ -224,12 +224,7 @@ struct ExtractJsonTypeImpl {
         SIMDJSON_ASSIGN_OR_RAISE(auto object, value.get_object());
 
         const auto& names = rowType.names();
-        bool allFieldsAreAscii =
-            std::all_of(names.begin(), names.end(), [](const auto& name) {
-              return functions::stringCore::isAscii(name.data(), name.size());
-            });
-
-        auto fieldIndices = makeFieldIndicesMap(rowType, allFieldsAreAscii);
+        auto fieldIndices = makeFieldIndicesMap(rowType);
 
         std::string key;
         for (const auto& fieldResult : object) {
@@ -240,11 +235,6 @@ struct ExtractJsonTypeImpl {
           if (!field.value().is_null()) {
             SIMDJSON_ASSIGN_OR_RAISE(key, field.unescaped_key(true));
 
-            if (allFieldsAreAscii) {
-              folly::toLowerAscii(key);
-            } else {
-              boost::algorithm::to_lower(key);
-            }
             auto it = fieldIndices.find(key);
             if (it != fieldIndices.end() && it->second >= 0) {
               const auto index = it->second;
@@ -354,20 +344,13 @@ struct ExtractJsonTypeImpl {
     return simdjson::SUCCESS;
   }
 
-  // Creates a map of lower case field names to their indices in the row type.
+  // Creates a map of field names to their indices in the row type.
   static folly::F14FastMap<std::string, int32_t> makeFieldIndicesMap(
-      const RowType& rowType,
-      bool allFieldsAreAscii) {
+      const RowType& rowType) {
     folly::F14FastMap<std::string, int32_t> fieldIndices;
     const auto size = rowType.size();
     for (auto i = 0; i < size; ++i) {
       std::string key = rowType.nameOf(i);
-      if (allFieldsAreAscii) {
-        folly::toLowerAscii(key);
-      } else {
-        boost::algorithm::to_lower(key);
-      }
-
       fieldIndices[key] = i;
     }
 

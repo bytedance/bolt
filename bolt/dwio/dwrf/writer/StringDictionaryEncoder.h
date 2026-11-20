@@ -32,6 +32,7 @@
 
 #include <folly/container/F14Set.h>
 #include <folly/hash/Checksum.h>
+#include "bolt/common/memory/MemoryResource.h"
 
 #include "bolt/common/base/GTestMacros.h"
 #include "bolt/dwio/common/DataBuffer.h"
@@ -109,19 +110,20 @@ struct DictStringIdEquality {
 
 class StringDictionaryEncoder {
  public:
+  // The shared resource must outlive this encoder.
   explicit StringDictionaryEncoder(
       memory::MemoryPool& dictionaryDataPool,
-      memory::MemoryPool& generalPool)
+      memory::SlabMemoryResource& generalResource)
       : keyBytes_{dictionaryDataPool},
         keyIndex_{
             17,
             folly::transparent<DictStringIdHash>(*this),
             folly::transparent<DictStringIdEquality>(*this),
-            memory::StlAllocator<detail::DictStringId>{generalPool}},
+            memory::SlabAllocator<detail::DictStringId>{&generalResource}},
         keyOffsets_{dictionaryDataPool},
-        counts_{generalPool},
-        firstSeenStrideIndex_{generalPool},
-        hash_{generalPool} {
+        counts_{*generalResource.pool()},
+        firstSeenStrideIndex_{*generalResource.pool()},
+        hash_{*generalResource.pool()} {
     keyOffsets_.append(0);
   }
 
@@ -211,7 +213,7 @@ class StringDictionaryEncoder {
       detail::DictStringId,
       folly::transparent<DictStringIdHash>,
       folly::transparent<DictStringIdEquality>,
-      memory::StlAllocator<detail::DictStringId>>
+      memory::SlabAllocator<detail::DictStringId>>
       keyIndex_;
   // key index -> starting offset of key.
   dwio::common::DataBuffer<uint32_t> keyOffsets_;

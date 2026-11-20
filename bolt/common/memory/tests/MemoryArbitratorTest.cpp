@@ -355,8 +355,8 @@ class FakeTestArbitrator : public MemoryArbitrator {
 
   void removePool(MemoryPool* /*unused*/) override {}
 
-  bool growCapacity(MemoryPool* /*unused*/, uint64_t /*unused*/) override {
-    BOLT_NYI();
+  bool growCapacity(MemoryPool* pool, uint64_t requestBytes) override {
+    return growPool(pool, requestBytes, requestBytes);
   }
 
   uint64_t shrinkCapacity(uint64_t /*unused*/, bool /*unused*/, bool /*unused*/)
@@ -410,6 +410,58 @@ TEST_F(MemoryArbitratorFactoryTest, create) {
   config.kind = kind_;
   auto arbitrator = MemoryArbitrator::create(config);
   ASSERT_EQ(kind_, arbitrator->kind());
+}
+
+TEST_F(MemoryArbitratorFactoryTest, abortOnArbitrationLeave) {
+  class AbortOnLeaveReclaimer : public MemoryReclaimer {
+   public:
+    explicit AbortOnLeaveReclaimer(MemoryPool* root)
+        : MemoryReclaimer(0), root_(root) {}
+
+    void leaveArbitration() noexcept override {
+      root_->abort(
+          std::make_exception_ptr(std::runtime_error("abort on leave")));
+    }
+
+    void abort(MemoryPool*, const std::exception_ptr&) override {}
+
+   private:
+    MemoryPool* const root_;
+  };
+
+  for (bool canGrow : {false, true}) {
+    for (bool threadSafe : {false, true}) {
+      for (bool reserveOnly : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "canGrow {} threadSafe {} reserveOnly {}",
+            canGrow,
+            threadSafe,
+            reserveOnly));
+        MemoryManager::Options options;
+        options.arbitratorKind = kind_;
+        MemoryManager manager(options);
+        auto root = manager.addRootPool(
+            "root", canGrow ? 16 * MB : 1, MemoryReclaimer::create());
+        auto leaf = root->addLeafChild(
+            "leaf",
+            threadSafe,
+            std::make_unique<AbortOnLeaveReclaimer>(root.get()));
+        void* buffer = nullptr;
+        if (reserveOnly) {
+          EXPECT_THROW(leaf->maybeReserve(4096), std::runtime_error);
+          leaf->release();
+        } else {
+          EXPECT_THROW(buffer = leaf->allocate(4096), std::runtime_error);
+          if (buffer != nullptr) {
+            leaf->free(buffer, 4096);
+          }
+        }
+        EXPECT_TRUE(root->aborted());
+        EXPECT_EQ(leaf->reservedBytes(), 0);
+        EXPECT_EQ(root->reservedBytes(), 0);
+      }
+    }
+  }
 }
 
 class MemoryReclaimerTest : public testing::Test {

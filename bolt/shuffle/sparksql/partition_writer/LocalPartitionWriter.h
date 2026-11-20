@@ -44,7 +44,8 @@ class LocalPartitionWriter : public PartitionWriter {
       PartitionWriterOptions options,
       arrow::MemoryPool* pool,
       const std::string& dataFile,
-      const std::vector<std::string>& localDirs);
+      const std::vector<std::string>& localDirs,
+      bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool = nullptr);
 
   arrow::Status evict(
       uint32_t partitionId,
@@ -77,6 +78,15 @@ class LocalPartitionWriter : public PartitionWriter {
   /// more memory.
   arrow::Status stop(ShuffleWriterMetrics* metrics) override;
 
+  arrow::Status stop(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback) override;
+
+  arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::unique_ptr<InMemoryPayload> inMemoryPayload,
+      bool hasComplexType) override;
+
   // Spill source:
   // 1. Other op.
   // 2. PayloadMerger merging payloads or compressing merged payload.
@@ -99,9 +109,16 @@ class LocalPartitionWriter : public PartitionWriter {
       std::vector<std::vector<uint8_t*>>& rows,
       std::vector<int64_t>& partitionBytes,
       const bool isCompositeVector) override;
+  arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::vector<uint8_t*>& rows,
+      int64_t rawSize,
+      bool isCompositeVector) override;
   arrow::Status startEvictRowsSequential();
   arrow::Status stopEvictRowsSequential();
-  arrow::Status stopInRowFormat(ShuffleWriterMetrics* metrics);
+  arrow::Status stopInRowFormat(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback);
   arrow::Status mergeRowSpills(uint32_t partitionId);
 
   bool canSpill() override;
@@ -125,6 +142,10 @@ class LocalPartitionWriter : public PartitionWriter {
 
   arrow::Status openDataFile();
 
+  arrow::Status stopInternal(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback);
+
   arrow::Status mergeSpills(uint32_t partitionId);
 
   arrow::Status clearResource();
@@ -133,6 +154,10 @@ class LocalPartitionWriter : public PartitionWriter {
 
   std::string dataFile_;
   std::vector<std::string> localDirs_;
+
+  // Task pool used by retained payloads when task and spill pools differ. The
+  // caller owns this pool and must outlive this writer.
+  bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool_{nullptr};
 
   bool stopped_{false};
   std::shared_ptr<LocalSpiller> spiller_{nullptr};
@@ -146,6 +171,13 @@ class LocalPartitionWriter : public PartitionWriter {
   std::shared_ptr<arrow::io::OutputStream> dataFileOs_;
 
   int64_t totalBytesEvicted_{0};
+  int64_t totalSpillFiles_{0};
+  int64_t spillFilesFromRequestSpill_{0};
+  int64_t spillFilesFromReclaimFixedSize_{0};
+  int64_t spillFilesFromReclaimFixedSizeNoMerge_{0};
+  int64_t spillFilesFromEvictPayloadCache_{0};
+  int64_t spillFilesFromClearPayloadCacheSequential_{0};
+  int64_t spillFilesFromRowBasedEvict_{0};
   int64_t totalBytesWritten_{0};
   std::vector<int64_t> partitionLengths_;
   std::vector<int64_t> rawPartitionLengths_;

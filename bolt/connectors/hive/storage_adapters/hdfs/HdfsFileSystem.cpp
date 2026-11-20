@@ -135,7 +135,11 @@ std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
   const auto bufferSize =
       parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBufferSize);
   return std::make_unique<HdfsReadFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path, bufferSize);
+      impl_->hdfsShim(),
+      impl_->hdfsClient(),
+      path,
+      bufferSize,
+      options.fileSize);
 }
 
 std::unique_ptr<WriteFile> HdfsFileSystem::openFileForWrite(
@@ -321,6 +325,15 @@ void HdfsFileSystem::rmdir(std::string_view path) {
       "Cannot remove directory {} recursively in HDFS, error is : {}",
       path,
       impl_->hdfsShim()->GetLastExceptionRootCause());
+}
+
+FileInfo HdfsFileSystem::fileInfo(std::string_view path) {
+  const auto hdfsInfo = stat(path);
+  FileInfo info;
+  info.isDirectory = hdfsInfo.isDir;
+  info.size = hdfsInfo.isDir ? 0 : hdfsInfo.size;
+  info.modificationTimeMs = hdfsInfo.modificationTimeMs;
+  return info;
 }
 
 HdfsFileSystem::HdfsFileInfo HdfsFileSystem::stat(std::string_view path) const {

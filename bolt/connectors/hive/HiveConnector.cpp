@@ -47,6 +47,7 @@
 #ifdef BOLT_ENABLE_S3
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h" // @manual
 #endif
+#include "bolt/connectors/hive/storage_adapters/tos/RegisterTosFileSystem.h"
 #ifdef BOLT_ENABLE_ABFS
 #include "bolt/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h" // @manual
 #endif
@@ -180,6 +181,7 @@ void HiveConnectorFactory::initialize() {
 #ifdef BOLT_ENABLE_S3
     filesystems::registerS3FileSystem();
 #endif
+    filesystems::registerTosFileSystem();
 #ifdef BOLT_ENABLE_HDFS
     filesystems::registerHdfsFileSystem();
 #endif

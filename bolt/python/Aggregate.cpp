@@ -54,43 +54,43 @@ pybind11::object** asIntermediatePtrTypes(BaseVector& vec) {
 }
 
 void accumulate(pybind11::object& lhs, pybind11::object rhs) {
-  bolt::python::pyTry<void>(
+  bytedance::bolt::python::pyTry<void>(
       [&]() { lhs.attr("accumulate")(rhs); },
       [&]() {
         return fmt::format(
             "Failure during call to 'accumulate()' method between: '{}' and: '{}'.",
-            bolt::python::pyInstanceTypeStr(lhs),
-            bolt::python::pyInstanceTypeStr(rhs));
+            bytedance::bolt::python::pyInstanceTypeStr(lhs),
+            bytedance::bolt::python::pyInstanceTypeStr(rhs));
       });
 }
 
 pybind11::object reduce(pybind11::object& accumulator) {
-  return bolt::python::pyTry<pybind11::object>(
+  return bytedance::bolt::python::pyTry<pybind11::object>(
       [&]() { return accumulator.attr("reduce")(); },
       [&]() {
         return fmt::format(
             "Failure during call to 'reduce()' method from python object of type: '{}'.",
-            bolt::python::pyInstanceTypeStr(accumulator));
+            bytedance::bolt::python::pyInstanceTypeStr(accumulator));
       });
 }
 
 pybind11::object initAggregator(pybind11::object& cls) {
-  return bolt::python::pyTry<pybind11::object>(
-      [&]() { return cls(); },
+  return bytedance::bolt::python::pyTry<pybind11::object>(
+      [&]() { return cls.attr("initializer")(); },
       [&]() {
         return fmt::format(
-            "Failure during call to '{}' python class constructor.",
-            bolt::python::pyTypeStr(cls));
+            "Failure during call to 'initializer()' method of python class: '{}'.",
+            bytedance::bolt::python::pyTypeStr(cls));
       });
 }
 
 pybind11::object aggregate(pybind11::object& cls, pybind11::list columns) {
-  return bolt::python::pyTry<pybind11::object>(
+  return bytedance::bolt::python::pyTry<pybind11::object>(
       [&]() -> pybind11::object { return cls.attr("aggregate")(*columns); },
       [&]() {
         return fmt::format(
             "Failure during call to 'aggregate()' method of python class: '{}'.",
-            bolt::python::pyTypeStr(cls));
+            bytedance::bolt::python::pyTypeStr(cls));
       });
 }
 
@@ -99,7 +99,7 @@ void setValueAt(
     BaseVector& v,
     const vector_size_t i,
     const pybind11::object& pyVal) {
-  bolt::python::pyTry<void>(
+  bytedance::bolt::python::pyTry<void>(
       [&]() {
         if constexpr (TYPE == TypeKind::ROW) {
           auto rhs = pyVal.cast<RowVectorPtr>();
@@ -117,22 +117,27 @@ void setValueAt(
             TYPE != TypeKind::ROW && TYPE != TypeKind::MAP &&
             TYPE != TypeKind::ARRAY) {
           auto cppVal = pyVal.cast<typename TypeTraits<TYPE>::DeepCopiedType>();
-          auto* vec = v.as<FlatVector<decltype(cppVal)>>();
+          auto* vec = v.as<FlatVector<typename TypeTraits<TYPE>::NativeType>>();
           BOLT_CHECK(vec != nullptr);
-          vec->set(i, std::move(cppVal));
+          if constexpr (
+              TYPE == TypeKind::VARCHAR || TYPE == TypeKind::VARBINARY) {
+            vec->set(i, StringView(cppVal));
+          } else {
+            vec->set(i, std::move(cppVal));
+          }
         }
       },
       [&]() {
         return fmt::format(
             "Invalid or unsupported cast of python aggregation function"
             "result type '{}' to the cpp type: '{}'.",
-            bolt::python::pyInstanceTypeStr(pyVal),
+            bytedance::bolt::python::pyInstanceTypeStr(pyVal),
             mapTypeKindToName(TYPE));
       });
 }
 } // namespace
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 PythonAggregate::PythonAggregate(
     pybind11::object aggregatorClass,
     const bytedance::bolt::TypePtr& returnType)
@@ -308,4 +313,4 @@ void PythonAggregate::registerAggregationFunction(
   // register function.
   exec::registerAggregateFunction({fnName}, {signature.build()}, factory);
 }
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

@@ -32,6 +32,7 @@
 
 #include <folly/CPortability.h>
 #include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/functions/InlineFlatten.h"
@@ -127,7 +128,7 @@ struct RowContainerIterator {
   char* FOLLY_NULLABLE endOfRun{nullptr};
 
   // Cursor used by fast row listing with cached row pointers.
-  int32_t listRowCursor{0};
+  size_t listRowCursor{0};
 
   // Returns the current row, skipping a possible normalized key below the first
   // byte of row.
@@ -213,6 +214,14 @@ class RowContainer {
  public:
   static constexpr uint64_t kUnlimited = std::numeric_limits<uint64_t>::max();
   using Eraser = std::function<void(folly::Range<char**> rows)>;
+  struct RowContainerParam {
+    std::shared_ptr<HashStringAllocator> hsaAllocator{nullptr};
+    // Uses a MonotonicAllocator backed by a resource owned exclusively by this
+    // RowContainer. Strings are retained until clear() or destruction, even
+    // when individual rows are erased. clear() releases all string chunks
+    // and reuses the resource.
+    bool useMonotonicStringAllocation{false};
+  };
 
   /// 'keyTypes' gives the type of row and use 'allocator' for bulk
   /// allocation.
@@ -249,6 +258,25 @@ class RowContainer {
             useListRowIndex,
             pool) {}
 
+  RowContainer(
+      const std::vector<TypePtr>& keyTypes,
+      const std::vector<TypePtr>& dependentTypes,
+      bool useListRowIndex,
+      memory::MemoryPool* FOLLY_NONNULL pool,
+      RowContainerParam rowContainerParam)
+      : RowContainer(
+            keyTypes,
+            true,
+            std::vector<Accumulator>{},
+            dependentTypes,
+            false,
+            false,
+            false,
+            false,
+            useListRowIndex,
+            pool,
+            std::move(rowContainerParam)) {}
+
   ~RowContainer();
 
   static int32_t combineAlignments(int32_t a, int32_t b);
@@ -269,9 +297,34 @@ class RowContainer {
   /// a normalized key that collapses all parts into one word for faster
   /// comparison. The bulk allocation is done from 'allocator'.
   /// ContainerRowSerde is used for serializing complex type values into the
-  /// container. 'stringAllocator' allows sharing the variable length data arena
-  /// with another RowContainer. This is needed for spilling where the same
-  /// aggregates are used for reading one container and merging into another.
+  /// container. 'rowContainerParam.hsaAllocator' allows sharing the variable
+  /// length data arena with another RowContainer. This is needed for spilling
+  /// where the same aggregates are used for reading one container and merging
+  /// into another.
+  RowContainer(
+      const std::vector<TypePtr>& keyTypes,
+      bool nullableKeys,
+      const std::vector<Accumulator>& accumulators,
+      const std::vector<TypePtr>& dependentTypes,
+      bool hasNext,
+      bool isJoinBuild,
+      bool hasProbedFlag,
+      bool hasNormalizedKey,
+      bool useListRowIndex,
+      memory::MemoryPool* FOLLY_NONNULL pool)
+      : RowContainer(
+            keyTypes,
+            nullableKeys,
+            accumulators,
+            dependentTypes,
+            hasNext,
+            isJoinBuild,
+            hasProbedFlag,
+            hasNormalizedKey,
+            useListRowIndex,
+            pool,
+            RowContainerParam{}) {}
+
   RowContainer(
       const std::vector<TypePtr>& keyTypes,
       bool nullableKeys,
@@ -283,7 +336,7 @@ class RowContainer {
       bool hasNormalizedKey,
       bool useListRowIndex,
       memory::MemoryPool* FOLLY_NONNULL pool,
-      std::shared_ptr<HashStringAllocator> stringAllocator = nullptr);
+      RowContainerParam rowContainerParam);
 
   /// Allocates a new row and initializes possible aggregates to null.
   char* FOLLY_NONNULL newRow();
@@ -302,6 +355,11 @@ class RowContainer {
     if (!nullOffsets_.empty()) {
       memset(row + nullByte(nullOffsets_[0]), 0xff, initialNulls_.size());
       bits::clearBit(row, freeFlagOffset_);
+      for (int32_t i = 0; i < columnHasNulls_.size(); ++i) {
+        if (columnAt(i).nullMask() != 0) {
+          columnHasNulls_[i] = true;
+        }
+      }
     }
   }
 
@@ -376,7 +434,8 @@ class RowContainer {
       auto mask = rowColumn.nullMask();
 
       for (auto r = 0; r < size; ++r) {
-        storeWithNulls<Kind>(decoded, r, isKey, rows[r], off, nullByte, mask);
+        storeWithNulls<Kind>(
+            decoded, r, isKey, rows[r], off, nullByte, mask, column);
       }
     }
   }
@@ -387,6 +446,10 @@ class RowContainer {
 
   const std::shared_ptr<HashStringAllocator>& stringAllocatorShared() {
     return stringAllocator_;
+  }
+
+  memory::MonotonicMemoryResource* monotonicMemoryResource() {
+    return monotonicMemoryResource_.get();
   }
 
   /// Returns the number of used rows in 'this'. This is the number of rows a
@@ -418,25 +481,39 @@ class RowContainer {
 
   /// Copies the values at 'col' into 'result' (starting at 'resultOffset')
   /// for the 'numRows' rows pointed to by 'rows'. If a 'row' is null, sets
-  /// corresponding row in 'result' to null.
-  static void extractColumn(
+  /// corresponding row in 'result' to null. 'columnHasNulls' describes values
+  /// stored in non-null rows. 'rowsMayHaveNulls' describes synthetic nulls in
+  /// the caller-provided row selection.
+  void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       int32_t numRows,
       RowColumn col,
       vector_size_t resultOffset,
       const VectorPtr& result,
-      bool exactSize = false);
+      bool exactSize = false,
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false) const;
 
   /// Copies the values at 'col' into 'result' for the 'numRows' rows pointed to
   /// by 'rows'. If an entry in 'rows' is null, sets corresponding row in
   /// 'result' to null.
-  static void extractColumn(
+  void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       int32_t numRows,
       RowColumn col,
       const VectorPtr& result,
-      bool exactSize = false) {
-    extractColumn(rows, numRows, col, 0, result, exactSize);
+      bool exactSize = false,
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false) {
+    extractColumn(
+        rows,
+        numRows,
+        col,
+        0,
+        result,
+        exactSize,
+        columnHasNulls,
+        rowsMayHaveNulls);
   }
 
   /// Copies the values from the array pointed to by 'rows' at 'col' into
@@ -445,13 +522,15 @@ class RowContainer {
   /// 'result' to null. The positions in 'rowNumbers' array can repeat and also
   /// appear out of order. If rowNumbers has a negative value, then the
   /// corresponding row in 'result' is set to null.
-  static void extractColumn(
+  void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
       RowColumn col,
       vector_size_t resultOffset,
       const VectorPtr& result,
-      bool exactSize = false);
+      bool exactSize = false,
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false) const;
 
   /// Sets in result all locations with null values in col for rows (for numRows
   /// number of rows).
@@ -470,7 +549,13 @@ class RowContainer {
       int32_t columnIndex,
       const VectorPtr& result,
       bool exactSize = false) {
-    extractColumn(rows, numRows, columnAt(columnIndex), result, exactSize);
+    extractColumn(
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        result,
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Copies the values at 'columnIndex' into 'result' (starting at
@@ -484,7 +569,13 @@ class RowContainer {
       const VectorPtr& result,
       bool exactSize = false) {
     extractColumn(
-        rows, numRows, columnAt(columnIndex), resultOffset, result, exactSize);
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        resultOffset,
+        result,
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Copies the values at 'columnIndex' at positions in the 'rowNumbers' array
@@ -507,7 +598,8 @@ class RowContainer {
         columnAt(columnIndex),
         resultOffset,
         result,
-        exactSize);
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Sets in result all locations with null values in columnIndex for rows.
@@ -552,8 +644,7 @@ class RowContainer {
       int32_t maxRows,
       char* FOLLY_NONNULL* FOLLY_NONNULL rows) const {
     int32_t count = 0;
-    while (count < maxRows &&
-           iter->listRowCursor < static_cast<int32_t>(rowPointers_.size())) {
+    while (count < maxRows && iter->listRowCursor < rowPointers_.size()) {
       rows[count++] = rowPointers_[iter->listRowCursor];
       ++iter->listRowCursor;
     }
@@ -752,12 +843,20 @@ class RowContainer {
       uint64_t* FOLLY_NONNULL result);
 
   uint64_t allocatedBytes() const {
-    return rows_.allocatedBytes() + stringAllocator_->retainedSize();
+    return rows_.allocatedBytes() + stringAllocator_->retainedSize() +
+        (monotonicMemoryResource_ ? monotonicMemoryResource_->reservedBytes()
+                                  : 0);
   }
 
   uint64_t usedBytes() const {
     return rows_.allocatedBytes() - rows_.freeBytes() +
-        stringAllocator_->retainedSize() - stringAllocator_->freeSpace();
+        stringAllocator_->retainedSize() - stringAllocator_->freeSpace() +
+        (monotonicMemoryResource_ ? monotonicMemoryResource_->usedBytes() : 0);
+  }
+
+  uint64_t variableWidthUsedBytes() const {
+    return stringAllocator_->retainedSize() - stringAllocator_->freeSpace() +
+        (monotonicMemoryResource_ ? monotonicMemoryResource_->usedBytes() : 0);
   }
 
   /// Returns the number of fixed size rows that can be allocated without
@@ -766,7 +865,11 @@ class RowContainer {
   std::pair<uint64_t, uint64_t> freeSpace() const {
     return std::make_pair<uint64_t, uint64_t>(
         rows_.freeBytes() / fixedRowSize_ + numFreeRows_,
-        stringAllocator_->freeSpace());
+        monotonicMemoryResource_ ? 0 : stringAllocator_->freeSpace());
+  }
+
+  bool useMonotonicStringAllocation() const {
+    return useMonotonicStringAllocation_;
   }
 
   /// Returns the average size of rows in bytes stored in this container.
@@ -835,6 +938,14 @@ class RowContainer {
 
   const auto& keyIndices() const {
     return keyIndices_;
+  }
+
+  bool columnHasNulls(int32_t columnIndex) const {
+    return columnHasNulls_[columnIndex];
+  }
+
+  const std::vector<bool>& columnHasNulls() const {
+    return columnHasNulls_;
   }
 
   const std::vector<Accumulator>& accumulators() const {
@@ -918,7 +1029,7 @@ class RowContainer {
     return rowColumns_;
   }
 
-  static int32_t compareStringAsc(StringView left, StringView right);
+  int32_t compareStringAsc(StringView left, StringView right) const;
   static std::unique_ptr<ByteInputStream> prepareRead(
       const char* row,
       int32_t offset);
@@ -946,14 +1057,16 @@ class RowContainer {
   storeVariableSizeAt(const char* data, char* row, column_index_t column);
 
   template <TypeKind Kind>
-  static void extractColumnTyped(
+  void extractColumnTyped(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
       int32_t numRows,
       RowColumn column,
       int32_t resultOffset,
       const VectorPtr& result,
-      bool exactSize) {
+      bool exactSize,
+      bool columnHasNulls,
+      bool rowsMayHaveNulls) const {
     if (rowNumbers.size() > 0) {
       extractColumnTypedInternal<true, Kind>(
           rows,
@@ -962,22 +1075,34 @@ class RowContainer {
           column,
           resultOffset,
           result,
-          exactSize);
+          exactSize,
+          columnHasNulls,
+          rowsMayHaveNulls);
     } else {
       extractColumnTypedInternal<false, Kind>(
-          rows, rowNumbers, numRows, column, resultOffset, result, exactSize);
+          rows,
+          rowNumbers,
+          numRows,
+          column,
+          resultOffset,
+          result,
+          exactSize,
+          columnHasNulls,
+          rowsMayHaveNulls);
     }
   }
 
   template <bool useRowNumbers, TypeKind Kind>
-  static void extractColumnTypedInternal(
+  void extractColumnTypedInternal(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
       int32_t numRows,
       RowColumn column,
       int32_t resultOffset,
       const VectorPtr& result,
-      bool exactSize) {
+      bool exactSize,
+      bool columnHasNulls,
+      bool rowsMayHaveNulls) const {
     // Resize the result vector before all copies.
     result->resize(numRows + resultOffset);
 
@@ -992,7 +1117,20 @@ class RowContainer {
     auto* flatResult = result->as<FlatVector<T>>();
     auto nullMask = column.nullMask();
     auto offset = column.offset();
-    if (!nullMask) {
+    if (!rowsMayHaveNulls && (!nullMask || !columnHasNulls)) {
+      if constexpr (std::is_same_v<T, StringView>) {
+        if (useMonotonicStringAllocation_) {
+          extractValuesNoNulls<useRowNumbers, T, true>(
+              rows,
+              rowNumbers,
+              numRows,
+              offset,
+              resultOffset,
+              flatResult,
+              exactSize);
+          return;
+        }
+      }
       extractValuesNoNulls<useRowNumbers, T>(
           rows,
           rowNumbers,
@@ -1001,18 +1139,34 @@ class RowContainer {
           resultOffset,
           flatResult,
           exactSize);
-    } else {
-      extractValuesWithNulls<useRowNumbers, T>(
-          rows,
-          rowNumbers,
-          numRows,
-          offset,
-          column.nullByte(),
-          nullMask,
-          resultOffset,
-          flatResult,
-          exactSize);
+      return;
     }
+
+    if constexpr (std::is_same_v<T, StringView>) {
+      if (useMonotonicStringAllocation_) {
+        extractValuesWithNulls<useRowNumbers, T, true>(
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            column.nullByte(),
+            nullMask,
+            resultOffset,
+            flatResult,
+            exactSize);
+        return;
+      }
+    }
+    extractValuesWithNulls<useRowNumbers, T>(
+        rows,
+        rowNumbers,
+        numRows,
+        offset,
+        column.nullByte(),
+        nullMask,
+        resultOffset,
+        flatResult,
+        exactSize);
   }
 
   char* FOLLY_NULLABLE& nextFree(char* FOLLY_NONNULL row) {
@@ -1032,7 +1186,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte,
-      uint8_t nullMask) {
+      uint8_t nullMask,
+      int32_t column) {
     using T = typename TypeTraits<Kind>::NativeType;
     if (decoded.isNullAt(index)) {
       row[nullByte] |= nullMask;
@@ -1044,7 +1199,7 @@ class RowContainer {
       } else if constexpr (std::is_same_v<T, StringView>) {
         // See StringView::compare()
         // so that null StringView is the max.
-        *reinterpret_cast<T*>(row + offset) = StringView();
+        *reinterpret_cast<StringView*>(row + offset) = StringView();
         reinterpret_cast<uint32_t*>(row + offset)[1] =
             std::numeric_limits<uint32_t>::max();
       } else {
@@ -1052,11 +1207,11 @@ class RowContainer {
         // null. This is an error with valgrind/asan.
         *reinterpret_cast<T*>(row + offset) = T();
       }
+      updateColumnHasNulls(column);
       return;
     }
     if constexpr (std::is_same_v<T, StringView>) {
-      RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(decoded.valueAt<T>(index), row, offset);
+      storeString(decoded.valueAt<T>(index), row, offset);
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(index);
     }
@@ -1071,14 +1226,13 @@ class RowContainer {
       int32_t offset) {
     using T = typename TypeTraits<Kind>::NativeType;
     if constexpr (std::is_same_v<T, StringView>) {
-      RowSizeTracker tracker(group[rowSizeOffset_], *stringAllocator_);
-      stringAllocator_->copyMultipart(decoded.valueAt<T>(index), group, offset);
+      storeString(decoded.valueAt<T>(index), group, offset);
     } else {
       *reinterpret_cast<T*>(group + offset) = decoded.valueAt<T>(index);
     }
   }
 
-  template <bool useRowNumbers, typename T>
+  template <bool useRowNumbers, typename T, bool isContinuousString = false>
   static void extractValuesWithNulls(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
@@ -1091,6 +1245,35 @@ class RowContainer {
       bool exactSize) {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
+
+    if constexpr (std::is_same_v<T, StringView>) {
+      if constexpr (isContinuousString) {
+        extractContinuousStringsBatch(
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            nullByte,
+            nullMask,
+            resultOffset,
+            result,
+            true,
+            exactSize);
+      } else {
+        extractStringsBatch(
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            nullByte,
+            nullMask,
+            resultOffset,
+            result,
+            true,
+            exactSize);
+      }
+      return;
+    }
 
     BufferPtr& nullBuffer = result->mutableNulls(maxRows);
     auto nulls = nullBuffer->asMutable<uint64_t>();
@@ -1109,17 +1292,12 @@ class RowContainer {
         bits::setNull(nulls, resultIndex, true);
       } else {
         bits::setNull(nulls, resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          extractString(
-              valueAt<StringView>(row, offset), result, resultIndex, exactSize);
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
 
-  template <bool useRowNumbers, typename T>
+  template <bool useRowNumbers, typename T, bool isContinuousString = false>
   static void extractValuesNoNulls(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
@@ -1130,6 +1308,36 @@ class RowContainer {
       bool exactSize) {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
+
+    if constexpr (std::is_same_v<T, StringView>) {
+      if constexpr (isContinuousString) {
+        extractContinuousStringsBatch(
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            0,
+            0,
+            resultOffset,
+            result,
+            false,
+            exactSize);
+      } else {
+        extractStringsBatch(
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            0,
+            0,
+            resultOffset,
+            result,
+            false,
+            exactSize);
+      }
+      return;
+    }
+
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
     [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
@@ -1145,12 +1353,7 @@ class RowContainer {
         result->setNull(resultIndex, true);
       } else {
         result->setNull(resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          extractString(
-              valueAt<StringView>(row, offset), result, resultIndex, exactSize);
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
@@ -1321,7 +1524,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte = 0,
-      uint8_t nullMask = 0);
+      uint8_t nullMask = 0,
+      int32_t column = 0);
 
   template <bool useRowNumbers>
   static void extractComplexType(
@@ -1360,7 +1564,53 @@ class RowContainer {
       vector_size_t index,
       bool exactSize);
 
-  static int32_t compareStringAsc(
+  static inline void extractContinuousString(
+      StringView value,
+      FlatVector<StringView>* FOLLY_NONNULL values,
+      vector_size_t index,
+      bool exactSize) {
+    values->setStringViewValue(
+        index, std::bit_cast<StringView>(value), exactSize);
+  }
+
+  // Batched variant of extractString: pre-scan the rows, reserve the string
+  // buffer once, then copy all out-of-line strings in a single pass.
+  static void extractStringsBatch(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t offset,
+      int32_t nullByte,
+      uint8_t nullMask,
+      int32_t resultOffset,
+      FlatVector<StringView>* FOLLY_NONNULL result,
+      bool hasNulls,
+      bool exactSize);
+
+  // Batched variant of extractContinuousString for rows whose strings are
+  // stored contiguously (no allocator block headers, single-piece by
+  // construction): pre-scan to size the result buffer once, then copy all
+  // out-of-line strings in a single pass. No multi-piece handling is needed.
+  static void extractContinuousStringsBatch(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t offset,
+      int32_t nullByte,
+      uint8_t nullMask,
+      int32_t resultOffset,
+      FlatVector<StringView>* FOLLY_NONNULL result,
+      bool hasNulls,
+      bool exactSize);
+
+  int32_t compareStringAsc(
+      StringView left,
+      const DecodedVector& decoded,
+      vector_size_t index);
+
+  static int32_t compareContiguousStringAsc(StringView left, StringView right);
+
+  static int32_t compareContiguousStringAsc(
       StringView left,
       const DecodedVector& decoded,
       vector_size_t index);
@@ -1411,6 +1661,12 @@ class RowContainer {
         if (view.isInline()) {
           continue;
         }
+        if (useMonotonicStringAllocation_) {
+          if (checkFree_) {
+            view = FieldType();
+          }
+          continue;
+        }
       } else {
         if (view.empty()) {
           continue;
@@ -1430,10 +1686,19 @@ class RowContainer {
   // Free any aggregates associated with the 'rows'.
   void freeAggregates(folly::Range<char**> rows);
 
+  void updateColumnHasNulls(int32_t columnIndex) {
+    columnHasNulls_[columnIndex] = true;
+  }
+
+  void updateColumnHasNulls(const char* row);
+
   const bool checkFree_ = false;
 
   const std::vector<TypePtr> keyTypes_;
   std::vector<column_index_t> keyIndices_;
+  // Monotonic null flags for keys and dependents. These stay set across clear()
+  // so they remain valid for rows already written to spill.
+  std::vector<bool> columnHasNulls_;
   const bool nullableKeys_;
   const bool isJoinBuild_;
 
@@ -1493,10 +1758,28 @@ class RowContainer {
   uint64_t numFreeRows_ = 0;
 
   memory::AllocationPool rows_;
+  std::unique_ptr<memory::MonotonicMemoryResource> monotonicMemoryResource_;
+  std::optional<memory::MonotonicAllocator<char>> monotonicAllocator_;
   std::shared_ptr<HashStringAllocator> stringAllocator_;
+  bool useMonotonicStringAllocation_{false};
   std::vector<char*, StlAllocator<char*>> rowPointers_;
 
   int alignment_ = 1;
+
+  void storeString(
+      StringView value,
+      char* FOLLY_NONNULL row,
+      int32_t offset,
+      bool trackRowSize = true);
+
+  void addVariableRowSize(char* FOLLY_NONNULL row, uint64_t size) {
+    if (rowSizeOffset_ == 0 || size == 0) {
+      return;
+    }
+    auto value = variableRowSize(row) + size;
+    variableRowSize(row) =
+        std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max());
+  }
 };
 
 template <>
@@ -1514,8 +1797,10 @@ inline void RowContainer::storeWithNulls<TypeKind::ROW>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1536,8 +1821,10 @@ inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1558,8 +1845,10 @@ inline void RowContainer::storeWithNulls<TypeKind::MAP>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1580,12 +1869,14 @@ inline void RowContainer::storeWithNulls<TypeKind::HUGEINT>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
+    uint8_t nullMask,
+    int32_t column) {
   if (decoded.isNullAt(index)) {
     row[nullByte] |= nullMask;
     // Do not leave an uninitialized value in the case of a
     // null. This is an error with valgrind/asan.
     memset(row + offset, 0, sizeof(int128_t));
+    updateColumnHasNulls(column);
     return;
   }
   HugeInt::serialize(decoded.valueAt<int128_t>(index), row + offset);
@@ -1609,7 +1900,9 @@ inline void RowContainer::extractColumnTyped<TypeKind::OPAQUE>(
     RowColumn /*column*/,
     int32_t /*resultOffset*/,
     const VectorPtr& /*result*/,
-    bool exactSize /*exactSize*/) {
+    bool /*exactSize*/,
+    bool /*columnHasNulls*/,
+    bool /*rowsMayHaveNulls*/) const {
   BOLT_UNSUPPORTED("RowContainer doesn't support values of type OPAQUE");
 }
 
@@ -1619,7 +1912,9 @@ inline void RowContainer::extractColumn(
     RowColumn column,
     int32_t resultOffset,
     const VectorPtr& result,
-    bool exactSize) {
+    bool exactSize,
+    bool columnHasNulls,
+    bool rowsMayHaveNulls) const {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1629,7 +1924,9 @@ inline void RowContainer::extractColumn(
       column,
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      columnHasNulls,
+      rowsMayHaveNulls);
 }
 
 inline void RowContainer::extractColumn(
@@ -1638,7 +1935,9 @@ inline void RowContainer::extractColumn(
     RowColumn column,
     int32_t resultOffset,
     const VectorPtr& result,
-    bool exactSize) {
+    bool exactSize,
+    bool columnHasNulls,
+    bool rowsMayHaveNulls) const {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1648,7 +1947,9 @@ inline void RowContainer::extractColumn(
       column,
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      columnHasNulls,
+      rowsMayHaveNulls);
 }
 
 inline void RowContainer::extractNulls(
@@ -1794,7 +2095,8 @@ struct RowFormatInfo {
         rowSizeOffset(container->rowSizeOffset()),
         alignment(container->alignment()),
         rowColumns(container->columns()),
-        enableCompression(enableCompression) {
+        enableCompression(enableCompression),
+        stringViewsAreContiguous(container->useMonotonicStringAllocation()) {
     for (int i = 0; i < container->columnTypes().size(); i++) {
       auto type = container->columnTypes()[i];
       if (!type->isFixedWidth()) {
@@ -1844,6 +2146,7 @@ struct RowFormatInfo {
   std::vector<RowColumn> rowColumns;
   std::vector<Accumulator> serializableAccumulators;
   bool enableCompression;
+  bool stringViewsAreContiguous;
   bool serialized = false;
 };
 
@@ -1919,7 +2222,10 @@ class HybridContainer {
       bool exactSize = false) {
     // keys
     if (isKey(columnIndex)) {
-      keys_->extractColumn(rows, numRows, columnIndex, resultOffset, result);
+      // Rows can come from other build containers whose nulls are not tracked
+      // by keys_.
+      keys_->extractColumn(
+          rows, numRows, keys_->columnAt(columnIndex), resultOffset, result);
     } else {
       // payloads
       // getRowIds should be called out of extracting projection columns
@@ -1961,8 +2267,10 @@ class HybridContainer {
       bool exactSize = false) {
     // keys
     if (isKey(columnIndex)) {
-      // exactSize was deprecated
-      keys_->extractColumn(rows, rowNumbers, columnIndex, resultOffset, result);
+      // Rows can come from other build containers whose nulls are not tracked
+      // by keys_.
+      keys_->extractColumn(
+          rows, rowNumbers, keys_->columnAt(columnIndex), resultOffset, result);
     } else {
       // payloads
       // getRowIds should be called out of extracting projection columns

@@ -92,11 +92,15 @@ function(bolt_add_library target_name)
     "dwio/parquet/arrow/tests"
     "tpch/gen/dbgen"
     "tpch/gen"
+    "tpcds/gen"
+    "tpcds/gen/dsdgen"
+    "tpcds/gen/utils"
     "functions/lib/aggregates/tests/utils"
     "functions/lib/window/tests"
     "functions/prestosql/tests/utils"
     "connectors/fuzzer"
     "connectors/tpch"
+    "connectors/tpcds"
     "cudf/tests"
     "exec/fuzzer"
     "exec/tests/utils"
@@ -255,6 +259,10 @@ if(${BOLT_ENABLE_TPCH_CONNECTOR})
   add_subdirectory(tpch/gen)
 endif()
 
+if(${BOLT_ENABLE_TPCDS_CONNECTOR})
+  add_subdirectory(tpcds/gen)
+endif()
+
 add_subdirectory(functions) # depends on md5 (postgresql)
 if(${BOLT_ENABLE_PAIMON})
   find_package(Paimon CONFIG REQUIRED)
@@ -328,6 +336,7 @@ function(bolt_configure_engine target_name)
       Boost::url
       $<$<BOOL:${BOLT_BUILD_TEST_UTILS}>:cpr::cpr>
       $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
+      $<$<BOOL:${BOLT_ENABLE_TOS}>:$<LINK_ONLY:tos_client::tos_client>>
       $<$<BOOL:${BOLT_ENABLE_GCS}>:google-cloud-cpp::storage>
       $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs
       Azure::azure-storage-files-datalake

@@ -106,26 +106,27 @@ void SelectiveColumnReader::prepareRead(
   }
 }
 
-template <typename T, typename TVector>
+template <typename T, typename TVector, typename TResult>
 void SelectiveColumnReader::getFlatValues(
     RowSet rows,
     VectorPtr* result,
     const TypePtr& type,
     bool isFinal) {
+  static_assert(sizeof(TResult) == sizeof(TVector));
   BOLT_CHECK_NE(valueSize_, kNoValueSize);
   BOLT_CHECK(mayGetValues_);
   if (isFinal) {
     mayGetValues_ = false;
   }
   if (allNull_) {
-    *result = std::make_shared<ConstantVector<TVector>>(
+    *result = std::make_shared<ConstantVector<TResult>>(
         &memoryPool_,
         rows.size(),
         true,
         type,
-        T(),
-        SimpleVectorStats<TVector>{},
-        sizeof(TVector) * rows.size());
+        TResult(),
+        SimpleVectorStats<TResult>{},
+        sizeof(TResult) * rows.size());
     return;
   }
   if (valueSize_ == sizeof(TVector)) {
@@ -136,7 +137,7 @@ void SelectiveColumnReader::getFlatValues(
     upcastScalarValues<T, TVector>(rows);
   }
   valueSize_ = sizeof(TVector);
-  *result = std::make_shared<FlatVector<TVector>>(
+  *result = std::make_shared<FlatVector<TResult>>(
       &memoryPool_,
       type,
       resultNulls(),

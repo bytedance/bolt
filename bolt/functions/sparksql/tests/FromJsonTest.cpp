@@ -283,5 +283,59 @@ TEST_F(FromJsonTest, scalarRootDocumentDoesNotThrow) {
   testFromJson(scalarInput, expectedRow);
 }
 
+TEST_F(FromJsonTest, DuplicateCaseInsensitiveFields) {
+  // Regression test: when a JSON object contains two keys that differ only in
+  // case (e.g. "FieldA" and "fieldA"), from_json must honor only the first
+  // match (case-insensitive) and NOT aggregate the two values. A buggy
+  // implementation reuses the same child writer without resetting it, which
+  // causes array fields to grow by appending and string fields to be
+  // concatenated.
+  {
+    // json string -> struct<FieldA:array<string>,Foo:string>
+    const std::string inputJson = R"JSON(
+      {
+        "FieldA": ["READ", "BLUE"],
+        "Foo": "Bar",
+        "fieldA": ["red", "blue"],
+        "foo": "bar"
+      }
+    )JSON";
+    auto values =
+        makeFlatVector<std::string>({inputJson, inputJson, inputJson});
+
+    auto fieldAVector = makeArrayVector<std::string>(
+        {{"READ", "BLUE"}, {"READ", "BLUE"}, {"READ", "BLUE"}});
+    auto fooVector = makeFlatVector<StringView>({"Bar", "Bar", "Bar"});
+    auto result = makeRowVector({"FieldA", "Foo"}, {fieldAVector, fooVector});
+
+    testFromJson(values, result);
+  }
+}
+
+TEST_F(FromJsonTest, caseSensitiveFields) {
+  const std::string inputJson = R"({"NAME":"first","age":"second"})";
+  auto input = makeFlatVector<std::string>({inputJson, inputJson, inputJson});
+  auto expected = makeRowVector(
+      {"name"},
+      {makeNullableFlatVector<StringView>(
+          {std::nullopt, std::nullopt, std::nullopt})});
+
+  testFromJson(input, expected);
+}
+
+TEST_F(FromJsonTest, arrayObjAsSingleElement) {
+  // SELECT from_json('{"a": "A"}', 'ARRAY<STRUCT<a:string>>');
+  // When the root type is an array of ROW, a JSON object is parsed as a
+  // single-element array, matching Spark's behavior.
+  const std::string inputJson = R"({"a": "A"})";
+  auto input = makeFlatVector<std::string>({inputJson, inputJson, inputJson});
+  auto rowVector =
+      makeRowVector({"a"}, {makeFlatVector<StringView>({"A", "A", "A"})});
+  std::vector<vector_size_t> offsets{0, 1, 2};
+  auto expected = makeArrayVector(offsets, rowVector);
+
+  testFromJson(input, expected);
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

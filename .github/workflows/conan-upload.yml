@@ -51,7 +51,7 @@ jobs:
     runs-on: [ self-hosted, medium, "${{ matrix.runner_host }}" ]
     timeout-minutes: 720
     container:
-      image: bolt-registry:5000/bolt-ci:20260114
+      image: bolt-registry:5000/bolt-ci:20260921
       options: --user root --init
       volumes:
         - /data/ccache-data:/data/ccache-data
@@ -74,7 +74,9 @@ jobs:
         if: ${{ inputs.build_type == 'All' || inputs.build_type == 'Release' }}
         shell: bash
         run: |
+          conan remote remove ci || true
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Release" \
             -c "bolt/*:tools.build:skip_test=False" \
@@ -83,13 +85,35 @@ jobs:
             -o "bolt/*:enable_gcs=True" \
             -o "bolt/*:enable_testutil=True" \
             -o "bolt/*:enable_perf=True" \
-            --build=missing
+            --build=missing -r=bolt-cci-local
+
+      - name: Install Python Release dependency graph
+        if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Release') }}
+        shell: bash
+        env:
+          BOLT_TEST_LINKAGE: static
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-dev
+
+          # Match the Python wheel dependency graph in bolt_build_backend.py.
+          conan install . \
+            -pr:h host-profile -pr:b build-profile \
+            -s "build_type=Release" \
+            -s "&:build_type=Release" \
+            -o "&:python_bind=True" \
+            -o "&:enable_testutil=True" \
+            -o "&:enable_jit=False" \
+            -o "&:spark_compatible=False" \
+            -o "&:shared=False" \
+            --build=missing -r=bolt-cci-local
 
       - name: Install Debug dependency graph
         if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}
         shell: bash
         run: |
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Debug" \
             -c "bolt/*:tools.build:skip_test=False" \
@@ -98,7 +122,7 @@ jobs:
             -o "bolt/*:enable_gcs=True" \
             -o "bolt/*:enable_testutil=True" \
             -o "bolt/*:enable_perf=True" \
-            --build=missing
+            --build=missing -r=bolt-cci-local
 
       - name: Upload packages to conan remote
         if: ${{ always() && steps.env-setup.outcome == 'success' }}
@@ -106,5 +130,6 @@ jobs:
           CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_ADMIN_USERNAME }}
           CONAN_PASSWORD: ${{ secrets.CONAN_ADMIN_PASSWORD }}
         run: |
+          conan remote add --force ci http://conanserver:9300
           conan remote auth ci
           conan upload -r ci --confirm --check "*"

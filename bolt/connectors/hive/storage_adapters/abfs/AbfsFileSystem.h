@@ -52,6 +52,8 @@ class AbfsFileSystem : public FileSystem {
 
   std::string name() const override;
 
+  FileInfo fileInfo(std::string_view path) override;
+
   std::unique_ptr<ReadFile> openFileForRead(
       std::string_view path,
       const FileOptions& options = {}) override;

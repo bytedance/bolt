@@ -139,6 +139,7 @@ option(BOLT_ENABLE_EXEC "Build exec." ON)
 option(BOLT_ENABLE_AGGREGATES "Build aggregates." ON)
 option(BOLT_ENABLE_HIVE_CONNECTOR "Build Hive connector." ON)
 option(BOLT_ENABLE_TPCH_CONNECTOR "Build TPC-H connector." ON)
+option(BOLT_ENABLE_TPCDS_CONNECTOR "Build TPC-DS connector." ON)
 option(BOLT_ENABLE_ARROW_CONNECTOR "Build Arrow Memory connector." ON)
 option(BOLT_ENABLE_PRESTO_FUNCTIONS "Build Presto SQL functions." ON)
 option(BOLT_ENABLE_SPARK_FUNCTIONS "Build Spark SQL functions." ON)
@@ -155,6 +156,7 @@ option(
 )
 option(BOLT_ENABLE_SUBSTRAIT "Build Substrait-to-Bolt converter." OFF)
 option(BOLT_ENABLE_S3 "Build S3 Connector" OFF)
+option(BOLT_ENABLE_TOS "Build TOS Connector" OFF)
 option(BOLT_ENABLE_GCS "Build GCS Connector" OFF)
 option(BOLT_ENABLE_ABFS "Build Abfs Connector" OFF)
 option(BOLT_ENABLE_HDFS "Build Hdfs Connector" ON)
@@ -185,6 +187,11 @@ set(
 )
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
+option(BOLT_BUILD_RADIX_SORT_TEST "Build the standalone radix sort contract test." OFF)
+option(BOLT_BUILD_RADIX_SORT_BENCHMARK "Build the standalone radix SortBuffer benchmark." OFF)
+if(BOLT_BUILD_RADIX_SORT_TEST)
+  set(BOLT_BUILD_TEST_UTILS ON)
+endif()
 set(
   BOLT_TEST_LINKAGE
   "shared"
@@ -302,12 +309,14 @@ if(${BOLT_BUILD_MINIMAL})
   set(BOLT_ENABLE_AGGREGATES OFF)
   set(BOLT_ENABLE_HIVE_CONNECTOR OFF)
   set(BOLT_ENABLE_TPCH_CONNECTOR OFF)
+  set(BOLT_ENABLE_TPCDS_CONNECTOR OFF)
   set(BOLT_ENABLE_ARROW_CONNECTOR OFF)
   set(BOLT_ENABLE_SPARK_FUNCTIONS OFF)
   set(BOLT_ENABLE_FLINK_FUNCTIONS OFF)
   set(BOLT_ENABLE_SKETCH_FUNCTIONS OFF)
   set(BOLT_ENABLE_EXAMPLES OFF)
   set(BOLT_ENABLE_S3 OFF)
+  set(BOLT_ENABLE_TOS OFF)
   set(BOLT_ENABLE_GCS OFF)
   set(BOLT_ENABLE_ABFS OFF)
   set(BOLT_ENABLE_SUBSTRAIT OFF)
@@ -323,6 +332,7 @@ if(${BOLT_BUILD_TESTING})
   set(BOLT_ENABLE_AGGREGATES ON)
   set(BOLT_ENABLE_HIVE_CONNECTOR ON)
   set(BOLT_ENABLE_TPCH_CONNECTOR ON)
+  set(BOLT_ENABLE_TPCDS_CONNECTOR ON)
   # set(BOLT_ENABLE_ARROW_CONNECTOR ON)
   set(BOLT_ENABLE_SPARK_FUNCTIONS ON)
   set(BOLT_ENABLE_FLINK_FUNCTIONS ON)
@@ -395,6 +405,7 @@ if(${BOLT_BUILD_PYTHON_PACKAGE})
   set(BOLT_ENABLE_FLINK_FUNCTIONS ON)
   set(BOLT_ENABLE_EXAMPLES OFF)
   set(BOLT_ENABLE_S3 OFF)
+  set(BOLT_ENABLE_TOS OFF)
   set(BOLT_ENABLE_GCS OFF)
   set(BOLT_ENABLE_ABFS OFF)
   set(BOLT_ENABLE_SUBSTRAIT ON)
@@ -440,6 +451,10 @@ list(
   0
   a
 )
+if(BOLT_ENABLE_TOS)
+  find_package(tos_client CONFIG REQUIRED)
+endif()
+
 if(BOLT_ENABLE_S3)
   # Set AWS_ROOT_DIR if you have a custom install location of AWS SDK CPP.
   if(AWSSDK_ROOT_DIR)
@@ -689,7 +704,7 @@ if(NOT ${BOLT_BUILD_MINIMAL})
   find_package(lz4 CONFIG REQUIRED)
   find_package(zstd CONFIG REQUIRED)
   find_package(Snappy CONFIG REQUIRED)
-  find_package(zstd CONFIG REQUIRED)
+  find_package(openzl CONFIG REQUIRED)
 endif()
 
 find_package(re2 CONFIG REQUIRED)
@@ -904,6 +919,13 @@ if(BOLT_ENABLE_TORCH)
 endif()
 
 if(BOLT_BUILD_PYTHON_PACKAGE)
+  find_package(
+    Python3
+    REQUIRED
+    COMPONENTS
+      Development
+      Interpreter
+  )
   find_package(pybind11 CONFIG REQUIRED)
 endif()
 

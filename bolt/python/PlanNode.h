@@ -29,11 +29,11 @@
  */
 #pragma once
 
-#include <pybind11/pytypes.h>
+#include <pybind11/pybind11.h>
 
 #include "bolt/core/PlanNode.h"
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 
 class PythonNode : public ::bytedance::bolt::core::PlanNode {
  public:
@@ -86,4 +86,9 @@ class PythonNode : public ::bytedance::bolt::core::PlanNode {
   static inline constexpr std::string_view kNodeId = "id";
   static inline constexpr std::string_view kSources = "sources";
 };
+} // namespace bytedance::bolt::python
+
+// Preserve the PythonNode name used by existing planner integrations.
+namespace bolt::python {
+using PythonNode = ::bytedance::bolt::python::PythonNode;
 } // namespace bolt::python

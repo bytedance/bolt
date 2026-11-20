@@ -34,17 +34,31 @@
 #include <folly/Range.h>
 namespace bytedance::bolt::functions {
 
-using ParseResult = folly::Expected<std::string, bool>;
+struct JsonPathToken {
+  static JsonPathToken Token(std::string token) {
+    return JsonPathToken{.token_ = std::move(token), .wildcard_ = false};
+  }
+  static JsonPathToken Wildcard() {
+    return JsonPathToken{.token_ = "*", .wildcard_ = true};
+  }
+  std::string token_;
+  bool wildcard_; // array index wildcard, only used by spark.
+};
+
+using JsonPathTokens = std::vector<JsonPathToken>;
+using ParseResult = folly::Expected<JsonPathToken, bool>;
 
 class JsonPathTokenizer {
  public:
+  explicit JsonPathTokenizer(bool spark_compatible)
+      : spark_compatible_(spark_compatible){};
   bool reset(folly::StringPiece path);
 
   bool hasNext() const;
 
   ParseResult getNext();
 
-  ParseResult getSimdjsonPathPointer() const noexcept;
+  const std::string& getSimdjsonPathPointer() const noexcept;
 
  private:
   bool match(char expected);
@@ -64,6 +78,8 @@ class JsonPathTokenizer {
   folly::StringPiece path_;
 
   std::string simdJsonPathPointer_;
+
+  const bool spark_compatible_;
 };
 
 } // namespace bytedance::bolt::functions

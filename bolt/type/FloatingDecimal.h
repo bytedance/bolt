@@ -24,34 +24,6 @@ class FloatingDecimal {
  public:
   static constexpr double big10pow[] = {1e16, 1e32, 1e64, 1e128, 1e256};
   static constexpr double tiny10pow[] = {1e-16, 1e-32, 1e-64, 1e-128, 1e-256};
-  static constexpr int64_t long5pow[] = {
-      1L,
-      5L,
-      25L,
-      125L,
-      625L,
-      3125L,
-      15625L,
-      78125L,
-      390625L,
-      390625L * 5,
-      390625L * 25,
-      390625L * 125,
-      390625L * 625,
-      390625L * 3125,
-      390625L * 15625,
-      390625L * 78125,
-      390625L * 390625,
-      390625L * 390625 * 5,
-      390625L * 390625 * 25,
-      390625L * 390625 * 125,
-      390625L * 390625 * 625,
-      390625L * 390625 * 3125,
-      390625L * 390625 * 15625,
-      390625L * 390625 * 78125,
-      390625L * 390625 * 390625,
-      390625L * 390625 * 390625 * 5,
-      390625L * 390625 * 390625 * 25};
   static constexpr int64_t mask = 0xffffffffL;
   static constexpr int64_t signMask = 0x8000000000000000L;
   static constexpr int64_t expMask = 0x7ff0000000000000L;
@@ -67,9 +39,6 @@ class FloatingDecimal {
   static constexpr int32_t intDecimalDigits = 9;
   static constexpr int32_t maxSmallTen = 22;
   static constexpr int32_t maxSingleSmallTen = 10;
-  static constexpr int32_t maxLongFive = 26;
-  static std::vector<boost::multiprecision::cpp_int> b5p;
-
   static std::optional<double> toDoubleFromValue(int128_t value, int32_t scale);
 
   static std::optional<double>

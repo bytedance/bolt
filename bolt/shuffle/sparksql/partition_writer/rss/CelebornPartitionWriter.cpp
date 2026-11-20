@@ -106,78 +106,72 @@ arrow::Status CelebornPartitionWriter::evict(
     std::vector<std::vector<uint8_t*>>& rows,
     std::vector<int64_t>& partitionBytes,
     const bool isCompositeVector) {
-  // evict rows in all partitions
+  for (auto pid = 0; pid < rows.size(); ++pid) {
+    auto rawSize =
+        isCompositeVector ? getTotalRowBytes(rows[pid]) : partitionBytes[pid];
+    partitionBytes[pid] = 0;
+    RETURN_NOT_OK(writeFinal(pid, rows[pid], rawSize, isCompositeVector));
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status CelebornPartitionWriter::writeFinal(
+    uint32_t partitionId,
+    std::vector<uint8_t*>& rows,
+    int64_t rawSize,
+    bool isCompositeVector) {
+  if (rows.empty()) {
+    return arrow::Status::OK();
+  }
+  bytedance::bolt::NanosecondTimer timer(&spillTime_);
   if (!zstdCodec_) {
-    // Disable checksum for Celeborn cause celeborn already has checksum inside
+    // Disable checksum for Celeborn because Celeborn already has its own.
     zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
         options_.compressionLevel, true, payloadPool_.get(), false);
   }
-  RowVectorLayout layout = isCompositeVector ? RowVectorLayout::kComposite
-                                             : RowVectorLayout::kColumnar;
-  int64_t pBytes = 0;
-  // compress and flush
-  for (auto pid = 0; pid < rows.size(); ++pid) {
-    if (isCompositeVector) {
-      pBytes = std::accumulate(
-          rows[pid].begin(),
-          rows[pid].end(),
-          0,
-          [](uint64_t sum, uint8_t* row) { return sum + *(int32_t*)row; });
-    } else {
-      pBytes = partitionBytes[pid];
-      partitionBytes[pid] = 0;
-    }
-    if (!rows[pid].empty()) {
-      auto totalRowCount = rows[pid].size();
-      size_t slicedAvgNumRows = totalRowCount;
-      int32_t fragCnt = 1;
-      if (pBytes > options_.shuffleBufferSize) {
-        fragCnt = std::round(1.0 * pBytes / options_.shuffleBufferSize);
-        slicedAvgNumRows = (totalRowCount + fragCnt - 1) / fragCnt;
-        VLOG(1) << __FUNCTION__ << ": pBytes " << pBytes
-                << ", options_.shuffleBufferSize " << options_.shuffleBufferSize
-                << ", fragCnt = " << fragCnt
-                << ", slicedAvgNumRows = " << slicedAvgNumRows
-                << ", totalRowCount = " << totalRowCount;
-      }
-      BOLT_DCHECK(
-          pBytes != 0,
-          "rows = " + std::to_string(rows[pid].size()) +
-              ", but bytes = " + std::to_string(pBytes));
-
-      size_t startIndex = 0;
-      do {
-        auto slicedNumRows =
-            std::min(slicedAvgNumRows, totalRowCount - startIndex);
-        auto payload = std::make_unique<RowBlockPayload>(
-            folly::Range<uint8_t**>(
-                rows[pid].data() + startIndex, slicedNumRows),
-            pBytes / fragCnt,
-            payloadPool_.get(),
-            zstdCodec_.get(),
-            layout);
-
-        // Copy payload to arrow buffered os.
-        ARROW_ASSIGN_OR_RAISE(
-            auto celebornBufferOs,
-            arrow::io::BufferOutputStream::Create(
-                options_.pushBufferMaxSize, pool_));
-        RETURN_NOT_OK(payload->serialize(celebornBufferOs.get()));
-        payload = nullptr; // Invalidate payload immediately.
-
-        ARROW_ASSIGN_OR_RAISE(auto buffer, celebornBufferOs->Finish());
-        bytesEvicted_[pid] += celebornClient_->pushPartitionData(
-            pid,
-            reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data())),
-            buffer->size());
-        startIndex += slicedNumRows;
-      } while (startIndex < totalRowCount);
-      BOLT_CHECK(startIndex == totalRowCount);
-
-      rawPartitionLengths_[pid] += pBytes;
-      rows[pid].clear();
-    }
+  BOLT_DCHECK(
+      rawSize != 0,
+      "rows = " + std::to_string(rows.size()) +
+          ", but bytes = " + std::to_string(rawSize));
+  auto totalRowCount = rows.size();
+  size_t slicedAvgNumRows = totalRowCount;
+  int32_t fragCnt = 1;
+  if (rawSize > options_.shuffleBufferSize) {
+    fragCnt = std::round(1.0 * rawSize / options_.shuffleBufferSize);
+    slicedAvgNumRows = (totalRowCount + fragCnt - 1) / fragCnt;
+    VLOG(1) << __FUNCTION__ << ": rawSize " << rawSize
+            << ", options_.shuffleBufferSize " << options_.shuffleBufferSize
+            << ", fragCnt = " << fragCnt
+            << ", slicedAvgNumRows = " << slicedAvgNumRows
+            << ", totalRowCount = " << totalRowCount;
   }
+
+  size_t startIndex = 0;
+  do {
+    auto slicedNumRows = std::min(slicedAvgNumRows, totalRowCount - startIndex);
+    RowBlockPayload payload(
+        folly::Range<uint8_t**>(rows.data() + startIndex, slicedNumRows),
+        rawSize / fragCnt,
+        payloadPool_.get(),
+        zstdCodec_.get(),
+        isCompositeVector ? RowVectorLayout::kComposite
+                          : RowVectorLayout::kColumnar);
+    ARROW_ASSIGN_OR_RAISE(
+        auto celebornBufferOs,
+        arrow::io::BufferOutputStream::Create(
+            options_.pushBufferMaxSize, pool_));
+    RETURN_NOT_OK(payload.serialize(celebornBufferOs.get()));
+    ARROW_ASSIGN_OR_RAISE(auto buffer, celebornBufferOs->Finish());
+    bytesEvicted_[partitionId] += celebornClient_->pushPartitionData(
+        partitionId,
+        reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data())),
+        buffer->size());
+    startIndex += slicedNumRows;
+  } while (startIndex < totalRowCount);
+  BOLT_CHECK(startIndex == totalRowCount);
+
+  rawPartitionLengths_[partitionId] += rawSize;
+  rows.clear();
   return arrow::Status::OK();
 }
 

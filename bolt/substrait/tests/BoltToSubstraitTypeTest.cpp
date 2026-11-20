@@ -43,18 +43,53 @@ class BoltToSubstraitTypeTest : public ::testing::Test {
     SCOPED_TRACE(type->toString());
 
     google::protobuf::Arena arena;
-    auto substraitType = typeConvertor_->toSubstraitType(arena, type);
+    const auto& substraitType =
+        substraitTypeConverter_.toSubstraitType(arena, type);
     auto sameType = substraitParser_->parseType(substraitType);
     ASSERT_TRUE(sameType->kindEquals(type))
         << "Expected: " << type->toString()
         << ", but got: " << sameType->toString();
   }
 
-  std::shared_ptr<BoltToSubstraitTypeConvertor> typeConvertor_;
+  BoltToSubstraitTypeConvertor substraitTypeConverter_;
 
   std::shared_ptr<SubstraitParser> substraitParser_ =
       std::make_shared<SubstraitParser>();
 };
+
+TEST_F(BoltToSubstraitTypeTest, customTypeAnchors) {
+  google::protobuf::Arena arena;
+  const auto& unknown =
+      substraitTypeConverter_.toSubstraitType(arena, UNKNOWN());
+  EXPECT_EQ(unknown.user_defined().type_reference(), 0);
+  EXPECT_EQ(substraitParser_->parseType(unknown)->kind(), TypeKind::UNKNOWN);
+
+  auto collector = std::make_shared<SubstraitExtensionCollector>();
+  BoltToSubstraitTypeConvertor converter(collector);
+  const auto& unknownWithCollector =
+      converter.toSubstraitType(arena, UNKNOWN());
+  EXPECT_EQ(unknownWithCollector.user_defined().type_reference(), 0);
+  ::substrait::Plan plan;
+  collector->addExtensionsToPlan(&plan);
+  std::unordered_map<uint32_t, std::string> extensions;
+  for (const auto& declaration : plan.extensions()) {
+    const auto& type = declaration.extension_type();
+    extensions[type.type_anchor()] = type.name();
+  }
+  EXPECT_EQ(extensions.at(0), "UNKNOWN");
+  substraitParser_->setTypeExtensionMap(extensions);
+  EXPECT_EQ(
+      substraitParser_->parseType(unknownWithCollector)->kind(),
+      TypeKind::UNKNOWN);
+}
+
+TEST_F(BoltToSubstraitTypeTest, decimalPrecisionAndScale) {
+  for (auto type : {DECIMAL(10, 2), DECIMAL(28, 9)}) {
+    google::protobuf::Arena arena;
+    const auto& encoded = substraitTypeConverter_.toSubstraitType(arena, type);
+    EXPECT_TRUE(substraitParser_->parseType(encoded)->equivalent(*type));
+  }
+}
 
 TEST_F(BoltToSubstraitTypeTest, basic) {
   testTypeConversion(BOOLEAN());

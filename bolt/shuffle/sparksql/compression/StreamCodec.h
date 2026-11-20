@@ -97,7 +97,7 @@ class StreamCompressor {
 
  protected:
   int32_t compressionLevel() const {
-    return options_.compressionLevel == kDefaultCompressionLevel
+    return isDefaultCompressionLevel(options_.compressionLevel)
         ? defaultCompressionLevel()
         : options_.compressionLevel;
   }

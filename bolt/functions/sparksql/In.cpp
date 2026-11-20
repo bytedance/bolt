@@ -37,11 +37,21 @@
 #include "bolt/functions/sparksql/Arena.h"
 #include "bolt/functions/sparksql/Comparisons.h"
 #include "bolt/type/Filter.h"
+#include "bolt/type/FloatingPointUtil.h"
 namespace bytedance::bolt::functions::sparksql {
 namespace {
 
 template <typename T>
-class Set : public folly::F14FastSet<T, folly::hasher<T>, Equal<T>> {};
+struct Hash : folly::hasher<T> {};
+
+template <>
+struct Hash<float> : util::floating_point::NaNAwareHash<float> {};
+
+template <>
+struct Hash<double> : util::floating_point::NaNAwareHash<double> {};
+
+template <typename T>
+class Set : public folly::F14FastSet<T, Hash<T>, Equal<T>> {};
 
 template <>
 class Set<StringView> {

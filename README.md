@@ -21,8 +21,8 @@ This will ensure the smooth & credible experience for code contribution
 Bolt focuses on the physical execution layer of DBMS while providing first-class and high performance support for popular frameworks and storage formats.
 
 Frameworks:
-* [Apache Gluten](https://github.com/apache/incubator-gluten/discussions/10929#discussioncomment-15037342) for Spark
-* RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)  
+* [Apache Gluten](https://github.com/apache/gluten#bolt-backend) for Apache Spark
+* RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)
 * [OpenSearch](https://github.com/opensearch-project/sql/issues/4812?open_in_browser=true) for ElasticSearch
 * Flink (Coming Soon)
 * ...
@@ -54,15 +54,41 @@ git clone https://github.com/bytedance/bolt.git
 cd bolt
 ```
 
-### Setup Develop Env
-We provide scripts to help developers configure the environment and install dependencies.
+### Set Up the Development Environment
+
+Use the latest stable **Clang, version 22 or newer**. CI validates the Clang
+toolchain; newer GCC versions are not covered by CI.
+
+Run the following script to set up your development environment. It reuses an
+installed Clang 22 or newer, or installs the latest stable LLVM toolchain when
+none is available. Automatic compiler installation uses
+[LLVM's APT repository](https://apt.llvm.org/) on Debian/Ubuntu (requires sudo or
+root) and Homebrew on macOS:
+
 ```shell
 scripts/setup-dev-env.sh
 ```
 
-Bolt uses [Conan](https://conan.io/) as its dependency management tool, which is an open source and multi-platform package manager.
+The setup script configures the default Conan profile with
+`--compiler=clang --libcxx=libc++`, using the installed LLVM toolchain first on PATH.
+It also makes the installed Clang and LLD the default commands (through
+`update-alternatives` on Debian/Ubuntu or the shell PATH on macOS).
+See [manual setup](CONTRIBUTING.md#option-2-manual-setup-for-advanced-users) for
+other distributions or custom toolchains.
 
-This script exports conan recipes to local cache. For the first time, dependencies will be built from source and installed into local cache. You can setup your own [conan server](https://docs.conan.io/2/reference/conan_server.html#conan-server) to accelerate building.
+Bolt manages its dependencies with [Conan](https://conan.io/), an open-source, cross-platform package manager.
+
+The setup script exports Conan recipes to the local cache. During the first build, dependencies are compiled from source and stored in the local cache. You can set up your own [Conan server](https://docs.conan.io/2/reference/conan_server.html#conan-server) to speed up builds.
+
+Use the following helper script to configure your Conan profile:
+
+```sh
+# Auto-detect the compiler, C++ standard library, and linker.
+python3 scripts/configure-conan-profile.py
+```
+
+See [`configure-conan-profile.py`](scripts/configure-conan-profile.py) for the
+default toolchain selection behavior and the options that override it.
 
 ### Building Bolt
 #### Building Bolt for Presto
@@ -78,23 +104,32 @@ make release
 make release BUILD_VERSION=main
 ```
 
-#### Building Bolt for [Gluten](https://gluten.apache.org/)
-Before you begin, please ensure that the following software is present in your environment: JDK (currently only JDK 11 and JDK 17 are supported), Maven, and curl.
+#### Building Bolt as an [Apache Gluten](https://gluten.apache.org/) Backend
 
-First, you need to compile Bolt, and then export Bolt as a library.
+Bolt is now available as a backend in Apache Gluten. The integration was merged via [apache/gluten#12454](https://github.com/apache/gluten/pull/12454).
+
+For the latest prerequisites and standard build instructions, see the [Bolt Backend](https://github.com/apache/gluten#bolt-backend) section in the Apache Gluten repository.
+
+To validate local Bolt changes with Gluten, first build Bolt in Spark-compatible mode and export it to the local Conan cache:
+
 ```shell
-cd bolt
+# In the Bolt repository
 make release_spark
 make export_release
 ```
 
-Then you can compile Gluten that supports Bolt.
+Then clone the official Apache Gluten repository and build the Bolt backend and Gluten JAR:
+
 ```shell
-git clone -b add_bolt_backend https://github.com/WangGuangxin/gluten.git
+git clone https://github.com/apache/gluten.git
 cd gluten
-make arrow
+
 make release
-make jar
+make arrow
+
+# Select the target matching your Spark version.
+# For example, build the Spark 3.5 package:
+make jar_spark35
 ```
 
 #### Building Bolt for other system
@@ -108,6 +143,21 @@ class GluenConan(ConanFile):
     self.requires(f"bolt/{bolt_version}", transitive_headers=True, transitive_libs=True)
 ```
 
+#### Using Bolt from Python
+
+The `bolt-engine` package provides two Python APIs:
+
+- **`boltml`**: a DataFrame API for reading Parquet and ORC files, filtering,
+  joining, and aggregating data, and applying Python functions to prepare data
+  and ML features. It works with Arrow and NumPy and supports execution on Ray
+  workers.
+- **`pybolt`**: direct access to Bolt's native types, vectors, and query plans
+  for building and running execution pipelines from Python.
+
+Start with `boltml` for data processing; use `pybolt` to construct query plans
+directly. See the [Python quick start](bolt/python/README.md) for installation
+and examples, and the [build guide](bolt/python/packaging/BUILDING.md) for wheel
+packaging and Ray deployment.
 
 ## Contributing
 

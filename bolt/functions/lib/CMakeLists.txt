@@ -73,16 +73,23 @@ bolt_add_library(
   CheckNestedNulls.cpp
   DateTimeFormatter.cpp
   DateTimeFormatterBuilder.cpp
+  DateTimeParser.cpp
+  HiveDateTimeFormatter.cpp
+  JavaDateTimeFormatter.cpp
+  JodaDateTimeFormatter.cpp
   KllSketch.cpp
   MapConcat.cpp
   MapFromEntries.cpp
   MapUpdate.cpp
+  MysqlDateTimeFormatter.cpp
   Re2Functions.cpp
   Repeat.cpp
   Sequence.cpp
   Slice.cpp
   SimpleComparisonMatcher.cpp
+  SimpleDateTimeFormatter.cpp
   Size.cpp
+  SparkDateTimeFormatter.cpp
   StringEncodingUtils.cpp
   StringUtil.cpp
   SubscriptUtil.cpp
@@ -100,6 +107,7 @@ target_link_libraries(
   utf8proc::utf8proc
   date::date
   bolt_type_tz
+  ${ICU_LIBRARIES}
 )
 
 add_subdirectory(aggregates)

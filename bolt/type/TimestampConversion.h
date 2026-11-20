@@ -168,11 +168,24 @@ inline int64_t fromTimeString(const StringView& str, bool* nullOutput) {
 // Timestamp conversion
 
 /// Parses a full ISO 8601 timestamp string, following the format
-/// "YYYY-MM-DD HH:MM:SS[.MS] +00:00"
+/// "YYYY-MM-DD HH:MM:SS[.MS] +00:00". Fractional seconds are truncated
+/// to microseconds; all following fractional digits are consumed.
 Timestamp fromTimestampString(const char* buf, size_t len, bool* nullOutput);
 
 inline Timestamp fromTimestampString(const StringView& str, bool* nullOutput) {
   return fromTimestampString(str.data(), str.size(), nullOutput);
+}
+
+/// Like fromTimestampString(), preserving up to nine fractional digits.
+/// Extra fractional digits are consumed and truncated, without rounding.
+/// Retains the date/time syntax and error handling of fromTimestampString().
+Timestamp
+fromTimestampStringNanos(const char* buf, size_t len, bool* nullOutput);
+
+inline Timestamp fromTimestampStringNanos(
+    const StringView& str,
+    bool* nullOutput) {
+  return fromTimestampStringNanos(str.data(), str.size(), nullOutput);
 }
 
 /// Parses a full ISO 8601 timestamp string, following the format:
@@ -202,6 +215,16 @@ std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
 
 inline auto fromTimestampWithTimezoneString(const StringView& str) {
   return fromTimestampWithTimezoneString(str.data(), str.size());
+}
+
+/// Like fromTimestampWithTimezoneString(), preserving up to nine fractional
+/// digits. Extra fractional digits are consumed and truncated. The returned
+/// time zone ID is not applied to the timestamp.
+std::optional<std::pair<Timestamp, int16_t>>
+fromTimestampWithTimezoneStringNanos(const char* buf, size_t len);
+
+inline auto fromTimestampWithTimezoneStringNanos(const StringView& str) {
+  return fromTimestampWithTimezoneStringNanos(str.data(), str.size());
 }
 
 Timestamp fromDatetime(int64_t daysSinceEpoch, int64_t microsSinceMidnight);

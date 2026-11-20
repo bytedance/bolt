@@ -59,6 +59,8 @@ bolt_add_library(
   HashPartitionFunction.cpp
   HashProbe.cpp
   HashTable.cpp
+  HashTableSimdHash.cpp
+  HashTableSimdKey.cpp
   IndexLookupJoin.cpp
   JoinBridge.cpp
   Limit.cpp
@@ -120,6 +122,10 @@ bolt_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  bm/BmAggregateWindow.cpp
+  bm/BmRangeFrameBounds.cpp
+  bm/BmStreamingWindowBuild.cpp
+  bm/BmWindowPartition.cpp
 )
 
 set_target_properties(
@@ -128,6 +134,8 @@ set_target_properties(
     ENABLE_EXPORTS
       ON
 )
+
+add_subdirectory(radixsort)
 
 if(${ENABLE_BOLT_JIT})
   find_package(LLVM REQUIRED CONFIG)
@@ -148,6 +156,7 @@ target_link_libraries(
   bolt_expression
   bolt_presto_serializer
   bolt_cpu_usage
+  bolt_memory_bm
   $<TARGET_NAME_IF_EXISTS:bolt_thrustjit>
   gfx::timsort
   arrow::arrow
@@ -174,6 +183,8 @@ if(${BOLT_ENABLE_CUDF})
     cudf::cudf
   )
 endif()
+
+add_subdirectory(bm)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)

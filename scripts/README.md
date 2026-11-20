@@ -4,15 +4,16 @@ Developer tooling for the Bolt repo.
 
 | File | What it does |
 |---|---|
-| `setup-dev-env.sh` | One-shot host setup: JDK, Conan, system packages. Run once on a fresh box. |
+| `setup-dev-env.sh` | Requires Clang 22, builds patched LLD 22.1.8 under `/opt/clang-22.1.8` on Linux, configures Conan and local recipes, and installs Git hooks. Uses LLVM APT packages on Debian/Ubuntu or Homebrew on macOS. |
 | `install-bolt-deps.sh` | Pulls Bolt's pinned Conan deps into the local Conan cache. |
-| `install-gcc.sh` | Installs the GCC toolchain Bolt builds against (root required). |
+| `configure-conan-profile.py` | Regenerates `build-profile` and `host-profile` with compiler, C++ runtime, and linker settings; applies LTO to both and Clang PGO only to the host profile. Use `--profile NAME` to regenerate a single profile. |
+| `configure-conan-sources-cache.py` | Configures Conan's source download cache, mirror URL, and credentials. Requires `--url`, `--user`, and the `CONAN_SOURCE_PASSWORD` environment variable. |
+| `install-gcc.sh` | Optional GCC installation (root required). Clang 22 is the supported default; newer GCC versions are not covered by CI. |
 | `run-clang-tidy.py` | Runs clang-tidy on changed lines only; used by pre-commit + CI. |
 | `run-gitleaks.py` | Scans staged changes locally and the CI commit range for secrets. |
 | `launch-spark.sh` | One-click Spark + Gluten + Bolt launcher with a long-lived Connect Server. |
 | `launch-spark/connect.py` | pyspark Connect client used by `launch-spark.sh sql` / `shell`. |
 | `launch-spark/test-queries.sql` | Smoke-test SQL covering scan/agg/join paths for Bolt offload verification. |
-| `conan/` | Conan profiles consumed by Bolt's build. |
 
 ## `launch-spark.sh`
 

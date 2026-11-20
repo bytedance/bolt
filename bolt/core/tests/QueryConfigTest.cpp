@@ -57,6 +57,45 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
   EXPECT_EQ(configured.parquetReaderImplicitCastMask(), -1);
 }
 
+TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
+  auto defaultConfig = QueryCtx::create(nullptr, QueryConfig{{}});
+  EXPECT_EQ(
+      "zstd", defaultConfig->queryConfig().bufferManagerSpillCompressionKind());
+
+  auto configured = QueryCtx::create(
+      nullptr,
+      QueryConfig{
+          {{QueryConfig::kBufferManagerSpillCompressionKind, "openzl"}}});
+  EXPECT_EQ(
+      "openzl", configured->queryConfig().bufferManagerSpillCompressionKind());
+}
+
+TEST_F(QueryConfigTest, bufferManagerEnabledUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_enabled", "true"}}};
+  EXPECT_TRUE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_spill_compression_kind", "openzl"}}};
+  EXPECT_EQ("openzl", config.bufferManagerSpillCompressionKind());
+}
+
+TEST_F(QueryConfigTest, bufferManagerEnabledHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-enabled";
+  QueryConfig config{{{oldKey, "true"}}};
+  EXPECT_FALSE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-spill-compression-kind";
+  QueryConfig config{{{oldKey, "openzl"}}};
+  EXPECT_EQ("zstd", config.bufferManagerSpillCompressionKind());
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(
@@ -65,6 +104,49 @@ TEST_F(QueryConfigTest, setConfig) {
   const QueryConfig& config = queryCtx->queryConfig();
 
   ASSERT_TRUE(config.isLegacyCast());
+}
+
+TEST_F(QueryConfigTest, parquetRepDefStreamingWindowSize) {
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+  EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 2'048);
+
+  std::unordered_map<std::string, std::string> configData(
+      {{QueryConfig::kParquetRepDefStreamingWindowSize, "0"}});
+  queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 0);
+}
+
+TEST_F(QueryConfigTest, useMonoAlloc) {
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+  ASSERT_TRUE(queryCtx->queryConfig().useMonoAlloc());
+
+  std::unordered_map<std::string, std::string> configData(
+      {{QueryConfig::kUseMonoAlloc, "false"}});
+  queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  ASSERT_FALSE(queryCtx->queryConfig().useMonoAlloc());
+}
+
+TEST_F(QueryConfigTest, simdHashTableEnabled) {
+  {
+    auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "false"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "true"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_TRUE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
 }
 
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {

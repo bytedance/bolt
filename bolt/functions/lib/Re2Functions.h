@@ -62,6 +62,8 @@ struct Re2ExtractOptions {
   Re2ExtractErrorPolicy invalidGroupPolicy{Re2ExtractErrorPolicy::kThrow};
   Re2ExtractResultPolicy unmatchedGroupPolicy{
       Re2ExtractResultPolicy::kReturnEmptyString};
+  // Apply Java's long-to-int narrowing before validating group IDs.
+  bool castGroupIdToInt32{false};
 };
 
 /// Representation of different kinds of patterns.
@@ -156,6 +158,12 @@ std::shared_ptr<exec::VectorFunction> makeRe2Extract(
     const bool emptyNoMatch);
 
 std::shared_ptr<exec::VectorFunction> makeRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    const Re2ExtractOptions& options);
+
+std::shared_ptr<exec::VectorFunction> makeCachedRe2ExtractWithOptions(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config,

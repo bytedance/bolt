@@ -394,6 +394,35 @@ TEST_P(MemoryPoolTest, allocTest) {
   ASSERT_EQ(4 * kChunkSize, child->stats().peakBytes);
 }
 
+TEST(MemoryPoolTest, simpleMallocThreadSafeAllocFree) {
+  MemoryManager::Options options;
+  options.allocatorCapacity = 64L * MB;
+  options.arbitratorCapacity = 64L * MB;
+  options.useMmapAllocator = false;
+
+  MemoryManager manager(options);
+  ASSERT_EQ(MemoryAllocator::Kind::kMalloc, manager.allocator()->kind());
+
+  auto root = manager.addRootPool("simple_malloc_thread_safe");
+  auto child = root->addLeafChild("leaf", true);
+  ASSERT_TRUE(child->threadSafe());
+
+  constexpr int64_t kAllocSize = KB / 2;
+  void* buffer = child->allocate(kAllocSize);
+  ASSERT_NE(nullptr, buffer);
+  ASSERT_EQ(reinterpret_cast<uint64_t>(buffer) % child->alignment(), 0);
+  memset(buffer, 0x5A, kAllocSize);
+
+  EXPECT_EQ(kAllocSize, child->currentBytes());
+  EXPECT_EQ(kAllocSize, child->stats().peakBytes);
+  EXPECT_EQ(kAllocSize, root->currentBytes());
+
+  child->free(buffer, kAllocSize);
+  EXPECT_EQ(0, child->currentBytes());
+  EXPECT_EQ(kAllocSize, child->stats().peakBytes);
+  EXPECT_EQ(0, root->currentBytes());
+}
+
 TEST_P(MemoryPoolTest, DISABLED_memoryLeakCheck) {
   gflags::FlagSaver flagSaver;
   testing::FLAGS_gtest_death_test_style = "fast";

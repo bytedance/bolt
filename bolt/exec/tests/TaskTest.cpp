@@ -31,6 +31,7 @@
 #include "bolt/exec/Task.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/future/BoltPromise.h"
+#include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -44,6 +45,7 @@
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
+#include "folly/synchronization/Baton.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
 namespace bytedance::bolt::exec::test {
@@ -299,10 +301,12 @@ class TestExternalBlockableNode : public core::PlanNode {
   TestExternalBlockableNode(
       const core::PlanNodeId& id,
       core::PlanNodePtr source,
-      std::shared_ptr<ExternalBlocker> externalBlocker)
+      std::shared_ptr<ExternalBlocker> externalBlocker,
+      std::function<void()> onClose = nullptr)
       : PlanNode(id),
         sources_{std::move(source)},
-        externalBlocker_(std::move(externalBlocker)) {}
+        externalBlocker_(std::move(externalBlocker)),
+        onClose_(std::move(onClose)) {}
 
   const RowTypePtr& outputType() const override {
     return sources_[0]->outputType();
@@ -320,11 +324,16 @@ class TestExternalBlockableNode : public core::PlanNode {
     return externalBlocker_.get();
   }
 
+  const std::function<void()>& onClose() const {
+    return onClose_;
+  }
+
  private:
   void addDetails(std::stringstream& /* stream */) const override {}
 
   std::vector<core::PlanNodePtr> sources_;
   std::shared_ptr<ExternalBlocker> externalBlocker_;
+  std::function<void()> onClose_;
 };
 
 class TestExternalBlockableOperator : public exec::Operator {
@@ -339,7 +348,8 @@ class TestExternalBlockableOperator : public exec::Operator {
             operatorId,
             node->id(),
             "ExternalBlockable"),
-        externalBlocker_(node->externalBlocker()) {}
+        externalBlocker_(node->externalBlocker()),
+        onClose_(node->onClose()) {}
 
   bool needsInput() const override {
     return !noMoreInput_;
@@ -372,10 +382,18 @@ class TestExternalBlockableOperator : public exec::Operator {
     return noMoreInput_;
   }
 
+  void close() override {
+    if (onClose_) {
+      onClose_();
+    }
+    Operator::close();
+  }
+
  private:
   RowVectorPtr input_;
   ExternalBlocker* externalBlocker_;
   folly::SemiFuture<folly::Unit> continueFuture_;
+  std::function<void()> onClose_;
 };
 
 class TestExternalBlockableTranslator
@@ -987,6 +1005,101 @@ TEST_F(TaskTest, singleThreadedExecutionExternalBlockable) {
     results.push_back(std::move(result));
   }
   EXPECT_EQ(3, results.size());
+}
+
+TEST_F(TaskTest, finishedDriversWaitForOperatorClose) {
+  Operator::registerOperator(
+      std::make_unique<TestExternalBlockableTranslator>());
+  const auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  for (const bool paused : {false, true}) {
+    for (const auto terminalState :
+         {TaskState::kFinished, TaskState::kCanceled, TaskState::kAborted}) {
+      SCOPED_TRACE(fmt::format(
+          "paused: {}, state: {}", paused, taskStateString(terminalState)));
+      folly::Baton<> closeStarted;
+      folly::Baton<> finishClose;
+      auto blocker = std::make_shared<ExternalBlocker>();
+      blocker->block();
+      auto plan = PlanBuilder()
+                      .values({data})
+                      .addNode([&](std::string id, core::PlanNodePtr input) {
+                        return std::make_shared<TestExternalBlockableNode>(
+                            id, input, blocker, [&]() {
+                              closeStarted.post();
+                              finishClose.wait();
+                            });
+                      })
+                      .project({"c0"})
+                      .planFragment();
+      auto task = Task::create(
+          "task.close",
+          std::move(plan),
+          0,
+          core::QueryCtx::create(),
+          Task::ExecutionMode::kSerial);
+      ContinueFuture future = ContinueFuture::makeEmpty();
+      ASSERT_EQ(nullptr, task->next(&future));
+      ASSERT_TRUE(future.valid());
+      ASSERT_EQ(task->numTotalDrivers(), 1);
+
+      auto terminate = [&]() {
+        switch (terminalState) {
+          case TaskState::kFinished:
+            task->testingFinish();
+            break;
+          case TaskState::kCanceled:
+            task->requestCancel().wait();
+            break;
+          case TaskState::kAborted:
+            task->requestAbort().wait();
+            break;
+          default:
+            BOLT_UNREACHABLE();
+        }
+      };
+      if (paused) {
+        task->requestPause().wait();
+        terminate();
+      }
+      std::exception_ptr closeError;
+      std::thread closeThread([&]() {
+        try {
+          if (paused) {
+            Task::resume(task);
+          } else {
+            terminate();
+          }
+        } catch (...) {
+          closeError = std::current_exception();
+        }
+      });
+      auto closeGuard = folly::makeGuard([&]() {
+        finishClose.post();
+        closeThread.join();
+      });
+      ASSERT_TRUE(closeStarted.try_wait_for(std::chrono::seconds(5)));
+      EXPECT_EQ(task->state(), terminalState);
+      EXPECT_EQ(task->numFinishedDrivers(), 0);
+
+      finishClose.post();
+      closeThread.join();
+      closeGuard.dismiss();
+      if (closeError) {
+        std::rethrow_exception(closeError);
+      }
+      EXPECT_EQ(task->numFinishedDrivers(), task->numTotalDrivers());
+      bool foundOperator = false;
+      for (const auto& pipeline : task->taskStats().pipelineStats) {
+        for (const auto& stats : pipeline.operatorStats) {
+          EXPECT_EQ(stats.numDrivers, 1);
+          if (stats.operatorType == "ExternalBlockable") {
+            foundOperator = true;
+          }
+        }
+      }
+      EXPECT_TRUE(foundOperator);
+    }
+  }
 }
 
 TEST_F(TaskTest, supportSerialExecutionMode) {
@@ -1843,6 +1956,169 @@ DEBUG_ONLY_TEST_F(TaskTest, taskReclaimStats) {
   ASSERT_TRUE(waitForTaskAborted(task.get()));
   task.reset();
   waitForAllTasksToBeDeleted();
+}
+
+TEST_F(TaskTest, taskBufferManagerDisabledByDefault) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+
+  auto task = Task::create(
+      "task.buffer.manager.disabled",
+      std::move(plan),
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{});
+
+  ASSERT_EQ(nullptr, task->bufferManager());
+}
+
+TEST_F(TaskTest, taskCreatesBufferManagerWhenEnabled) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{std::unordered_map<std::string, std::string>{
+          {core::QueryConfig::kBufferManagerEnabled, "true"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.enabled",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(), .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  DriverCtx ctx(task, 0, 0, 0, 0);
+  ASSERT_EQ(task->bufferManager().get(), ctx.bufferManager().get());
+}
+
+DEBUG_ONLY_TEST_F(TaskTest, taskPassesDefaultBufferManagerCompressionOptions) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  memory::bm::BufferManagerConfig observedConfig;
+  bool observed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Task::maybeCreateBufferManager",
+      std::function<void(memory::bm::BufferManagerConfig*)>(
+          [&](memory::bm::BufferManagerConfig* config) {
+            observedConfig = *config;
+            observed = true;
+          }));
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kSpillCompressionKind, "none"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.zstd",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(), .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  ASSERT_TRUE(observed);
+  const auto& allocator = observedConfig.spillStoreConfig.fileAllocatorConfig;
+  EXPECT_EQ(2LL << 30, allocator.file_size_limit_bytes);
+  EXPECT_EQ(64, allocator.max_open_files_per_bucket);
+  ASSERT_TRUE(observedConfig.spillCompression.has_value());
+  EXPECT_EQ("zstd", observedConfig.spillCompression->kind);
+  EXPECT_FALSE(observedConfig.spillCompression->level.has_value());
+}
+
+DEBUG_ONLY_TEST_F(TaskTest, taskPassesOpenZlBufferManagerCompressionOptions) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  memory::bm::BufferManagerConfig observedConfig;
+  bool observed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Task::maybeCreateBufferManager",
+      std::function<void(memory::bm::BufferManagerConfig*)>(
+          [&](memory::bm::BufferManagerConfig* config) {
+            observedConfig = *config;
+            observed = true;
+          }));
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kBufferManagerSpillCompressionKind, "openzl"},
+           {core::QueryConfig::kBufferManagerSpillCompressionLevel, "9"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.openzl",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(), .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  ASSERT_TRUE(observed);
+  ASSERT_TRUE(observedConfig.spillCompression.has_value());
+  EXPECT_EQ("openzl", observedConfig.spillCompression->kind);
+  ASSERT_TRUE(observedConfig.spillCompression->level.has_value());
+  EXPECT_EQ(9, *observedConfig.spillCompression->level);
+}
+
+TEST_F(TaskTest, taskRejectsUnsupportedBufferManagerSpillCodec) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kBufferManagerSpillCompressionKind, "lz4"}}});
+
+  BOLT_ASSERT_THROW(
+      Task::create(
+          "task.buffer.manager.invalid.codec",
+          std::move(plan),
+          0,
+          std::move(queryCtx),
+          Task::ExecutionMode::kParallel,
+          exec::Consumer{},
+          0,
+          common::SpillDiskOptions{
+              .spillDirPath = spillDirectory->getPath(),
+              .spillDirCreated = true}),
+      "Unsupported BufferManager spill compression kind 'lz4'");
+}
+
+TEST_F(TaskTest, taskBufferManagerEnabledRequiresSpillDirectory) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{std::unordered_map<std::string, std::string>{
+          {core::QueryConfig::kBufferManagerEnabled, "true"}}});
+
+  BOLT_ASSERT_THROW(
+      Task::create(
+          "task.buffer.manager.no.spill",
+          std::move(plan),
+          0,
+          std::move(queryCtx),
+          Task::ExecutionMode::kParallel,
+          exec::Consumer{}),
+      "BufferManager is enabled, but spill directory is not configured");
 }
 
 DEBUG_ONLY_TEST_F(TaskTest, driverEnqueAfterFailedAndPausedTask) {

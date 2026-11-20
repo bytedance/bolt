@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include "bolt/exec/Driver.h"
 #include "bolt/exec/Operator.h"
@@ -134,6 +135,12 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   // Total wall time spent inside the shuffle write operator, covering init,
   // addInput (split), reclaim (spill) and stop.
   uint64_t shuffleWriteTime_{0};
+  // Wall time of reclaims triggered from outside this operator, i.e. not
+  // covered by shuffleWriteTime_.
+  uint64_t externalReclaimTime_{0};
+  // True while addInput()/noMoreInput() is timed, so that a reclaim nested in
+  // it is not timed twice.
+  std::atomic<bool> inShuffleSection_{false};
   std::unique_ptr<BoltArrowMemoryPool> arrowPool_;
   std::shared_ptr<BoltShuffleWriter> shuffleWriter_;
   bool finished_ = false;

@@ -30,11 +30,16 @@
 
 #include "bolt/common/base/SparkCompatibility.h"
 
+#include <unistd.h>
+#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <future>
 #include <stdexcept>
+#include <thread>
 #include <vector>
+#include "folly/ScopeGuard.h"
 #include "glog/logging.h"
 #include "gtest/gtest.h"
 
@@ -1178,6 +1183,175 @@ TEST_P(ParameterizedExprTest, csePartialEvaluationWithEncodings) {
   }
 }
 
+class ExprRegistryDeathTest : public ExprTest {};
+
+TEST_F(ExprRegistryDeathTest, concurrentRegistrationAndLookup) {
+  const auto previousStyle = testing::FLAGS_gtest_death_test_style;
+  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const auto restoreStyle = folly::makeGuard(
+      [&] { testing::FLAGS_gtest_death_test_style = previousStyle; });
+  ASSERT_EXIT(
+      {
+        alarm(30);
+        const std::string readerName = "vector_function_registry_reader";
+        const std::string writerName = "vector_function_registry_writer";
+        constexpr int kIterations = 10'000;
+        constexpr int kReaders = 4;
+        const core::QueryConfig config({});
+        const std::vector<TypePtr> inputTypes{INTEGER()};
+        const auto signatures = PlusConstantFunction::signatures();
+        const auto function = std::make_shared<PlusConstantFunction>(5);
+        const auto factory = [function](const auto&, const auto&, const auto&) {
+          return function;
+        };
+        exec::registerStatefulVectorFunction(readerName, signatures, factory);
+
+        std::promise<void> startPromise;
+        const auto start = startPromise.get_future().share();
+        std::atomic<int> ready{0};
+        std::atomic<bool> success{true};
+        std::vector<std::thread> readers;
+        for (int i = 0; i < kReaders; ++i) {
+          readers.emplace_back([&] {
+            ++ready;
+            start.wait();
+            for (int j = 0; j < kIterations; ++j) {
+              if (exec::getVectorFunction(readerName, inputTypes, {}, config) !=
+                  function) {
+                success = false;
+              }
+            }
+          });
+        }
+        std::thread writer([&] {
+          ++ready;
+          start.wait();
+          for (int i = 0; i < kIterations; ++i) {
+            if (!exec::registerStatefulVectorFunction(
+                    writerName, signatures, factory)) {
+              success = false;
+            }
+          }
+        });
+        while (ready != kReaders + 1) {
+          std::this_thread::yield();
+        }
+        startPromise.set_value();
+        for (auto& reader : readers) {
+          reader.join();
+        }
+        writer.join();
+        exec::deregisterVectorFunction(readerName);
+        exec::deregisterVectorFunction(writerName);
+        _exit(success ? 0 : 1);
+      },
+      testing::ExitedWithCode(0),
+      "");
+}
+
+TEST_F(ExprTest, vectorFunctionRegistryResolution) {
+  const std::string name = "vector_function_registry_resolution";
+  const core::QueryConfig config({});
+  const auto function = std::make_shared<PlusConstantFunction>(5);
+  int factoryCalls = 0;
+  const auto factory = [&](const auto&, const auto&, const auto&) {
+    ++factoryCalls;
+    return function;
+  };
+  const auto cleanup =
+      folly::makeGuard([&] { exec::deregisterVectorFunction(name); });
+
+  EXPECT_EQ(nullptr, exec::resolveVectorFunction(name, {INTEGER()}));
+  EXPECT_EQ(nullptr, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+
+  ASSERT_TRUE(exec::registerStatefulVectorFunction(name, {}, factory));
+  EXPECT_EQ(nullptr, exec::resolveVectorFunction(name, {INTEGER()}));
+  EXPECT_EQ(nullptr, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+
+  ASSERT_TRUE(exec::registerStatefulVectorFunction(
+      name, PlusConstantFunction::signatures(), factory));
+  EXPECT_EQ(nullptr, exec::resolveVectorFunction(name, {VARCHAR()}));
+  EXPECT_EQ(nullptr, exec::getVectorFunction(name, {VARCHAR()}, {}, config));
+  EXPECT_EQ(0, factoryCalls);
+  EXPECT_EQ(
+      function,
+      exec::getVectorFunction(
+          "VECTOR_FUNCTION_REGISTRY_RESOLUTION", {INTEGER()}, {}, config));
+  EXPECT_EQ(1, factoryCalls);
+}
+
+TEST_F(ExprTest, vectorFunctionRegistrySignatureOrder) {
+  const std::string name = "vector_function_registry_signature_order";
+  const core::QueryConfig config({});
+  const auto function = std::make_shared<PlusConstantFunction>(5);
+  int factoryCalls = 0;
+  const auto factory = [&](const auto&, const auto&, const auto&) {
+    ++factoryCalls;
+    return function;
+  };
+  const auto cleanup =
+      folly::makeGuard([&] { exec::deregisterVectorFunction(name); });
+  const auto integerSignature = PlusConstantFunction::signatures().front();
+  const auto bigintSignature = exec::FunctionSignatureBuilder()
+                                   .returnType("bigint")
+                                   .argumentType("integer")
+                                   .build();
+  ASSERT_TRUE(exec::registerStatefulVectorFunction(
+      name, {integerSignature, bigintSignature}, factory));
+  const auto returnType = exec::resolveVectorFunction(name, {INTEGER()});
+  ASSERT_NE(nullptr, returnType);
+  EXPECT_TRUE(INTEGER()->equivalent(*returnType));
+  EXPECT_EQ(
+      function,
+      exec::getVectorFunction(name, {INTEGER()}, {}, config, INTEGER()));
+  BOLT_ASSERT_USER_THROW(
+      exec::getVectorFunction(name, {INTEGER()}, {}, config, BIGINT()),
+      "Found incompatible return types for vector function");
+  EXPECT_EQ(1, factoryCalls);
+
+  // A bound signature with an unresolved return type stops overload resolution.
+  const auto unresolvedSignature = exec::FunctionSignatureBuilder()
+                                       .integerVariable("p")
+                                       .integerVariable("s")
+                                       .returnType("decimal(p,s)")
+                                       .argumentType("integer")
+                                       .build();
+  ASSERT_TRUE(exec::registerStatefulVectorFunction(
+      name, {unresolvedSignature, integerSignature}, factory));
+  EXPECT_EQ(nullptr, exec::resolveVectorFunction(name, {INTEGER()}));
+  EXPECT_EQ(nullptr, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+  EXPECT_EQ(1, factoryCalls);
+}
+
+TEST_F(ExprTest, vectorFunctionRegistryFactoryStateAndException) {
+  const std::string name = "vector_function_registry_factory";
+  const core::QueryConfig config({});
+  const auto function = std::make_shared<PlusConstantFunction>(5);
+  std::vector<int> factoryCalls;
+  const auto cleanup =
+      folly::makeGuard([&] { exec::deregisterVectorFunction(name); });
+  ASSERT_TRUE(exec::registerStatefulVectorFunction(
+      name,
+      PlusConstantFunction::signatures(),
+      [calls = 0, &factoryCalls, function](
+          const auto&, const auto&, const auto&) mutable {
+        factoryCalls.push_back(++calls);
+        if (calls == 2) {
+          throw std::runtime_error("registry factory error");
+        }
+        return function;
+      }));
+
+  EXPECT_EQ(function, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+  EXPECT_THROW(
+      exec::getVectorFunction(name, {INTEGER()}, {}, config),
+      std::runtime_error);
+  EXPECT_EQ(function, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+  EXPECT_EQ((std::vector<int>{1, 2, 3}), factoryCalls);
+  EXPECT_TRUE(exec::deregisterVectorFunction(name));
+  EXPECT_EQ(nullptr, exec::getVectorFunction(name, {INTEGER()}, {}, config));
+}
+
 // Checks that vector function registry overwrites if multiple registry
 // attempts are made for the same functions.
 TEST_P(ParameterizedExprTest, overwriteInRegistry) {
@@ -2222,6 +2396,43 @@ TEST_F(ExprTest, memo) {
   assertEqualVectors(expectedResult, result);
   BOLT_CHECK_EQ(stats["eq"].numProcessedRows, 460);
   BOLT_CHECK(base.use_count() == 1);
+}
+
+TEST_F(ExprTest, clearNewlyInitializedMemo) {
+  constexpr vector_size_t kSize = 22;
+  const auto bytesBefore = pool_->currentBytes();
+  auto base = makeFlatVector<StringView>(kSize, [](auto row) {
+    return StringView(row % 2 == 0 ? "growth" : "mature");
+  });
+  auto indices = makeIndices(kSize, [](auto row) { return row; });
+  auto rowType = ROW({"c0"}, {VARCHAR()});
+  auto exprSet = compileExpression("coalesce(c0, 'unknown')", rowType);
+
+  auto evaluateBatch = [&]() {
+    auto result = evaluate(
+        exprSet.get(), makeRowVector({wrapInDictionary(indices, kSize, base)}));
+    auto* values = result->as<SimpleVector<StringView>>();
+    BOLT_CHECK_NOT_NULL(values);
+    for (vector_size_t row = 0; row < kSize; ++row) {
+      EXPECT_EQ(row % 2 == 0 ? "growth" : "mature", values->valueAt(row));
+    }
+    return result;
+  };
+
+  auto result = evaluateBatch();
+  result.reset();
+  ASSERT_EQ(base.use_count(), 1);
+
+  // The second encounter with the same dictionary base initializes the memo.
+  result = evaluateBatch();
+  result.reset();
+  ASSERT_NE(base.use_count(), 1);
+  base.reset();
+  indices.reset();
+  EXPECT_GT(pool_->currentBytes(), bytesBefore);
+
+  exprSet->clear();
+  EXPECT_EQ(bytesBefore, pool_->currentBytes());
 }
 
 // This test triggers the situation when peelEncodings() produces an empty

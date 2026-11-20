@@ -34,9 +34,16 @@
 #include <string_view>
 #include <vector>
 
+#include "bolt/type/StringView.h"
 #include "folly/Optional.h"
 #include "folly/Range.h"
 namespace bytedance::bolt::functions {
+
+namespace detail {
+
+std::string normalizeJsonPath(StringView jsonPath);
+
+} // namespace detail
 
 // The legacy flag mainly controls the behavior of the return results when
 // encountering illegal characters If true, the already parsed portion of the
@@ -64,7 +71,8 @@ folly::Optional<std::string_view> jsonExtractScalar(
     const bool throwExceptionWhenEncounterBadJson = false,
     const bool useDOMParserInGetJsonObject = false,
     const bool getJsonObjectEscapeEmoji = true,
-    const bool useSonicJson = true);
+    const bool parsePath = true,
+    const bool useSonicJson = false);
 
 // For json size function
 folly::Optional<size_t> jsonExtractSize(

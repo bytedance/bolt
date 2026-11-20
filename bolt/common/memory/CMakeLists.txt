@@ -50,6 +50,7 @@ bolt_add_library(
   MmapArena.cpp
   RawVector.cpp
   SharedArbitrator.cpp
+  MemoryResource.cpp
   sparksql/AllocationListener.cpp
   sparksql/ExecutionMemoryPool.cpp
   sparksql/MemoryConsumer.cpp
@@ -90,3 +91,7 @@ target_link_libraries(
   PRIVATE
     re2::re2
 )
+
+if(NOT BOLT_BUILD_MINIMAL)
+  add_subdirectory(bm)
+endif()

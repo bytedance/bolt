@@ -32,6 +32,35 @@
 
 #include "bolt/expression/Expr.h"
 namespace bytedance::bolt::substrait {
+bolt::core::JoinType toBoltJoinType(
+    ::substrait::HashJoinRel::JoinType joinType) {
+  using JT = ::substrait::HashJoinRel::JoinType;
+  switch (joinType) {
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_LEFT:
+      return bolt::core::JoinType::kLeft;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_RIGHT:
+      return bolt::core::JoinType::kRight;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_INNER:
+      return bolt::core::JoinType::kInner;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_OUTER:
+      return bolt::core::JoinType::kFull;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_LEFT_SEMI:
+      return bolt::core::JoinType::kLeftSemiFilter;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_RIGHT_SEMI:
+      return bolt::core::JoinType::kRightSemiFilter;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_LEFT_MARK:
+      return bolt::core::JoinType::kLeftSemiProject;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_RIGHT_MARK:
+      return bolt::core::JoinType::kRightSemiProject;
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_LEFT_ANTI:
+    case JT::HashJoinRel_JoinType_JOIN_TYPE_RIGHT_ANTI:
+      return bolt::core::JoinType::kAnti;
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported conversion from Substrait join type '{}' to Bolt",
+          static_cast<int>(joinType));
+  }
+}
 
 const ::substrait::Type& BoltToSubstraitTypeConvertor::toSubstraitType(
     google::protobuf::Arena& arena,
@@ -85,6 +114,19 @@ const ::substrait::Type& BoltToSubstraitTypeConvertor::toSubstraitType(
       break;
     }
     case bolt::TypeKind::BIGINT: {
+      if (type->isShortDecimal()) {
+        const auto& decimalType = type->asShortDecimal();
+        auto substraitDecimal =
+            google::protobuf::Arena::CreateMessage<::substrait::Type_Decimal>(
+                &arena);
+        substraitDecimal->set_nullability(
+            ::substrait::Type_Nullability_NULLABILITY_NULLABLE);
+        substraitDecimal->set_precision(decimalType.precision());
+        substraitDecimal->set_scale(decimalType.scale());
+        substraitType->set_allocated_decimal(substraitDecimal);
+        break;
+      }
+
       auto substraitI64 =
           google::protobuf::Arena::CreateMessage<::substrait::Type_I64>(&arena);
       substraitI64->set_nullability(
@@ -137,6 +179,21 @@ const ::substrait::Type& BoltToSubstraitTypeConvertor::toSubstraitType(
       substraitType->set_allocated_timestamp(substraitTimestamp);
       break;
     }
+    case bolt::TypeKind::HUGEINT: {
+      if (type->isLongDecimal()) {
+        const auto& decimalType = type->asLongDecimal();
+        auto substraitDecimal =
+            google::protobuf::Arena::CreateMessage<::substrait::Type_Decimal>(
+                &arena);
+        substraitDecimal->set_nullability(
+            ::substrait::Type_Nullability_NULLABILITY_NULLABLE);
+        substraitDecimal->set_precision(decimalType.precision());
+        substraitDecimal->set_scale(decimalType.scale());
+        substraitType->set_allocated_decimal(substraitDecimal);
+        break;
+      }
+      BOLT_UNSUPPORTED("Unsupported HUGEINT type '{}'.", type->toString());
+    }
     case bolt::TypeKind::ARRAY: {
       ::substrait::Type_List* substraitList =
           google::protobuf::Arena::CreateMessage<::substrait::Type_List>(
@@ -186,7 +243,9 @@ const ::substrait::Type& BoltToSubstraitTypeConvertor::toSubstraitType(
       auto substraitUserDefined =
           google::protobuf::Arena::CreateMessage<::substrait::Type_UserDefined>(
               &arena);
-      substraitUserDefined->set_type_reference(0);
+      uint32_t anchor =
+          static_cast<uint32_t>(extensionCollector_->getTypeAnchor("UNKNOWN"));
+      substraitUserDefined->set_type_reference(anchor);
       substraitUserDefined->set_nullability(
           ::substrait::Type_Nullability_NULLABILITY_NULLABLE);
       substraitType->set_allocated_user_defined(substraitUserDefined);

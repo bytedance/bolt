@@ -30,8 +30,11 @@
 
 #include "bolt/functions/prestosql/json/JsonExtractor.h"
 
+#include <algorithm>
+#include <cctype>
 #include <string_view>
 #include "folly/String.h"
+#include "type/StringView.h"
 
 #define SONIC_EXPONENT_ALWAYS_DOT 1
 #define SONIC_EXPONENT_UPPERCASE 1
@@ -54,6 +57,77 @@ using JsonUtil::ondemandElement;
 using JsonUtil::traversingByTokens;
 
 static constexpr double EXPAND_FACTOR{1.5};
+
+namespace detail {
+
+// Normalizes the JSON path to be Spark-compatible.
+//
+// Rules applied:
+// 1. Preserves quoted bracket keys for JsonPathTokenizer.
+// 2. Removes spaces after dots outside bracket keys (e.g., "$. a" -> "$.a").
+// 3. Removes trailing spaces after root symbol (e.g., "$ " -> "$").
+std::string normalizeJsonPath(StringView jsonPath) {
+  std::string path(jsonPath.data(), jsonPath.size());
+  if (path.empty() || path[0] != '$') {
+    return path;
+  }
+
+  auto isWhitespace = [](char c) {
+    return std::isspace(static_cast<unsigned char>(c)) != 0;
+  };
+
+  if (std::all_of(path.begin() + 1, path.end(), isWhitespace)) {
+    return "$";
+  }
+
+  std::string normalized{"$"};
+  normalized.reserve(path.size());
+  bool afterDot = false;
+  bool inBrackets = false;
+  bool escaped = false;
+  char quote = '\0';
+
+  for (size_t i = 1; i < path.size(); ++i) {
+    const char c = path[i];
+
+    if (inBrackets) {
+      normalized.push_back(c);
+      if (quote != '\0') {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == quote) {
+          quote = '\0';
+        }
+      } else if (c == '\'' || c == '"') {
+        quote = c;
+      } else if (c == ']') {
+        inBrackets = false;
+      }
+      continue;
+    }
+
+    if (afterDot) {
+      if (isWhitespace(c)) {
+        // Removes whitespace after dot
+        continue;
+      }
+      afterDot = false;
+    }
+
+    if (c == '[') {
+      inBrackets = true;
+    } else if (c == '.') {
+      afterDot = true;
+    }
+    normalized.push_back(c);
+  }
+
+  return normalized;
+}
+
+} // namespace detail
 
 namespace {
 
@@ -123,16 +197,22 @@ class JsonExtractor {
     // Spark does not trim the path passed in, so remove trim to be compatible
     // with Spark
     // auto trimedPath = folly::trimWhitespace(path).str();
-    std::string cacheKey = fmt::format("{}:{}", path, parsePath);
+    std::string selectedPath;
+    if (parsePath) {
+      selectedPath = detail::normalizeJsonPath(StringView(path));
+    } else {
+      selectedPath.assign(path.data(), path.size());
+    }
+    std::string cacheKey = fmt::format("{}:{}", selectedPath, parsePath);
     std::shared_ptr<JsonExtractor> op;
-    if (kExtractorCache.count(cacheKey)) {
+    if (kExtractorCache.contains(cacheKey)) {
       op = kExtractorCache.at(cacheKey);
     } else {
       if (kExtractorCache.size() == kMaxCacheNum) {
         // TODO: Blindly evict the first one, use better policy
         kExtractorCache.erase(kExtractorCache.begin());
       }
-      op = std::make_shared<JsonExtractor>(path, parsePath);
+      op = std::make_shared<JsonExtractor>(selectedPath, parsePath);
       kExtractorCache[cacheKey] = op;
     }
     return *op;
@@ -156,10 +236,12 @@ class JsonExtractor {
     // Actually use sonic iff below is true
     const bool actuallyUseSonic = !throwExceptionWhenEncounterBadJson &&
         !useDOMParserInGetJsonObject && getJsonObjectEscapeEmoji &&
-        useSonicJson;
+        useSonicJson && !hasAsterisk_;
     if (actuallyUseSonic) {
       std::tuple<std::string, sonic_json::SonicError> result{};
-      result = sonic_json::GetByJsonPathOnDemand(json.toString(), this->path_);
+      result = sonic_json::GetByJsonPathOnDemand<
+          SerializeFlags::kSerializeFloatFormatJava>(
+          json.toString(), this->path_);
       const auto sonic_status = std::get<1>(result);
       // Treat no-match and parse errors as no result. Sonic may return a
       // partial result together with a parse error, but Spark's get_json_object
@@ -311,7 +393,7 @@ class JsonExtractor {
     } else {
       isJsonPathValid_ = true;
       queryPointer_ = path;
-      tokens_.emplace_back(path);
+      tokens_.emplace_back(JsonPathToken::Token(path.str()));
     }
   }
 
@@ -326,6 +408,7 @@ class JsonExtractor {
     if (!kTokenizer.reset(path)) {
       return false;
     }
+    hasAsterisk_ = path.contains('*');
     queryPointer_.clear();
     tokens_.clear();
     while (kTokenizer.hasNext()) {
@@ -336,7 +419,7 @@ class JsonExtractor {
         return false;
       }
     }
-    queryPointer_ = kTokenizer.getSimdjsonPathPointer().value();
+    queryPointer_ = kTokenizer.getSimdjsonPathPointer();
     return true;
   }
 
@@ -377,7 +460,8 @@ class JsonExtractor {
   // Max extractor number in extractor cache
   static constexpr uint32_t kMaxCacheNum{32};
 
-  std::vector<std::string> tokens_;
+  JsonPathTokens tokens_;
+  bool hasAsterisk_{false};
 
   // query path for simdjson
   std::string queryPointer_;
@@ -404,7 +488,7 @@ class JsonExtractor {
 
 thread_local std::unordered_map<std::string, std::shared_ptr<JsonExtractor>>
     JsonExtractor::kExtractorCache;
-thread_local JsonPathTokenizer JsonExtractor::kTokenizer;
+thread_local JsonPathTokenizer JsonExtractor::kTokenizer(true);
 
 folly::Optional<std::string_view> jsonExtractScalar(
     folly::StringPiece json,
@@ -439,6 +523,7 @@ folly::Optional<std::string_view> jsonExtractScalar(
     const bool throwExceptionWhenEncounterBadJson,
     const bool useDOMParserInGetJsonObject,
     const bool getJsonObjectEscapeEmoji,
+    const bool parsePath,
     const bool useSonicJson) {
   folly::StringPiece jsonPiece{json};
   folly::StringPiece pathPiece{path};
@@ -449,6 +534,7 @@ folly::Optional<std::string_view> jsonExtractScalar(
       throwExceptionWhenEncounterBadJson,
       useDOMParserInGetJsonObject,
       getJsonObjectEscapeEmoji,
+      parsePath,
       useSonicJson);
 }
 
@@ -530,8 +616,9 @@ std::vector<folly::Optional<std::string>> jsonExtractTupleSonic(
       paths_string_view.push_back(paths[i].value());
     }
   }
-  auto result =
-      sonic_json::JsonTupleWithCodeGen(json, paths_string_view, legacy);
+  auto result = sonic_json::JsonTupleWithCodeGen<
+      SerializeFlags::kSerializeFloatFormatJava>(
+      json, paths_string_view, legacy);
   std::vector<folly::Optional<std::string>> ret(paths.size(), folly::none);
   for (int i = 0; i < paths_string_view.size(); i++) {
     if (result[i].has_value()) {

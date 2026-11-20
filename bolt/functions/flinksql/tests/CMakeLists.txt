@@ -15,9 +15,12 @@
 
 add_executable(
   bolt_functions_flink_test
+  ComparisonsTest.cpp
+  RoundTest.cpp
   ElementAtTest.cpp
   FlinkCastExprTest.cpp
   FlinkSqlDataTimeFunctionsTest.cpp
+  TemporalFunctionsTest.cpp
   JsonFunctionsTest.cpp
   RegexFunctionsTest.cpp
   RandTest.cpp

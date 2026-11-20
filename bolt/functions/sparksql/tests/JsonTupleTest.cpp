@@ -148,6 +148,44 @@ TEST_F(JsonTupleTest, BasicCases) {
   testJsonTuple({json}, paths, false, expectedOutput);
 }
 
+TEST_F(JsonTupleTest, numericFormatting) {
+  const std::string json = R"({
+    "small":0.0001,
+    "large":1e10,
+    "negative":-1e10,
+    "lowerBoundary":0.001,
+    "belowUpperBoundary":1e6,
+    "upperBoundary":1e7,
+    "integer":32,
+    "decimal":1.5,
+    "object":{"small":0.0001,"large":1e10},
+    "array":[0.0001,1e10,32]
+  })";
+  const std::vector<std::string> paths{
+      "small",
+      "large",
+      "negative",
+      "lowerBoundary",
+      "belowUpperBoundary",
+      "upperBoundary",
+      "integer",
+      "decimal",
+      "object",
+      "array"};
+  const std::string expectedOutput =
+      R"(["1.0E-4","1.0E10","-1.0E10","0.001","1000000.0","1.0E7","32","1.5","{\"small\":1.0E-4,\"large\":1.0E10}","[1.0E-4,1.0E10,32]"])";
+
+  for (const auto* useSonicJson : {"true", "false"}) {
+    SCOPED_TRACE(std::string("useSonicJson: ") + useSonicJson);
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, useSonicJson}});
+    for (const bool legacy : {true, false}) {
+      SCOPED_TRACE(fmt::format("legacy: {}", legacy));
+      testJsonTuple({json}, paths, legacy, expectedOutput);
+    }
+  }
+}
+
 TEST_F(JsonTupleTest, invalidValue) {
   std::string json = "{\"a\":1,\"b\":2c}";
   std::vector<std::string> paths{"a", "b"};

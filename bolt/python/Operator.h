@@ -34,7 +34,7 @@
 
 #include "bolt/exec/Operator.h"
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 class PythonOperator : public bytedance::bolt::exec::Operator {
  public:
   ~PythonOperator() override {}
@@ -67,4 +67,4 @@ class PythonOperator : public bytedance::bolt::exec::Operator {
   pybind11::args args_;
   pybind11::kwargs kwargs_;
 };
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

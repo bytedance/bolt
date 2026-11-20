@@ -44,6 +44,16 @@ build mode before finishing.
   hard-code an engine or testutils implementation target in an individual
   test.
 
+- Before adding a source file or object-library dependency to a test, check
+  whether `bolt_engine_for_tests` or `bolt_testutils` already supplies its
+  implementation. In shared mode, do not compile or link a second copy into
+  the test executable; reuse the public test runtime and preserve the target's
+  compile requirements through an appropriate interface dependency.
+- Preserve required direct objects in static mode. When changing test linkage,
+  inspect the shared and static link commands for duplicate or missing objects;
+  when an ASAN build is available, run the affected tests with
+  `ASAN_OPTIONS=detect_odr_violation=2` to check for duplicate definitions.
+
 ## Build-Mode Configuration
 
 - Do not reintroduce a global `SPARK_COMPATIBLE` compile definition.
@@ -94,6 +104,24 @@ the skipped check has been validated separately.
   compatibility or performance effects. Do not repeat the diff line by line.
 - Do not add AI attribution, generated-by text, or an agent as a co-author.
 - Review the staged diff and run the relevant hooks and tests before committing.
+
+## Issues
+
+- Pick the matching form under
+  [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/) (bug report, build issue,
+  compatibility report, documentation issue, feature request, performance
+  issue, chore) and mirror its fields as the issue body headings. Fill every
+  required field; a compatibility report needs a minimal self-contained
+  reproduction plus an explicit expected-vs-actual comparison.
+- Keep the template's title prefix (e.g. `[Compatibility] `) and make the rest
+  a short one-line summary, not a full sentence describing the whole finding.
+- Apply the labels the template declares; skip any label that does not exist in
+  the repository instead of failing or inventing new ones.
+- Sanitize issue content before posting: no internal application IDs, cluster
+  or dashboard URLs, table or column names, business keys, or internal build
+  numbers. Reproduce with self-contained literals instead.
+- Do not create, edit, or close issues unless the user authorizes that
+  external action.
 
 ## Pull Requests
 

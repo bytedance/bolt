@@ -18,6 +18,8 @@
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 namespace bytedance::bolt::functions::flinksql::test {
 
+using bytedance::bolt::test::assertEqualVectors;
+
 namespace {
 class StringFunctionsTest : public FlinkFunctionBaseTest {
  public:
@@ -35,6 +37,17 @@ class StringFunctionsTest : public FlinkFunctionBaseTest {
       std::optional<std::string> padString) {
     return evaluateOnce<std::string>(
         "rpad(c0, c1, c2)", string, size, padString);
+  }
+
+  std::optional<std::string> substr(
+      std::optional<std::string> str,
+      std::optional<int32_t> start,
+      std::optional<int32_t> length = std::nullopt) {
+    if (length.has_value()) {
+      return evaluateOnce<std::string>(
+          "substr(c0, c1, c2)", str, start, length);
+    }
+    return evaluateOnce<std::string>("substr(c0, c1)", str, start);
   }
 
   std::optional<bool> isDigit(std::optional<std::string> str) {
@@ -76,6 +89,48 @@ TEST_F(StringFunctionsTest, rpad) {
   EXPECT_EQ(std::nullopt, rpad(std::nullopt, 5, "??"));
   EXPECT_EQ(std::nullopt, rpad("hi", std::nullopt, "??"));
   EXPECT_EQ(std::nullopt, rpad("hi", 5, std::nullopt));
+}
+
+TEST_F(StringFunctionsTest, substr) {
+  // Positive start, 1-indexed.
+  EXPECT_EQ("hello", substr("hello", 1));
+  EXPECT_EQ("ello", substr("hello", 2));
+  EXPECT_EQ("o", substr("hello", 5));
+  EXPECT_EQ("", substr("hello", 6));
+  EXPECT_EQ("", substr("hello", 100));
+
+  // Start == 0 treated as 1 (Flink semantics).
+  EXPECT_EQ("hello", substr("hello", 0));
+  EXPECT_EQ("hello", substr("hello", 0, 5));
+
+  // Negative start: count from end.
+  EXPECT_EQ("o", substr("hello", -1));
+  EXPECT_EQ("lo", substr("hello", -2));
+  EXPECT_EQ("hello", substr("hello", -5));
+  EXPECT_EQ("", substr("hello", -100));
+
+  // With length.
+  EXPECT_EQ("el", substr("hello", 2, 2));
+  EXPECT_EQ("ello", substr("hello", 2, 10));
+
+  // length == 0 returns empty string.
+  EXPECT_EQ("", substr("hello", 1, 0));
+
+  // Negative length returns NULL (Flink semantics).
+  EXPECT_EQ(std::nullopt, substr("hello", 1, -1));
+  EXPECT_EQ(std::nullopt, substr("hello", 5, -1));
+
+  // NULL input.
+  EXPECT_EQ(std::nullopt, substr(std::nullopt, 1));
+  EXPECT_EQ(std::nullopt, substr(std::nullopt, 1, 2));
+  EXPECT_EQ(std::nullopt, substr("hello", std::nullopt));
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<std::string>(
+          "substr(c0, c1, c2)",
+          std::optional<std::string>{"hello"},
+          std::optional<int32_t>{1},
+          std::optional<int32_t>{}));
 }
 
 TEST_F(StringFunctionsTest, splitIndex) {
@@ -121,6 +176,69 @@ TEST_F(StringFunctionsTest, splitIndex) {
   EXPECT_EQ(std::nullopt, splitIndexInt("AQIDBA==", 0, 0));
   EXPECT_EQ(std::nullopt, splitIndexInt("AQIDBA==", 'I', std::nullopt));
   EXPECT_EQ(std::nullopt, splitIndexInt("", ',', 0));
+}
+
+TEST_F(StringFunctionsTest, splitIndexUsesUnicodeIntegerDelimiter) {
+  auto actual = evaluate(
+      "flink_split_index(c0, c1, c2)",
+      makeRowVector(
+          {makeFlatVector<std::string>({"aéb", "aéb", "aÿb", "x"}),
+           makeFlatVector<int32_t>({233, 233, 255, 256}),
+           makeFlatVector<int64_t>({0, 1, 1, 0})}));
+  assertEqualVectors(
+      makeNullableFlatVector<std::string>({"a", "b", "b", std::nullopt}),
+      actual);
+}
+
+TEST_F(StringFunctionsTest, splitIndexLegacySemanticsAreUnchanged) {
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"a b"},
+          std::optional<std::string>{""},
+          std::optional<int64_t>{0}),
+      "a b");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"aéb"},
+          std::optional<int32_t>{233},
+          std::optional<int64_t>{0}),
+      "aéb");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"a\xe9"
+                                     "b"},
+          std::optional<int32_t>{233},
+          std::optional<int64_t>{0}),
+      "a");
+}
+
+TEST_F(StringFunctionsTest, splitIndexEmptyDelimiterPreservesWhitespaceTokens) {
+  auto actual = evaluate(
+      "flink_split_index(c0, c1, c2)",
+      makeRowVector(
+          {makeFlatVector<std::string>(
+               {"a b", "a  b", "a b", "", "a", "a\u180eb"}),
+           makeFlatVector<std::string>({"", "", "", "", "", ""}),
+           makeFlatVector<int64_t>({0, 1, 1, 0, 1, 1})}));
+  assertEqualVectors(
+      makeNullableFlatVector<std::string>(
+          {"a", "", "b", std::nullopt, std::nullopt, "b"}),
+      actual);
+}
+
+TEST_F(StringFunctionsTest, splitIndexResultRetainsInputBuffer) {
+  const std::string first(128, 'a');
+  VectorPtr result;
+  {
+    auto input = makeFlatVector<std::string>({first + ",b"});
+    result = evaluate(
+        "flink_split_index(c0, ',', cast(0 as bigint))",
+        makeRowVector({input}));
+  }
+  assertEqualVectors(makeFlatVector<std::string>({first}), result);
 }
 
 TEST_F(StringFunctionsTest, isDigit) {

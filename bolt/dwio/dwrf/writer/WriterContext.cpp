@@ -49,6 +49,7 @@ WriterContext::WriterContext(
           pool_->addLeafChild(fmt::format("{}.compression", pool_->name()))},
       generalPool_{
           pool_->addLeafChild(fmt::format("{}.general", pool_->name()))},
+      slabResource_{*generalPool_},
       indexEnabled_{getConfig(Config::CREATE_INDEX)},
       indexStride_{getConfig(Config::ROW_INDEX_STRIDE)},
       compression_{getConfig(Config::COMPRESSION)},

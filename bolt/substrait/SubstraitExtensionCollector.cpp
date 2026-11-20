@@ -80,11 +80,55 @@ void SubstraitExtensionCollector::addExtensionsToPlan(
     extensionFunction->set_function_anchor(referenceNum);
     extensionFunction->set_name(functionId.signature);
   }
+
+  // Add type extensions collected during conversion.
+  for (const auto& [anchor, typeName] : typeExtensions_->forwardMap()) {
+    auto extensionType = plan->add_extensions()->mutable_extension_type();
+    extensionType->set_extension_uri_reference(
+        extensionUri->extension_uri_anchor());
+    extensionType->set_type_anchor(anchor);
+    extensionType->set_name(typeName);
+  }
 }
 
 SubstraitExtensionCollector::SubstraitExtensionCollector() {
   extensionFunctions_ =
       std::make_shared<BiDirectionHashMap<ExtensionFunctionId>>();
+  typeExtensions_ = std::make_shared<BiDirectionHashMap<std::string>>();
+}
+
+SubstraitExtensionCollector::SubstraitExtensionCollector(
+    const std::vector<::substrait::extensions::SimpleExtensionDeclaration>&
+        extensions) {
+  // Initialize maps.
+  extensionFunctions_ =
+      std::make_shared<BiDirectionHashMap<ExtensionFunctionId>>();
+  typeExtensions_ = std::make_shared<BiDirectionHashMap<std::string>>();
+
+  // Seed maps using provided declarations and advance anchor counters.
+  for (const auto& decl : extensions) {
+    if (decl.has_extension_function()) {
+      const auto& fn = decl.extension_function();
+      const int funcAnchor = fn.function_anchor();
+      const std::string signature = fn.name();
+      // URI is not tracked currently; leave empty to match existing behavior.
+      ExtensionFunctionId id{"", signature};
+      extensionFunctions_->putIfAbsent(funcAnchor, id);
+      if (funcAnchor > functionReferenceNumber_) {
+        functionReferenceNumber_ = funcAnchor;
+      }
+    } else if (decl.has_extension_type()) {
+      const auto& typeDecl = decl.extension_type();
+      const int typeAnchor = static_cast<int>(typeDecl.type_anchor());
+      const std::string typeName = typeDecl.name();
+      if (!typeName.empty()) {
+        typeExtensions_->putIfAbsent(typeAnchor, typeName);
+        if (typeAnchor > typeReferenceNumber_) {
+          typeReferenceNumber_ = typeAnchor;
+        }
+      }
+    }
+  }
 }
 
 int SubstraitExtensionCollector::getReferenceNumber(
@@ -94,10 +138,27 @@ int SubstraitExtensionCollector::getReferenceNumber(
   if (extensionFunctionAnchorIt != extensionFunctions_->reverseMap().end()) {
     return extensionFunctionAnchorIt->second;
   }
-  ++functionReferenceNumber;
+  ++functionReferenceNumber_;
   extensionFunctions_->putIfAbsent(
-      functionReferenceNumber, extensionFunctionId);
-  return functionReferenceNumber;
+      functionReferenceNumber_, extensionFunctionId);
+  return functionReferenceNumber_;
+}
+
+int SubstraitExtensionCollector::getTypeAnchor(const std::string& typeName) {
+  // Return existing anchor if present.
+  const auto& it = typeExtensions_->reverseMap().find(typeName);
+  if (it != typeExtensions_->reverseMap().end()) {
+    return it->second;
+  }
+  // Legacy null literals use anchor 0 for UNKNOWN. Respect an existing
+  // anchor when seeded from a plan; otherwise reserve 0 when available.
+  if (typeName == "UNKNOWN" && typeExtensions_->forwardMap().count(0) == 0) {
+    typeExtensions_->putIfAbsent(0, typeName);
+    return 0;
+  }
+  ++typeReferenceNumber_;
+  typeExtensions_->putIfAbsent(typeReferenceNumber_, typeName);
+  return typeReferenceNumber_;
 }
 
 } // namespace bytedance::bolt::substrait

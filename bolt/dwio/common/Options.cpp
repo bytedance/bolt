@@ -96,6 +96,7 @@ ColumnReaderOptions makeColumnReaderOptions(const ReaderOptions& options) {
   ColumnReaderOptions columnReaderOptions;
   columnReaderOptions.useColumnNamesForColumnMapping_ =
       options.isUseColumnNamesForColumnMapping();
+  columnReaderOptions.lazyLoadToken = options.lazyLoadToken();
   return columnReaderOptions;
 }
 

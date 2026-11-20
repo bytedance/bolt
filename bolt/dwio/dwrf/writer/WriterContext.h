@@ -123,15 +123,14 @@ class WriterContext : public CompressionBufferPool {
   template <typename T>
   IntegerDictionaryEncoder<T>& getIntDictionaryEncoder(
       const EncodingKey& encodingKey,
-      bolt::memory::MemoryPool& dictionaryPool,
-      bolt::memory::MemoryPool& generalPool) {
+      bolt::memory::MemoryPool& dictionaryPool) {
     auto result = dictEncoders_.find(encodingKey);
     if (result == dictEncoders_.end()) {
       auto emplaceResult = dictEncoders_.emplace(
           encodingKey,
           std::make_unique<IntegerDictionaryEncoder<T>>(
               dictionaryPool,
-              generalPool,
+              slabResource_,
               getConfig(Config::DICTIONARY_SORT_KEYS),
               createDirectEncoder</* isSigned */ true>(
                   newStream(
@@ -192,6 +191,10 @@ class WriterContext : public CompressionBufferPool {
   }
 
   memory::MemoryPool& getMemoryPool(const MemoryUsageCategory& category);
+
+  memory::SlabMemoryResource& slabResource() {
+    return slabResource_;
+  }
 
   int64_t getMemoryUsage(const MemoryUsageCategory& category) const;
 
@@ -608,6 +611,9 @@ class WriterContext : public CompressionBufferPool {
   const std::shared_ptr<memory::MemoryPool> dictionaryPool_;
   const std::shared_ptr<memory::MemoryPool> outputStreamPool_;
   const std::shared_ptr<memory::MemoryPool> generalPool_;
+
+  // Shared by all column dictionaries; must outlive their index containers.
+  memory::SlabMemoryResource slabResource_;
   // config
   const bool indexEnabled_;
   const uint32_t indexStride_;

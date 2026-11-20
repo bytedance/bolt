@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include <atomic>
+#include <thread>
+
 #include <gtest/gtest.h>
 #include <type/DecimalUtil.h>
 
@@ -69,6 +72,49 @@ TEST(FloatingDecimalTest, basic) {
       EXPECT_TRUE(floatRes.has_value());
       EXPECT_EQ(std::get<2>(data), *floatRes);
     }
+  }
+}
+
+TEST(FloatingDecimalTest, computesPowersOfFiveConcurrently) {
+  constexpr int32_t kNumThreads = 32;
+  constexpr int32_t kIterations = 100;
+  std::atomic<int32_t> ready{0};
+  std::atomic<bool> release{false};
+  std::vector<std::thread> threads;
+  threads.reserve(kNumThreads);
+
+  for (int32_t i = 0; i < kNumThreads; ++i) {
+    threads.emplace_back([&, i]() {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!release.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      for (int32_t iteration = 0; iteration < kIterations; ++iteration) {
+        const int32_t exponent = 64 + i * 9 + iteration % 3;
+        EXPECT_EQ(
+            FloatingDecimal::big5pow(exponent),
+            boost::multiprecision::pow(
+                boost::multiprecision::cpp_int{5}, exponent));
+      }
+    });
+  }
+
+  while (ready.load(std::memory_order_acquire) != kNumThreads) {
+    std::this_thread::yield();
+  }
+  release.store(true, std::memory_order_release);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+}
+
+TEST(FloatingDecimalTest, computesPowersOfFiveAtCacheBoundary) {
+  for (const int32_t exponent : {0, 26, 27, 339, 340, 341}) {
+    EXPECT_EQ(
+        FloatingDecimal::big5pow(exponent),
+        boost::multiprecision::pow(
+            boost::multiprecision::cpp_int{5}, exponent));
   }
 }
 

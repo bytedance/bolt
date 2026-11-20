@@ -43,6 +43,8 @@ bolt_add_library(
   QueryAssertions.cpp
   RowBasedSerde.cpp
   SumNonPODAggregate.cpp
+  TpcdsPlanLoader.cpp
+  TpcdsQueryBuilder.cpp
   TpchQueryBuilder.cpp
   VectorTestUtil.cpp
 )
@@ -64,6 +66,7 @@ target_link_libraries(
   bolt_type_fbhive
   bolt_hive_connector
   bolt_tpch_connector
+  bolt_tpcds_connector
   bolt_presto_serializer
   bolt_functions_prestosql
   bolt_aggregates

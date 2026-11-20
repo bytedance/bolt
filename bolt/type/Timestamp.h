@@ -51,7 +51,7 @@ class time_zone;
 
 namespace {
 
-// Assuming tzID is in [1, 1680] range.
+// Assuming tzID is in [1, tz::kMaxFixedOffsetTimeZoneId] range.
 // tzID - PrestoDB time zone ID.
 inline int64_t getPrestoTZOffsetInSeconds(int16_t tzID) {
   // TODO(spershin): Maybe we need something better if we can (we could use
@@ -78,6 +78,15 @@ enum class TimestampPrecision : int8_t {
   kMilliseconds = 3, // 10^3 milliseconds are equal to one second.
   kMicroseconds = 6, // 10^6 microseconds are equal to one second.
   kNanoseconds = 9, // 10^9 nanoseconds are equal to one second.
+};
+
+enum class TimestampGapPolicy {
+  kReject,
+  // Preserve the local time's position within the gap, as LocalDateTime.atZone.
+  kShiftForward,
+  // Clamp seconds to the gap end, for DATE conversion via
+  // LocalDate.atStartOfDay.
+  kNextValidSecond,
 };
 
 struct TimestampToStringOptions {
@@ -198,7 +207,7 @@ struct Timestamp {
       return Timestamp(micros / 1'000'000, (micros % 1'000'000) * 1'000);
     }
     auto second = micros / 1'000'000 - 1;
-    auto nano = ((micros - second * 1'000'000) % 1'000'000) * 1'000;
+    auto nano = (micros % 1'000'000 + 1'000'000) * 1'000;
     return Timestamp(second, nano);
   }
 
@@ -240,16 +249,17 @@ struct Timestamp {
     // int64 can store around 292 years in nanos ~ till 2262-04-12.
     // When an integer overflow occurs in the calculation,
     // an exception will be thrown.
-    try {
-      return checkedPlus(
-          checkedMultiply(seconds_, (int64_t)1'000'000'000), (int64_t)nanos_);
-    } catch (const std::exception& e) {
+    // A negative seconds * 1e9 may overflow even when adding nanos brings
+    // the final value back into the int64 range.
+    const __int128_t result =
+        static_cast<__int128_t>(seconds_) * kNanosInSecond + nanos_;
+    if (result < INT64_MIN || result > INT64_MAX) {
       BOLT_USER_FAIL(
-          "Could not convert Timestamp({}, {}) to nanoseconds, {}",
+          "Could not convert Timestamp({}, {}) to nanoseconds",
           seconds_,
-          nanos_,
-          e.what());
+          nanos_);
     }
+    return result;
   }
 
   // Keep it in header for getting inlined.
@@ -297,19 +307,60 @@ struct Timestamp {
     return result;
   }
 
+  /// Truncates fractional seconds to precision decimal digits, in [0, 9].
+  /// Seconds are unchanged, including for timestamps before the Unix epoch.
+  /// The template overload permits constant division in vectorized callers.
+  template <int32_t precision>
+  Timestamp toPrecision() const {
+    static_assert(precision >= 0 && precision <= 9);
+    constexpr uint64_t divisor = [] {
+      uint64_t value = 1;
+      for (int32_t i = precision; i < 9; ++i) {
+        value *= 10;
+      }
+      return value;
+    }();
+    return Timestamp(seconds_, nanos_ / divisor * divisor);
+  }
+
+  Timestamp toPrecision(int32_t precision) const {
+    switch (precision) {
+      case 0:
+        return toPrecision<0>();
+      case 1:
+        return toPrecision<1>();
+      case 2:
+        return toPrecision<2>();
+      case 3:
+        return toPrecision<3>();
+      case 4:
+        return toPrecision<4>();
+      case 5:
+        return toPrecision<5>();
+      case 6:
+        return toPrecision<6>();
+      case 7:
+        return toPrecision<7>();
+      case 8:
+        return toPrecision<8>();
+      case 9:
+        return toPrecision<9>();
+      default:
+        BOLT_USER_FAIL(
+            "Timestamp precision must be between 0 and 9: {}", precision);
+    }
+  }
+
   Timestamp toPrecision(const TimestampPrecision& precision) const {
-    uint64_t nanos = nanos_;
     switch (precision) {
       case TimestampPrecision::kMilliseconds:
-        nanos = nanos / 1'000'000 * 1'000'000;
-        break;
+        return toPrecision<3>();
       case TimestampPrecision::kMicroseconds:
-        nanos = nanos / 1'000 * 1'000;
-        break;
+        return toPrecision<6>();
       case TimestampPrecision::kNanoseconds:
-        break;
+        return toPrecision<9>();
     }
-    return Timestamp(seconds_, nanos);
+    return *this;
   }
 
   /// Due to the limit of std::chrono, throws if timestamp is outside of
@@ -321,7 +372,7 @@ struct Timestamp {
       return Timestamp(millis / 1'000, (millis % 1'000) * 1'000'000);
     }
     auto second = millis / 1'000 - 1;
-    auto nano = ((millis - second * 1'000) % 1'000) * 1'000'000;
+    auto nano = (millis % 1'000 + 1'000) * 1'000'000;
     return Timestamp(second, nano);
   }
 
@@ -336,7 +387,7 @@ struct Timestamp {
       return Timestamp(millis / 1'000, (millis % 1'000) * 1'000'000);
     }
     auto second = millis / 1'000 - 1;
-    auto nano = ((millis - second * 1'000) % 1'000) * 1'000'000;
+    auto nano = (millis % 1'000 + 1'000) * 1'000'000;
     return Timestamp(second, nano);
   }
 
@@ -345,7 +396,7 @@ struct Timestamp {
       return Timestamp(micros / 1'000'000, (micros % 1'000'000) * 1'000);
     }
     auto second = micros / 1'000'000 - 1;
-    auto nano = ((micros - second * 1'000'000) % 1'000'000) * 1'000;
+    auto nano = (micros % 1'000'000 + 1'000'000) * 1'000;
     return Timestamp(second, nano);
   }
 
@@ -354,7 +405,7 @@ struct Timestamp {
       return Timestamp(nanos / 1'000'000'000, nanos % 1'000'000'000);
     }
     auto second = nanos / 1'000'000'000 - 1;
-    auto nano = (nanos - second * 1'000'000'000) % 1'000'000'000;
+    auto nano = nanos % 1'000'000'000 + 1'000'000'000;
     return Timestamp(second, nano);
   }
 
@@ -422,6 +473,13 @@ struct Timestamp {
   // ts.toString() returns January 1, 1970 08:00:00
   // If error is not nullptr, it is set to true if the conversion fails.
   void toGMT(const tz::TimeZone& zone, bool* error = nullptr);
+
+  // Resolves overlaps to the earlier instant and handles gaps using gapPolicy.
+  // The nanosecond component is preserved.
+  void toGMT(
+      const tz::TimeZone& zone,
+      TimestampGapPolicy gapPolicy,
+      bool* error = nullptr);
 
   // Same as above, but accepts PrestoDB time zone ID.
   // If error is not nullptr, it is set to true if the conversion fails.

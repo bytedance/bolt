@@ -29,11 +29,13 @@
  */
 
 #include "bolt/python/PlanNode.h"
+
+#include <pybind11/pybind11.h>
 #include "bolt/python/Utils.h"
 
 using namespace bytedance::bolt;
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 PythonNode::PythonNode(
     const ::bytedance::bolt::core::PlanNodeId& id,
     bytedance::bolt::core::PlanNodePtr source,
@@ -121,4 +123,4 @@ core::PlanNodePtr PythonNode::create(const folly::dynamic& obj, void* context) {
       std::move(kwargs),
       std::move(outputType));
 }
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

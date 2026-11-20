@@ -32,6 +32,7 @@
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -177,7 +178,7 @@ uint64_t SpillState::appendToPartition(
 
 uint64_t SpillState::appendToPartition(
     uint32_t partition,
-    const std::vector<char*, memory::StlAllocator<char*>>& rows,
+    const std::vector<char*, memory::SlabAllocator<char*>>& rows,
     RowTypePtr type,
     const RowFormatInfo& info) {
   BOLT_CHECK(

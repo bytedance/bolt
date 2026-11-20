@@ -34,6 +34,7 @@
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 
 #include "bolt/core/QueryCtx.h"
+#include "bolt/substrait/SubstraitToBoltExpr.h"
 #include "bolt/substrait/SubstraitToBoltPlan.h"
 #include "bolt/substrait/TypeUtils.h"
 #include "bolt/substrait/VariantToVectorConverter.h"
@@ -186,8 +187,10 @@ TEST_F(FunctionTest, setVectorFromVariants) {
   ASSERT_EQ("", resultVec->asFlatVector<StringView>()->valueAt(0).str());
   ASSERT_EQ("asdf", resultVec->asFlatVector<StringView>()->valueAt(1).str());
 
-  ASSERT_ANY_THROW(setVectorFromVariants(
-      VARBINARY(), {variant(""), variant("asdf")}, pool_.get()));
+  resultVec = setVectorFromVariants(
+      VARBINARY(), {variant(""), variant("asdf")}, pool_.get());
+  ASSERT_EQ("", resultVec->asFlatVector<StringView>()->valueAt(0).str());
+  ASSERT_EQ("asdf", resultVec->asFlatVector<StringView>()->valueAt(1).str());
 
   resultVec = setVectorFromVariants(
       TIMESTAMP(),
@@ -251,4 +254,205 @@ TEST_F(FunctionTest, getInputTypes) {
   ASSERT_EQ(types[2]->kind(), TypeKind::TIMESTAMP);
   ASSERT_EQ(types[3]->kind(), TypeKind::INTEGER);
   ASSERT_EQ(types[4]->kind(), TypeKind::DOUBLE);
+}
+
+TEST_F(FunctionTest, timestampLiterals) {
+  SubstraitBoltExprConverter converter(pool_.get(), substraitParser_);
+  struct TestCase {
+    int32_t precision;
+    int64_t value;
+    Timestamp expected;
+  };
+  const std::vector<TestCase> testCases{
+      {0, 1, Timestamp(1, 0)},
+      {0, -1, Timestamp(-1, 0)},
+      {3, 1234, Timestamp(1, 234'000'000)},
+      {3, -1234, Timestamp(-2, 766'000'000)},
+      {6, 1, Timestamp(0, 1'000)},
+      {6, -1, Timestamp(-1, 999'999'000)},
+      {9, 1'000'000'001, Timestamp(1, 1)},
+      {9, -1, Timestamp(-1, 999'999'999)},
+      {9,
+       std::numeric_limits<int64_t>::min(),
+       Timestamp::fromNanos(std::numeric_limits<int64_t>::min())},
+      {9,
+       std::numeric_limits<int64_t>::max(),
+       Timestamp::fromNanos(std::numeric_limits<int64_t>::max())}};
+  for (const auto& test : testCases) {
+    SCOPED_TRACE(fmt::format("{} / {}", test.precision, test.value));
+    ::substrait::Expression::Literal literal;
+    literal.mutable_precision_timestamp()->set_precision(test.precision);
+    literal.mutable_precision_timestamp()->set_value(test.value);
+    auto expression = converter.toBoltExpr(literal);
+    EXPECT_EQ(expression->value().value<Timestamp>(), test.expected);
+
+    ::substrait::Expression::Literal list;
+    *list.mutable_list()->add_values() = literal;
+    list.mutable_list()->add_values()->mutable_null()->mutable_timestamp();
+    expression = converter.toBoltExpr(list);
+    const auto* array =
+        expression->valueVector()->wrappedVector()->as<ArrayVector>();
+    EXPECT_EQ(
+        array->elements()->asFlatVector<Timestamp>()->valueAt(0),
+        test.expected);
+    EXPECT_TRUE(array->elements()->isNullAt(1));
+  }
+
+  ::substrait::Expression::Literal literal;
+  literal.set_timestamp(-1);
+  EXPECT_EQ(
+      converter.toBoltExpr(literal)->value().value<Timestamp>(),
+      Timestamp(-1, 999'999'000));
+  for (const auto precision : {-1, 10, 12}) {
+    literal.mutable_precision_timestamp()->set_precision(precision);
+    BOLT_ASSERT_THROW(converter.toBoltExpr(literal), "Timestamp precision");
+  }
+  literal.mutable_precision_timestamp()->set_precision(0);
+  literal.mutable_precision_timestamp()->set_value(
+      std::numeric_limits<int64_t>::max());
+  BOLT_ASSERT_THROW(
+      converter.toBoltExpr(literal), "Timestamp seconds out of range");
+}
+
+TEST_F(FunctionTest, typedEmptyCollectionLiterals) {
+  SubstraitBoltExprConverter converter(pool_.get(), substraitParser_);
+  ::substrait::Expression::Literal emptyList;
+  emptyList.mutable_empty_list()->mutable_type()->mutable_binary();
+  auto expression = converter.toBoltExpr(emptyList);
+  EXPECT_EQ(*expression->type(), *ARRAY(VARBINARY()));
+  const auto* array =
+      expression->valueVector()->wrappedVector()->as<ArrayVector>();
+  ASSERT_NE(array->elements(), nullptr);
+  EXPECT_EQ(array->elements()->size(), 0);
+  EXPECT_EQ(array->offsetAt(0), 0);
+  EXPECT_EQ(array->sizeAt(0), 0);
+  EXPECT_FALSE(array->isNullAt(0));
+
+  ::substrait::Expression::Literal nestedList;
+  *nestedList.mutable_list()->add_values() = emptyList;
+  nestedList.mutable_list()
+      ->add_values()
+      ->mutable_list()
+      ->add_values()
+      ->set_binary("value");
+  expression = converter.toBoltExpr(nestedList);
+  EXPECT_EQ(*expression->type(), *ARRAY(ARRAY(VARBINARY())));
+  array = expression->valueVector()->wrappedVector()->as<ArrayVector>();
+  const auto* nestedArray = array->elements()->as<ArrayVector>();
+  EXPECT_EQ(nestedArray->sizeAt(0), 0);
+  EXPECT_EQ(nestedArray->sizeAt(1), 1);
+  EXPECT_EQ(
+      nestedArray->elements()->asFlatVector<StringView>()->valueAt(0).str(),
+      "value");
+
+  ::substrait::Expression::Literal emptyMap;
+  emptyMap.mutable_empty_map()->mutable_key()->mutable_i64();
+  emptyMap.mutable_empty_map()
+      ->mutable_value()
+      ->mutable_list()
+      ->mutable_type()
+      ->mutable_binary();
+  expression = converter.toBoltExpr(emptyMap);
+  EXPECT_EQ(*expression->type(), *MAP(BIGINT(), ARRAY(VARBINARY())));
+  const auto* map = expression->valueVector()->wrappedVector()->as<MapVector>();
+  ASSERT_NE(map->mapKeys(), nullptr);
+  ASSERT_NE(map->mapValues(), nullptr);
+  EXPECT_EQ(map->mapKeys()->size(), 0);
+  EXPECT_EQ(map->mapValues()->size(), 0);
+  EXPECT_EQ(map->offsetAt(0), 0);
+  EXPECT_EQ(map->sizeAt(0), 0);
+  EXPECT_FALSE(map->isNullAt(0));
+}
+
+TEST_F(FunctionTest, binaryCollectionLiterals) {
+  SubstraitBoltExprConverter converter(pool_.get(), substraitParser_);
+  const std::string bytes("binary\0payload exceeds inline size", 34);
+  ::substrait::Expression::Literal list;
+  list.mutable_list()->add_values()->set_binary(bytes);
+  list.mutable_list()->add_values()->mutable_null()->mutable_binary();
+  auto expression = converter.toBoltExpr(list);
+  EXPECT_EQ(*expression->type(), *ARRAY(VARBINARY()));
+  const auto* array =
+      expression->valueVector()->wrappedVector()->as<ArrayVector>();
+  EXPECT_EQ(
+      array->elements()->asFlatVector<StringView>()->valueAt(0).str(), bytes);
+  EXPECT_TRUE(array->elements()->isNullAt(1));
+
+  ::substrait::Expression::Literal mapLiteral;
+  auto* entry = mapLiteral.mutable_map()->add_key_values();
+  entry->mutable_key()->set_binary(bytes);
+  entry->mutable_value()->set_binary(bytes);
+  expression = converter.toBoltExpr(mapLiteral);
+  EXPECT_EQ(*expression->type(), *MAP(VARBINARY(), VARBINARY()));
+  const auto* map = expression->valueVector()->wrappedVector()->as<MapVector>();
+  EXPECT_EQ(
+      map->mapKeys()->asFlatVector<StringView>()->valueAt(0).str(), bytes);
+  EXPECT_EQ(
+      map->mapValues()->asFlatVector<StringView>()->valueAt(0).str(), bytes);
+}
+
+TEST_F(FunctionTest, rowVariantNulls) {
+  const auto type = ROW({"a", "b"}, {BIGINT(), BIGINT()});
+  const std::vector<variant> rows{
+      variant::row({variant(int64_t{1}), variant::null(TypeKind::BIGINT)}),
+      variant::null(TypeKind::ROW),
+      variant::row({variant(int64_t{2}), variant(int64_t{3})})};
+  const auto checkRows = [](const RowVector* result) {
+    EXPECT_FALSE(result->isNullAt(0));
+    EXPECT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 1);
+    EXPECT_TRUE(result->childAt(1)->isNullAt(0));
+    EXPECT_TRUE(result->isNullAt(1));
+    EXPECT_TRUE(result->childAt(0)->isNullAt(1));
+    EXPECT_TRUE(result->childAt(1)->isNullAt(1));
+    EXPECT_FALSE(result->isNullAt(2));
+    EXPECT_EQ(result->childAt(0)->asFlatVector<int64_t>()->valueAt(2), 2);
+    EXPECT_EQ(result->childAt(1)->asFlatVector<int64_t>()->valueAt(2), 3);
+  };
+  auto result = setVectorFromVariants(type, rows, pool_.get());
+  checkRows(result->as<RowVector>());
+  result =
+      setVectorFromVariants(ARRAY(type), {variant::array(rows)}, pool_.get());
+  checkRows(result->as<ArrayVector>()->elements()->as<RowVector>());
+
+  result = setVectorFromVariants(
+      ROW({}, {}),
+      {variant::row(std::vector<variant>{}), variant::null(TypeKind::ROW)},
+      pool_.get());
+  EXPECT_FALSE(result->isNullAt(0));
+  EXPECT_TRUE(result->isNullAt(1));
+}
+
+TEST_F(FunctionTest, stringAndBinaryVectorsOwnTheirValues) {
+  const std::string text(100, 's');
+  const std::string bytes(100, '\0');
+  VectorPtr strings;
+  VectorPtr binary;
+  {
+    const std::vector<variant> stringValues{variant(text)};
+    const std::vector<variant> binaryValues{
+        variant::binary(bytes),
+        variant(text),
+        variant::null(TypeKind::VARBINARY)};
+    strings = setVectorFromVariants(VARCHAR(), stringValues, pool_.get());
+    binary = setVectorFromVariants(VARBINARY(), binaryValues, pool_.get());
+  }
+  EXPECT_EQ(strings->asFlatVector<StringView>()->valueAt(0).str(), text);
+  EXPECT_EQ(binary->asFlatVector<StringView>()->valueAt(0).str(), bytes);
+  EXPECT_EQ(binary->asFlatVector<StringView>()->valueAt(1).str(), text);
+  EXPECT_TRUE(binary->isNullAt(2));
+}
+
+TEST_F(FunctionTest, expressionConverterFunctionMapConstructor) {
+  std::unordered_map<uint64_t, std::string> functionMap;
+  SubstraitBoltExprConverter converter(pool_.get(), functionMap);
+  functionMap.emplace(7, "is_null:i64");
+  ::substrait::Expression::ScalarFunction function;
+  function.set_function_reference(7);
+  function.mutable_output_type()->mutable_bool_();
+  function.add_arguments()->mutable_value()->mutable_literal()->set_i64(1);
+  const auto expression = converter.toBoltExpr(function, ROW({}, {}));
+  const auto* call = dynamic_cast<const core::CallTypedExpr*>(expression.get());
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->name(), "is_null");
+  EXPECT_EQ(*call->type(), *BOOLEAN());
 }

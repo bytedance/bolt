@@ -44,6 +44,7 @@
 .PHONY: release_with_test release_with_debug_info_with_test
 .PHONY: debug_with_test debug_with_test_spark debug_with_test_cov
 .PHONY: debug_spark_with_test release_spark_with_test
+.PHONY: python-wheel
 
 # --- 5. Benchmark Build Targets ---
 .PHONY: benchmarks-basic-build benchmarks-build
@@ -76,7 +77,9 @@ CONAN_CONFIG ?=
 CONAN_OVERRIDE ?=
 
 BUILD_VERSION ?= main
-PROFILE ?= default
+CONAN_PROFILE_DIR = $(shell conan config home 2>/dev/null)/profiles
+HOST_PROFILE ?= $(if $(wildcard $(CONAN_PROFILE_DIR)/host-profile),host-profile,default)
+BUILD_PROFILE ?= $(if $(wildcard $(CONAN_PROFILE_DIR)/build-profile),build-profile,default)
 BUILD_TYPE=Release
 # Build third-party dependencies in Release unless explicitly overridden.
 DEPENDENCY_BUILD_TYPE ?= Release
@@ -92,9 +95,9 @@ CONAN_PACKAGE_ARGS = \
 	--user=${BUILD_USER} \
 	--channel=${BUILD_CHANNEL}
 
-CONAN_HOST_PROFILE_ARGS = \
-	-pr:h ${PROFILE} \
-	-pr:h ../../scripts/conan/bolt.profile
+CONAN_PROFILE_ARGS = \
+	-pr:h ${HOST_PROFILE} \
+	-pr:b ${BUILD_PROFILE}
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \
@@ -119,8 +122,7 @@ endif
 endif
 export BOLT_TEST_LINKAGE
 
-# BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
-# empty value disables automatic selection.
+# Pass an explicitly selected linker to the Conan recipe.
 ifneq ($(origin BOLT_LINKER), undefined)
 export BOLT_LINKER
 endif
@@ -203,6 +205,9 @@ CPU_TARGET ?= "avx"
 
 PYTHON_EXECUTABLE ?= $(shell which python3)
 
+PYTHON_PACKAGE_DIR = $(CURDIR)/bolt/python
+PYTHON_DIST_DIR = $(CURDIR)/dist
+
 all: 			#: Build the release version
 	$(MAKE) release
 
@@ -225,18 +230,9 @@ _conan_prepare:
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
-	$(PYTHON_EXECUTABLE) ../../scripts/select-conan-linker.py \
-	   --output conan-linker.options -- \
-	   conan profile show \
-	   $(CONAN_HOST_PROFILE_ARGS) \
-	   $(CONAN_BUILD_SETTINGS) \
-	   ${CONAN_OPTIONS} ${CONAN_OVERRIDE} ${CONAN_CONFIG} \
-	   --format=json && \
-	read CONAN_LINKER_OPTIONS < conan-linker.options && \
 	echo " \
-	$(CONAN_HOST_PROFILE_ARGS) \
-	${CONAN_OPTIONS} ${CONAN_OVERRIDE} \
-	$${CONAN_LINKER_OPTIONS}" > new_conan.options && \
+	$(CONAN_PROFILE_ARGS) \
+	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
 	  echo "Conan options and build type unchanged; preserving CMakeCache.txt"; \
@@ -354,6 +350,17 @@ release_spark_with_test:
 debug_spark_with_test:
 	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
+# Wheels statically include the Bolt engine and test utilities.
+python-wheel: BOLT_TEST_LINKAGE = static
+
+python-wheel:
+	NUM_THREADS="$(NUM_THREADS)" NUM_LINK_JOB="$(NUM_LINK_JOB)" \
+	  BOLT_CONAN_BUILD_PROFILE="$(BUILD_PROFILE)" \
+	  "$(PYTHON_EXECUTABLE)" \
+	  "$(PYTHON_PACKAGE_DIR)/packaging/build_dev_wheel.py" \
+	  --build-type "$(BUILD_TYPE)" --out-dir "$(PYTHON_DIST_DIR)" \
+	  --profile "$(HOST_PROFILE)" --dependency-build-type "$(DEPENDENCY_BUILD_TYPE)"
+
 benchmarks-basic-build:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
 
@@ -419,9 +426,9 @@ endif
 	@echo "### 3. Conan Dependency Manager"
 ifneq ($(CONAN_EXE),)
 	@echo "- **Conan Version**: $(shell conan --version)"
-	@echo "- **Conan Profile (default)**:"
+	@echo "- **Conan Profiles (host: $(HOST_PROFILE), build: $(BUILD_PROFILE))**:"
 	@echo "\`\`\`ini"
-	@conan profile show default 2>/dev/null || conan profile show 2>/dev/null || echo "Unable to read profile"
+	@conan profile show $(CONAN_PROFILE_ARGS) 2>/dev/null || echo "Unable to read profiles"
 	@echo "\`\`\`"
 else
 	@echo "*Conan not found in PATH*"

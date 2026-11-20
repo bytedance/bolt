@@ -1075,6 +1075,26 @@ TEST_F(VectorTest, getOrCreateEmpty) {
   EXPECT_EQ(empty->type(), VARCHAR());
 }
 
+TEST_F(VectorTest, compositeRowPointerMemory) {
+  const auto baseline = pool()->usedBytes();
+  {
+    std::vector<std::shared_ptr<CompositeRowVector>> batches;
+    for (int i = 0; i < 100; ++i) {
+      batches.push_back(
+          CompositeRowVector::create(ROW({BIGINT()}), 128, pool(), nullptr));
+    }
+    // Each batch needs 1 KiB of row pointers, not a 1 MiB slab reservation.
+    EXPECT_LT(pool()->usedBytes() - baseline, 1 << 20);
+    auto destination =
+        CompositeRowVector::create(ROW({BIGINT()}), 128, pool(), nullptr);
+    batches.front()->moveto(destination);
+    EXPECT_EQ(destination->rows().size(), 128);
+    destination->resize(256);
+    EXPECT_EQ(destination->rows().size(), 256);
+  }
+  EXPECT_EQ(pool()->usedBytes(), baseline);
+}
+
 TEST_F(VectorTest, row) {
   auto baseRow = createRow(vectorSize_, false);
   testCopy(baseRow, numIterations_);
@@ -3148,6 +3168,59 @@ TEST_F(VectorTest, toCopyRanges) {
   testRoundTrip();
 }
 
+TEST_F(VectorTest, arrayBulkCopyOverflow) {
+  for (const bool dictionary : {false, true}) {
+    for (const bool append : {false, true}) {
+      SCOPED_TRACE(fmt::format("dictionary={}, append={}", dictionary, append));
+      // Constant elements provide a large logical array without allocating its
+      // contents. Copying it twice exceeds vector_size_t, including the two
+      // existing elements in the append case.
+      const vector_size_t arraySize =
+          std::numeric_limits<vector_size_t>::max() / 2 + (append ? 0 : 1);
+      auto source = makeArrayVector({0}, makeConstant<int64_t>(7, arraySize));
+      VectorPtr repeated = dictionary
+          ? BaseVector::wrapInDictionary(
+                nullptr, makeIndices({0, 0}), 2, source)
+          : BaseVector::wrapInConstant(2, 0, source);
+      auto target = append ? makeArrayVector<int64_t>({{9, 10}, {}, {}})
+                           : makeArrayVector<int64_t>({{}, {}});
+      const vector_size_t existingSize = target->elements()->size();
+      BOLT_ASSERT_THROW(
+          target->copy(repeated.get(), append ? 1 : 0, 0, 2),
+          "integer overflow");
+      EXPECT_EQ(existingSize, target->elements()->size());
+    }
+  }
+}
+
+TEST_F(VectorTest, mapBulkCopyOverflow) {
+  constexpr vector_size_t kMapSize = 1 << 30;
+  // Map and Array share the child-count accumulation in copyRangesImpl.
+  auto source = std::make_shared<MapVector>(
+      pool(),
+      MAP(BIGINT(), BIGINT()),
+      nullptr,
+      1,
+      makeIndices({0}),
+      makeIndices({kMapSize}),
+      makeConstant<int64_t>(1, kMapSize),
+      makeConstant<int64_t>(2, kMapSize));
+  auto target = BaseVector::create(source->type(), 2, pool());
+  const std::vector<BaseVector::CopyRange> ranges{{0, 0, 1}, {0, 1, 1}};
+  BOLT_ASSERT_THROW(
+      target->copyRanges(source.get(), ranges), "integer overflow");
+  EXPECT_EQ(0, target->as<MapVector>()->mapKeys()->size());
+  EXPECT_EQ(0, target->as<MapVector>()->mapValues()->size());
+}
+
+TEST_F(VectorTest, arrayBulkCopyAppendsMergedRanges) {
+  auto source = makeArrayVector<int64_t>({{1, 2}, {3, 4}, {5, 6}});
+  auto target = makeArrayVector<int64_t>({{9}, {}, {}, {}});
+  target->copy(source.get(), 1, 0, 3);
+  auto expected = makeArrayVector<int64_t>({{9}, {1, 2}, {3, 4}, {5, 6}});
+  test::assertEqualVectors(expected, target);
+}
+
 TEST_F(VectorTest, rowCopyRanges) {
   RowVectorPtr rowVectorDest = makeRowVector(
       {makeFlatVector<int32_t>({1, 2}), makeFlatVector<int32_t>({1, 2})});
@@ -3169,6 +3242,91 @@ TEST_F(VectorTest, rowCopyRanges) {
       {makeFlatVector<int32_t>({1, 2, 3, 4}),
        makeFlatVector<int32_t>({1, 2, 3, 4})});
   test::assertEqualVectors(expected, rowVectorDest);
+}
+
+TEST_F(VectorTest, copyRangesBoundedBool) {
+  auto source = makeFlatVector<bool>(160, [](auto row) { return row != 1; });
+  source->resize(3);
+  auto target = makeFlatVector<bool>(160, [](auto) { return false; });
+  const std::vector<BaseVector::CopyRange> ranges{
+      {.sourceIndex = 1, .targetIndex = 5, .count = 130},
+      {.sourceIndex = 3, .targetIndex = 140, .count = 5},
+      {.sourceIndex = 4, .targetIndex = 150, .count = 5}};
+
+  target->copyRanges(source.get(), ranges);
+
+  // The backing buffer still contains true bits past the logical size, so an
+  // unbounded copy fails deterministically. Empty ranges leave the target
+  // alone.
+  auto expected = makeFlatVector<bool>(160, [](auto row) { return row == 6; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeFlatVector<bool>({true, false, true});
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  test::assertEqualVectors(expected, target);
+
+  // Null updates must use the same bounded ranges as value updates.
+  target = makeFlatVector<bool>(
+      160, [](auto) { return false; }, [](auto) { return true; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row != 5 && row != 6; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 2; },
+      [](auto row) { return row != 0 && row != 2; });
+  source->resize(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto row) { return row == 6; },
+      [](auto row) { return row == 5; });
+  test::assertEqualVectors(expected, target);
+
+  source = makeAllNullFlatVector<bool>(3);
+  target = makeFlatVector<bool>(160, [](auto) { return false; });
+  target->copyRanges(source.get(), ranges);
+  expected = makeFlatVector<bool>(
+      160,
+      [](auto) { return false; },
+      [](auto row) { return row == 5 || row == 6; });
+  test::assertEqualVectors(expected, target);
+}
+
+TEST_F(VectorTest, copyRangesBoundedDictionary) {
+  auto testCopy = [&](const VectorPtr& values) {
+    auto source = wrapInDictionary(makeIndices({2, 0, 1}), values);
+    auto target = BaseVector::create(values->type(), 8, pool());
+    ASSERT_EQ(target->rawNulls(), nullptr);
+    const std::vector<BaseVector::CopyRange> ranges{
+        {.sourceIndex = 1, .targetIndex = 0, .count = 5},
+        {.sourceIndex = 0, .targetIndex = 5, .count = 1},
+        {.sourceIndex = 3, .targetIndex = 6, .count = 1},
+        {.sourceIndex = 4, .targetIndex = 7, .count = 1}};
+
+    target->copyRanges(source.get(), ranges);
+
+    for (const auto row : {0, 1, 5}) {
+      const auto sourceRow = row == 5 ? 0 : row + 1;
+      EXPECT_TRUE(target->equalValueAt(source.get(), row, sourceRow));
+    }
+    for (const auto row : {2, 3, 4, 6, 7}) {
+      EXPECT_TRUE(target->isNullAt(row));
+    }
+    EXPECT_FALSE(target->isNullAt(5));
+  };
+
+  // Exercise both values paths and both existing and newly allocated nulls.
+  testCopy(makeFlatVector<int32_t>({10, 20, 30}));
+  testCopy(makeNullableFlatVector<int32_t>({10, std::nullopt, 30}));
+  testCopy(makeFlatVector<bool>({true, false, true}));
+  testCopy(makeNullableFlatVector<bool>({true, std::nullopt, false}));
 }
 
 TEST_F(VectorTest, containsNullAtIntegers) {

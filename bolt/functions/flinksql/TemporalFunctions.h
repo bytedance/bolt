@@ -1,0 +1,96 @@
+/*
+ * Copyright (c) ByteDance Ltd. and/or its affiliates
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <string>
+
+namespace bytedance::bolt::functions::flinksql {
+
+/// Registers Flink Java 8 temporal functions (with an optional name prefix):
+/// - to_timestamp(text [, format]).
+/// - to_timestamp(text, format, defaultJvmTimeZone,
+/// defaultJvmRawOffsetSeconds).
+///   The shorter forms use UTC for the legacy parsing fallback; the
+///   four-argument form uses the supplied constant JVM zone and raw offset.
+/// - flink_string_to_timestamp(text, nullOnFailure [, defaultJvmTimeZone,
+///   defaultJvmRawOffsetSeconds]).
+///   The two-argument form uses UTC for Java's legacy parsing fallback. Pass
+///   the resolved JVM default zone and raw offset explicitly when it differs.
+///   The boolean controls parse failures, not Flink's MySQL zero-date option.
+/// - flink_timestamp_precision(timestamp, precision), with precision in [0, 9].
+///   Truncates fractional seconds to the requested precision, including before
+///   1970.
+/// - flink_timestamp_truncate(timestamp, precision), with precision in [0, 9].
+///   Matches Flink's legacy SqlDateTimeUtils.truncate: preserves timestamps
+///   whose unpadded nano digit count fits a positive precision; otherwise
+///   truncates epoch milliseconds toward zero for precision <= 3 and fractional
+///   seconds for higher precision. Millisecond conversion rejects overflow.
+/// - flink_timestamp_to_utc(timestamp, zone) and flink_timestamp_from_utc(...).
+///   NTZ-to-LTZ conversion uses the earlier offset at regional overlaps.
+/// - flink_timestamp_to_utc_later_offset(timestamp, zone).
+///   String-to-LTZ parsing uses Calendar's later overlap offset.
+///   Both variants shift gaps forward.
+/// - flink_float_seconds_to_timestamp(seconds) and
+///   flink_double_seconds_to_timestamp(seconds), using Java's millisecond cast.
+/// - flink_{long,int,short,byte}_seconds_to_timestamp(seconds). Integer
+///   multiplication wraps at the Java long millisecond boundary.
+/// - flink_timestamp_to_*_seconds(timestamp), for long, int, smallint,
+///   tinyint, float, and double results.
+///   Integral casts truncate epoch milliseconds toward zero before narrowing;
+///   floating casts retain milliseconds and discard sub-millisecond precision.
+/// - flink_timestamp_to_date(timestamp), using NTZ truncation toward zero.
+/// - timestamp_to_long(timestamp [, zone]), returning epoch milliseconds.
+///   The one-argument form uses the query zone when timestamp adjustment is
+///   enabled. The explicit zone may vary by row. This UDF rejects ambiguous and
+///   nonexistent local times. UTC and fixed offsets skip the calendar lookup.
+///   Zero offsets accept the full int64 millisecond range. Non-zero offsets
+///   raise an error if the offset-adjusted result exceeds the int64 range.
+/// - flink_interval_year_month_to_string(interval) and
+///   flink_interval_day_time_to_string(interval), using Flink's Calcite format.
+/// - add, subtract, and negative overloads for intervals; add/subtract a
+///   year-month or day-time interval to/from DATE or TIMESTAMP, and add the
+///   operands in either order. Integer arithmetic wraps as in Java. Operations
+///   returning DATE truncate day-time intervals to whole days and check the
+///   int32 day count; TIMESTAMP arithmetic preserves nanoseconds and ignores
+///   the session zone.
+/// - flink_date_add_interval(date, dayTimeInterval) and
+///   flink_date_subtract_interval(date, dayTimeInterval), returning TIMESTAMP
+///   from midnight plus/minus the full millisecond interval. Addition accepts
+///   either operand order. Callers select these functions when Flink infers a
+///   TIMESTAMP result for DATE/interval arithmetic. The session zone is
+///   ignored.
+/// - flink_timestamp_to_local_date(timestamp), after shifting an LTZ value into
+///   the session's local time zone. Dates before the epoch use floor division.
+/// - flink_time_extract(milliseconds, modulus, divisor), using Java's signed
+///   remainder with positive modulus and divisor.
+/// - flink_time_to_timestamp(milliseconds).
+/// - flink_timestamp_to_time(timestamp [, zone]). The one-argument form uses
+///   Flink NTZ epoch remainder; the zone form extracts LTZ local clock time.
+///
+/// Except for timestamp_to_long, time zones and the default raw offset must
+/// be constant. Flink callers must resolve the actual Java TimeZone with
+/// toZoneId().getId() before passing it,
+/// preserving Java's short-ID mappings and fallback behavior. For the legacy
+/// default zone, GMT offsets beyond ZoneId's 18-hour limit use the normalized
+/// GMT offset ID instead. Custom Java TimeZone rules that cannot be represented
+/// by an IANA or fixed-offset ID require Java evaluation.
+/// Regional conversions use Bolt's shared time-zone implementation and inherit
+/// its transition-range limitations. Deployments must align the time-zone data
+/// with the JVM's rules. TIME uses milliseconds.
+void registerTemporalFunctions(const std::string& prefix);
+
+} // namespace bytedance::bolt::functions::flinksql

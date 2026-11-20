@@ -1025,6 +1025,55 @@ TEST_P(MultiThreadedHashJoinTest, bigintArray) {
       .run();
 }
 
+TEST_F(HashJoinTest, nonInlineStringKeysWithSpill) {
+  constexpr int32_t kStringSize = 100'000;
+  const auto makeKey = [](int32_t id) {
+    std::string key(kStringSize, 'x');
+    key.replace(0, StringView::kPrefixSize, StringView::kPrefixSize, 'p');
+    key.replace(StringView::kPrefixSize, 10, fmt::format("{:010}", id));
+    return key;
+  };
+
+  // All join keys have the same length and prefix. Comparisons must therefore
+  // inspect the out-of-line part. kStringSize is larger than a
+  // HashStringAllocator range, which forces non-contiguous storage.
+  std::vector<RowVectorPtr> probeVectors;
+  std::vector<RowVectorPtr> buildVectors;
+  for (int32_t batch = 0; batch < 32; ++batch) {
+    std::vector<std::string> key1;
+    std::vector<std::string> key2;
+    std::vector<int64_t> values;
+    for (int32_t row = 0; row < 4; ++row) {
+      const auto id = batch * 4 + row;
+      key1.push_back(makeKey(2 * id));
+      key2.push_back(makeKey(2 * id + 1));
+      values.push_back(id);
+    }
+    probeVectors.push_back(makeRowVector(
+        {"t_key1", "t_key2"},
+        {makeFlatVector<std::string>(key1),
+         makeFlatVector<std::string>(key2)}));
+    buildVectors.push_back(makeRowVector(
+        {"u_key1", "u_key2", "u_value"},
+        {makeFlatVector<std::string>(key1),
+         makeFlatVector<std::string>(key2),
+         makeFlatVector<int64_t>(values)}));
+  }
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(1)
+      .probeVectors(std::move(probeVectors))
+      .probeKeys({"t_key1", "t_key2"})
+      .buildVectors(std::move(buildVectors))
+      .buildKeys({"u_key1", "u_key2"})
+      .joinOutputLayout({"t_key1", "t_key2", "u_value"})
+      .referenceQuery(
+          "SELECT t_key1, t_key2, u_value FROM t JOIN u "
+          "ON t_key1 = u_key1 AND t_key2 = u_key2")
+      .maxSpillLevel(0)
+      .run();
+}
+
 TEST_P(MultiThreadedHashJoinTest, outOfJoinKeyColumnOrder) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
@@ -1257,6 +1306,7 @@ DEBUG_ONLY_TEST_P(
 
 TEST_P(MultiThreadedHashJoinTest, normalizedKey) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .config(core::QueryConfig::kSimdHashTableEnabled, "true")
       .numDrivers(numDrivers_)
       .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT(), VARCHAR()})
@@ -1339,6 +1389,7 @@ DEBUG_ONLY_TEST_P(
 
 TEST_F(HashJoinTest, allTypes) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .config(core::QueryConfig::kSimdHashTableEnabled, "true")
       .keyTypes(
           {BIGINT(),
            VARCHAR(),
@@ -2319,6 +2370,7 @@ TEST_P(
     auto testProbeVectors = probeVectors;
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+        .config(core::QueryConfig::kSimdHashTableEnabled, "true")
         .numDrivers(numDrivers_)
         .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
@@ -2616,11 +2668,29 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
       .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
         int nullJoinBuildKeyCount = 0;
         int nullJoinProbeKeyCount = 0;
+        int hashBuildCount = 0;
 
         for (auto& pipeline : task->taskStats().pipelineStats) {
           for (auto op : pipeline.operatorStats) {
             if (op.operatorType == "HashBuild") {
               nullJoinBuildKeyCount += op.numNullKeys;
+              int64_t hashModeMetricCount = 0;
+              for (const char* name :
+                   {"hashtable.hashModeArray",
+                    "hashtable.hashModeNormalizedKey",
+                    "hashtable.hashModeHash"}) {
+                const auto it = op.runtimeStats.find(name);
+                if (it == op.runtimeStats.end()) {
+                  continue;
+                }
+                const auto& metric = it->second;
+                EXPECT_EQ(metric.sum, metric.count);
+                hashModeMetricCount += metric.count;
+                EXPECT_EQ(metric.min, 1);
+                EXPECT_EQ(metric.max, 1);
+              }
+              EXPECT_GT(hashModeMetricCount, 0);
+              ++hashBuildCount;
             }
             if (op.operatorType == "HashProbe") {
               nullJoinProbeKeyCount += op.numNullKeys;
@@ -2629,6 +2699,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
         }
         ASSERT_EQ(nullJoinBuildKeyCount, 33 * GetParam().numDrivers);
         ASSERT_EQ(nullJoinProbeKeyCount, 34 * GetParam().numDrivers);
+        ASSERT_EQ(hashBuildCount, 1);
       })
       .run();
 }
@@ -3603,7 +3674,21 @@ TEST_P(MultiThreadedHashJoinTest, noSpillLevelLimit) {
         if (!hasSpill) {
           return;
         }
-        ASSERT_EQ(maxHashBuildSpillLevel(*task), 4);
+        const auto spillLevel = maxHashBuildSpillLevel(*task);
+        const auto stats = task->taskStats();
+        for (const auto& pipeline : stats.pipelineStats) {
+          for (const auto& op : pipeline.operatorStats) {
+            if (op.operatorType == "HashBuild" && op.numDrivers > 1) {
+              // Parallel builders use the fixed 3 bits per repartition level.
+              ASSERT_EQ(spillLevel, 4);
+              return;
+            }
+          }
+        }
+        // A serial build can also run with parallel probing. Its adaptive
+        // repartitioning may consume the available hash bits in fewer levels.
+        ASSERT_GT(spillLevel, 0);
+        ASSERT_LE(spillLevel, 4);
       })
       .run();
 }
@@ -4307,6 +4392,92 @@ BOLT_INSTANTIATE_TEST_SUITE_P(
     HashJoinTest,
     MultiThreadedHashJoinTest,
     testing::ValuesIn(MultiThreadedHashJoinTest::getTestParams()));
+
+TEST_F(HashJoinTest, varcharInnerJoinTwoBatches) {
+  const std::vector<RowVectorPtr> users = {
+      makeRowVector(
+          {"name", "info"},
+          {makeFlatVector<std::string>(
+               {"user_name_alice",
+                "user_name_bob",
+                "user_name_carol",
+                "user_name_dave",
+                "user_name_erin"}),
+           makeFlatVector<std::string>(
+               {"alice_profile_info",
+                "bob_profile_info",
+                "carol_profile_info",
+                "dave_profile_info",
+                "erin_profile_info"})}),
+      makeRowVector(
+          {"name", "info"},
+          {makeFlatVector<std::string>(
+               {"user_name_frank",
+                "user_name_grace",
+                "user_name_heidi",
+                "user_name_ivan",
+                "user_name_judy"}),
+           makeFlatVector<std::string>(
+               {"frank_profile_info",
+                "grace_profile_info",
+                "heidi_profile_info",
+                "ivan_profile_info",
+                "judy_profile_info"})})};
+  const std::vector<RowVectorPtr> addresses = {
+      makeRowVector(
+          {"name", "addr"},
+          {makeFlatVector<std::string>(
+               {"user_name_carol",
+                "user_name_alice",
+                "user_name_erin",
+                "missing_user_one",
+                "user_name_bob"}),
+           makeFlatVector<std::string>(
+               {"carol_street_addr",
+                "alice_street_addr",
+                "erin_street_addr",
+                "missing_one_addr",
+                "bob_street_addr"})}),
+      makeRowVector(
+          {"name", "addr"},
+          {makeFlatVector<std::string>(
+               {"user_name_judy",
+                "user_name_frank",
+                "missing_user_two",
+                "user_name_heidi",
+                "user_name_grace"}),
+           makeFlatVector<std::string>(
+               {"judy_street_addr",
+                "frank_street_addr",
+                "missing_two_addr",
+                "heidi_street_addr",
+                "grace_street_addr"})})};
+
+  createDuckDbTable("t", users);
+  createDuckDbTable("u", addresses);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(users, true)
+                  .hashJoin(
+                      {"name"},
+                      {"address_name"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(addresses, true)
+                          .project({"name AS address_name", "addr"})
+                          .planNode(),
+                      "",
+                      {"name", "info", "addr"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .checkSpillStats(false)
+      .referenceQuery(
+          "SELECT t.name, t.info, u.addr FROM t INNER JOIN u ON t.name = u.name")
+      .run();
+}
 
 // TODO: try to parallelize the following test cases if possible.
 TEST_F(HashJoinTest, memory) {
@@ -6130,6 +6301,8 @@ TEST_F(HashJoinTest, antiJoinAbandomBuildNoDupHashEarly) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinRows, "1")
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinPct, "10")
+      // Leave enough hash bits for two levels of adaptive repartitioning.
+      .config(core::QueryConfig::kSpillStartPartitionBit, "29")
       .numDrivers(numDrivers_)
       .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
@@ -6141,6 +6314,40 @@ TEST_F(HashJoinTest, antiJoinAbandomBuildNoDupHashEarly) {
       .referenceQuery(
           "SELECT t.* FROM t WHERE NOT EXISTS (SELECT * FROM u WHERE u.u0 = t.t0)")
       .run();
+}
+
+TEST_F(HashJoinTest, adaptiveRepartitionBits) {
+  for (const auto numBuildBatches : {2, 20}) {
+    SCOPED_TRACE(numBuildBatches);
+    // All rows land in one partition. Spilling after the first 100 rows
+    // leaves either 200 or 2,000 rows to restore. Repartitioning should keep
+    // the default 3 bits or increase to 5 bits, respectively.
+    const auto buildBatch = makeRowVector(
+        {"u0"}, {makeFlatVector<int64_t>(100, [](auto) { return 1; })});
+    HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+        .probeKeys({"t0"})
+        .probeVectors({makeRowVector({"t0"}, {makeFlatVector<int64_t>({1})})})
+        .buildKeys({"u0"})
+        .buildVectors(std::vector<RowVectorPtr>(numBuildBatches, buildBatch))
+        .joinOutputLayout({"t0", "u0"})
+        .referenceQuery("SELECT t0, u0 FROM t, u WHERE t0 = u0")
+        .injectSpill(false)
+        .spillMemoryThreshold(1)
+        .maxSpillLevel(1)
+        .config(core::QueryConfig::kSpillStartPartitionBit, "29")
+        .config(core::QueryConfig::kSpillNumPartitionBits, "3")
+        .config(core::QueryConfig::kSpillWriteBufferSize, "0")
+        .config(core::QueryConfig::kRowBasedSpillMode, "disable")
+        .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, "false")
+        .verifier([&](const std::shared_ptr<Task>& task, bool) {
+          EXPECT_EQ(maxHashBuildSpillLevel(*task), 1);
+          // Count the initial 8 partitions and the repartitioned set.
+          EXPECT_EQ(
+              taskSpilledStats(*task).first.spilledPartitions,
+              8 + (numBuildBatches == 2 ? 8 : 32));
+        })
+        .run();
+  }
 }
 
 TEST_F(HashJoinTest, spillPartitionBitsOverlap) {
