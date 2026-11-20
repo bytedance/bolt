@@ -31,6 +31,7 @@
 #include "bolt/dwio/dwrf/reader/SelectiveTimestampColumnReader.h"
 #include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/dwrf/common/DecoderUtil.h"
+#include "bolt/dwio/dwrf/reader/TimestampDecoder.h"
 namespace bytedance::bolt::dwrf {
 
 using namespace dwio::common;
@@ -149,19 +150,7 @@ void SelectiveTimestampColumnReader::readHelper(
 
   for (vector_size_t i = 0; i < numValues_; i++) {
     if (!rawNulls || !bits::isBitNull(rawNulls, i)) {
-      auto nanos = nanosData[i];
-      uint64_t zeros = nanos & 0x7;
-      nanos >>= 3;
-      if (zeros != 0) {
-        for (uint64_t j = 0; j <= zeros; ++j) {
-          nanos *= 10;
-        }
-      }
-      auto seconds = secondsData[i] + EPOCH_OFFSET;
-      if (seconds < 0 && nanos != 0) {
-        seconds -= 1;
-      }
-      rawTs[i] = Timestamp(seconds, nanos);
+      rawTs[i] = detail::decodeTimestamp(secondsData[i], nanosData[i]);
     }
   }
   values_ = tsValues;
