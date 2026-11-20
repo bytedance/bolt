@@ -341,7 +341,7 @@ typename std::enable_if<IsStringType<kind>>::type parseElement(
 
 void resizeVector(VectorPtr vectorPtr, size_t newSize) {
   if (newSize > vectorPtr->size()) {
-    vectorPtr->resize(vectorPtr->size() + newSize);
+    vectorPtr->resize(newSize);
   }
 }
 

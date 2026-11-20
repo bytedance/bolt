@@ -899,6 +899,39 @@ TEST_F(ArrayWriterTest, nestedArrayWriteThenCommitNull) {
   ASSERT_EQ(reader.readNullFree(1)[0][0], 10);
 }
 
+TEST_F(ArrayWriterTest, writeThenCommitNullVarchar) {
+  auto result = prepareResult(ARRAY(VARCHAR()), 2);
+  exec::VectorWriter<Array<Varchar>> writer;
+  writer.init(*result->as<ArrayVector>());
+
+  {
+    writer.setOffset(0);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item() += "stale"_sv;
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& arrayWriter = writer.current();
+    auto& element = arrayWriter.add_item();
+    // add_item() must not commit the pending element of the null row.
+    auto* elements =
+        result->as<ArrayVector>()->elements()->asFlatVector<StringView>();
+    for (vector_size_t i = 0; i < elements->size(); ++i) {
+      EXPECT_NE(elements->valueAt(i).getString(), "stale");
+    }
+    element += "fresh"_sv;
+    writer.commit();
+  }
+  writer.finish();
+
+  std::vector<std::vector<StringView>> expectedData = {{}, {"fresh"_sv}};
+  auto expected = makeArrayVector<StringView>(expectedData);
+  expected->setNull(0, true);
+  assertEqualVectors(result, expected);
+}
+
 // ArrayWriter should append and not overwrite elements vectors.
 TEST_F(ArrayWriterTest, appendToElements) {
   using out_t = Array<int32_t>;

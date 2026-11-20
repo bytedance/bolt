@@ -196,6 +196,42 @@ TEST_F(MapWriterTest, writeThenCommitNull) {
   assertEqualVectors(result, expexctedVector);
 }
 
+TEST_F(MapWriterTest, writeThenCommitNullVarchar) {
+  auto result = prepareResult(
+      std::make_shared<MapType>(MapType(VARCHAR(), VARCHAR())), 2);
+  exec::VectorWriter<Map<Varchar, Varchar>> writer;
+  writer.init(*result->as<MapVector>());
+
+  {
+    writer.setOffset(0);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter += "stale"_sv;
+    valueWriter += "stale"_sv;
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    // add_item() must not commit the pending key/value of the null row.
+    auto* keys = result->as<MapVector>()->mapKeys()->asFlatVector<StringView>();
+    for (vector_size_t i = 0; i < keys->size(); ++i) {
+      EXPECT_NE(keys->valueAt(i).getString(), "stale");
+    }
+    keyWriter += "fresh"_sv;
+    valueWriter += "fresh"_sv;
+    writer.commit();
+  }
+  writer.finish();
+
+  map_pairs_t<StringView, StringView> expected = {{"fresh"_sv, "fresh"_sv}};
+  auto expectedVector = makeMapVector<StringView, StringView>({{}, expected});
+  expectedVector->setNull(0, true);
+  assertEqualVectors(result, expectedVector);
+}
+
 TEST_F(MapWriterTest, writeThenCommitNullNestedInRow) {
   using test_t = Row<Map<int64_t, int64_t>>;
   auto result = prepareResult(CppToType<test_t>::create(), 2);

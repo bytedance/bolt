@@ -150,6 +150,11 @@ struct VectorWriter<
     proxy_.vector_->setNull(proxy_.offset_, true);
   }
 
+  void finalizeNull() override {
+    // Discard any partially written string so the next row starts clean.
+    proxy_.prepareForReuse(false);
+  }
+
   void commit(bool isSet) override {
     // this code path is called when the slice is top-level
     if (isSet) {
