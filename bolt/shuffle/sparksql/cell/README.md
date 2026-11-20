@@ -553,12 +553,16 @@ output.
 
 | File | Contents |
 | --- | --- |
+| `../common/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, framed row block writer, and buffer helpers |
+| `../common/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
+| `../common/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
+| `../common/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
+| `../common/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
 | `CellFormat.h` / `.cpp` | Wire format definition and constants; `CellLayout` (row type to wire columns and streams); `BOLT_CELL_KERNEL` |
 | `CellEncoding.h` | Encoding Block encode/decode kernels (scalar and AVX2), `StreamCursor` |
 | `CellBuffer.h` / `.cpp` | `ChunkAllocator`, `DataCells` (chains), `NullClass`, `NullCells` |
 | `CellSplitter.h` / `.cpp` | Per-type split loops, staging lines, dictionary form, flush, run and seal orchestration |
 | `CellShuffleWriter.h` / `.cpp` | The writer: layout choice, cell sizing, dictionary probe, memory pressure, seals |
-| `CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
 | `CellShuffleTypeAdapter.h` / `.cpp` | Packs and unpacks complex columns as one binary column |
 | `CellNestedLayout.h` / `.cpp` | Nested layout: nodes and position spaces of a shredded row type |
 | `CellNestedShredder.h` / `.cpp` | Writer side of the nested layout |

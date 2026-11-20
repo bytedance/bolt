@@ -19,12 +19,12 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 
-#include "bolt/shuffle/sparksql/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
+#include "bolt/shuffle/sparksql/common/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
-namespace bytedance::bolt::shuffle::sparksql::cell {
+namespace bytedance::bolt::shuffle::sparksql {
 
 /// Base of a shuffle writer that also takes CompositeRowVectors
 /// (HashAggregation composite output). All composite handling lives here;
@@ -98,6 +98,16 @@ class CompositeShuffleWriter : public ShuffleWriter {
     return stopped_;
   }
 
+  /// Compression codec configured by PartitionWriterOptions, or null when
+  /// uncompressed.
+  Codec* codec() const {
+    return codec_.get();
+  }
+
+  /// Computes partition ids into row2Partition_ and counts into
+  /// partition2RowCount_ for the configured partitioning (single, round-robin,
+  /// or leading INTEGER pid column).
+  arrow::Status computePartitions(const RowVector& rv);
   memory::MemoryPool* const boltPool_;
   /// Shared by the two paths, which never split at the same time. A reclaim
   /// inside a split goes to its active side; composite flushes wait for it.
@@ -106,9 +116,6 @@ class CompositeShuffleWriter : public ShuffleWriter {
 
  private:
   void splitComposite(const CompositeRowVectorPtr& rv);
-
-  /// Partitions composite rows by their pid column (child 0, INTEGER).
-  arrow::Status computeCompositePartitions(const RowVector& rv);
 
   /// Writes the held composite rows out - or, while a split or write is
   /// under way, right after it.
@@ -156,4 +163,4 @@ class CompositeShuffleWriter : public ShuffleWriter {
   uint64_t compressTimeNs_{0};
 };
 
-} // namespace bytedance::bolt::shuffle::sparksql::cell
+} // namespace bytedance::bolt::shuffle::sparksql

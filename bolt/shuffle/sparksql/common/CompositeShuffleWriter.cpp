@@ -14,101 +14,24 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
+#include "bolt/shuffle/sparksql/common/CompositeShuffleWriter.h"
 
 #include <folly/ScopeGuard.h>
-#include <folly/lang/Bits.h>
-#include <cstring>
-#include <limits>
+#include <algorithm>
 #include <numeric>
 
-#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/Memory.h"
-#include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/FlatVector.h"
 
-namespace bytedance::bolt::shuffle::sparksql::cell {
+namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
 
 /// Raw body bytes per CompositeRows block: bounds the block workspaces and
 /// gives the reader batch-sized pieces.
 constexpr uint64_t kCompositeBlockBytes = 4 << 20;
-
-/// Serializes fields explicitly so native struct padding never enters the wire.
-struct CompositeBlockHeader {
-  uint32_t rowCount;
-  uint64_t decodedBytes;
-  uint64_t storedBytes;
-  RunLayout layout;
-
-  void writeTo(char* out) const {
-    out[0] = static_cast<char>(CellBlockKind::kCompositeRows);
-    folly::storeUnaligned<uint32_t>(out + 1, rowCount);
-    folly::storeUnaligned<uint64_t>(out + 5, decodedBytes);
-    folly::storeUnaligned<uint64_t>(out + 13, storedBytes);
-    out[21] = static_cast<char>(layout);
-  }
-};
-
-/// Assembles one CompositeRows block (CellFormat.h) of `rows` into `block`.
-/// The body is gathered in place, so a stored block needs no second copy
-/// and a compressed one is copied back over it. The compression workspace
-/// comes from the spill pool: blocks are written when the task's pool is
-/// short.
-void buildBlock(
-    const uint8_t* const* rows,
-    size_t numRows,
-    uint64_t rawBytes,
-    Codec* codec,
-    BufferPtr& block,
-    BufferPtr& compressedBuffer,
-    memory::MemoryPool* pool,
-    uint64_t& compressTimeNs) {
-  BOLT_CHECK_LE(
-      numRows,
-      std::numeric_limits<uint32_t>::max(),
-      "too many rows for one composite block");
-  resetBuffer(
-      block, checkedPlus<size_t>(kCompositeBlockHeaderBytes, rawBytes), pool);
-  char* body = block->asMutable<char>() + kCompositeBlockHeaderBytes;
-  uint64_t offset = 0;
-  for (size_t i = 0; i < numRows; ++i) {
-    const uint64_t bytes = compositeRowBytes(rows[i]);
-    ::memcpy(body + offset, rows[i], bytes);
-    offset += bytes;
-  }
-
-  // Compressed when the codec shrinks the body, else stored as is.
-  CompositeBlockHeader header{
-      static_cast<uint32_t>(numRows),
-      rawBytes,
-      rawBytes,
-      RunLayout::kCombinedUncompressed};
-  if (codec != nullptr && rawBytes >= kMinCompressBytes) {
-    const uint64_t start = currentTimeNs();
-    resetBuffer(
-        compressedBuffer,
-        codec->maxCompressedLen(rawBytes),
-        memory::spillMemoryPool());
-    const int64_t written = codec->compress(
-        reinterpret_cast<const uint8_t*>(body),
-        static_cast<int64_t>(rawBytes),
-        compressedBuffer->asMutable<uint8_t>(),
-        static_cast<int64_t>(compressedBuffer->size()));
-    compressTimeNs += currentTimeNs() - start;
-    if (written > 0 && static_cast<uint64_t>(written) < rawBytes) {
-      header.storedBytes = static_cast<uint64_t>(written);
-      header.layout = RunLayout::kCombined;
-      ::memcpy(body, compressedBuffer->as<char>(), header.storedBytes);
-    }
-  }
-
-  header.writeTo(block->asMutable<char>());
-  block->setSize(kCompositeBlockHeaderBytes + header.storedBytes);
-}
 
 } // namespace
 
@@ -127,9 +50,6 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       converter_(boltPool),
       heldRows_(numPartitions_),
       rawPartitionBytes_(numPartitions_, 0) {
-  // Set once here so every path reports it (ordinary, composite, empty,
-  // local or RSS); nothing later assigns metrics_ as a whole.
-  metrics_.useCellShuffle = 1;
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
   BOLT_CHECK(
@@ -148,9 +68,18 @@ CompositeShuffleWriter::CompositeShuffleWriter(
   }
 }
 
-arrow::Status CompositeShuffleWriter::computeCompositePartitions(
-    const RowVector& rv) {
-  BOLT_CHECK(partitioner_->hasPid(), "composite rows require a pid column");
+arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
+  if (options_.partitioning == Partitioning::kSingle) {
+    row2Partition_.assign(rv.size(), 0);
+    std::fill(partition2RowCount_.begin(), partition2RowCount_.end(), 0);
+    partition2RowCount_[0] = rv.size();
+    return arrow::Status::OK();
+  }
+  if (!partitioner_->hasPid()) {
+    return partitioner_->compute(
+        nullptr, rv.size(), row2Partition_, partition2RowCount_);
+  }
+  BOLT_CHECK_GT(rv.childrenSize(), 0, "expected a pid column");
   const auto& pidChild = rv.childAt(0);
   BOLT_CHECK_EQ(
       static_cast<int32_t>(pidChild->typeKind()),
@@ -192,7 +121,7 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   }
   BOLT_CHECK(
       partitioner_->hasPid(),
-      "CellShuffleWriter takes composite rows only under hash or range "
+      "CompositeShuffleWriter takes composite rows only under hash or range "
       "partitioning");
   if (rv->size() == 0) {
     return arrow::Status::OK();
@@ -255,6 +184,7 @@ arrow::Status CompositeShuffleWriter::stop() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   metrics_.totalCompressTime += static_cast<int64_t>(compressTimeNs_);
+  metrics_.peakBytes = boltPool_->peakBytes();
   return arrow::Status::OK();
 }
 
@@ -278,7 +208,7 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
       }
       writeComposite();
     }
-    const auto status = computeCompositePartitions(*rv);
+    const auto status = computePartitions(*rv);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     const uint64_t start = currentTimeNs();
     converter_.convert(rv, row2Partition_, heldRows_);
@@ -339,14 +269,15 @@ bool CompositeShuffleWriter::nextBlock(
   const size_t begin = nextRow;
   uint64_t raw = 0;
   while (nextRow < rows.size()) {
-    const uint64_t bytes = compositeRowBytes(rows[nextRow]);
+    const uint64_t bytes = framedRowBytes(rows[nextRow]);
     if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
       break;
     }
     raw += bytes;
     ++nextRow;
   }
-  buildBlock(
+  buildRowBlock(
+      ShuffleBlockKind::kCompositeRows,
       rows.data() + begin,
       nextRow - begin,
       raw,
@@ -355,9 +286,8 @@ bool CompositeShuffleWriter::nextBlock(
       compressedBuffer,
       boltPool_,
       compressTimeNs_);
-  rawPartitionBytes_[pid] +=
-      static_cast<int64_t>(kCompositeBlockHeaderBytes + raw);
+  rawPartitionBytes_[pid] += static_cast<int64_t>(kRowBlockHeaderBytes + raw);
   return true;
 }
 
-} // namespace bytedance::bolt::shuffle::sparksql::cell
+} // namespace bytedance::bolt::shuffle::sparksql
