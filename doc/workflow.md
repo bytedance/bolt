@@ -47,7 +47,7 @@ upstream  https://github.com/bytedance/bolt (push)
 ```Plain
 $ cd $working_dir/bolt
 $ git checkout main
-$ git fetch main
+$ git fetch upstream
 $ git rebase upstream/main
 $ git push origin main
 ```
@@ -67,7 +67,7 @@ Run `scripts/setup-dev-env.sh`to prepare dependencies.
 
 - Now you can modify the content or code in your newly created branch
 
-- Test your changes, more commands please refer to \[Building and Testing\](CONTRIBUTING.md#building-and-testing)
+- Test your changes, more commands please refer to [Building and Testing](../CONTRIBUTING.md#building-and-testing)
 
 
 ```Plain
@@ -123,7 +123,7 @@ $ git commit -s -am "$add a comment" (commit with signed-off-by)
 ```Plain
 $ git add <filename> (used to add one file)
 git add -A (add all changes, including new/delete/modified files)
-git add -a -m "$add a comment" (add and commit modified and deleted files)
+git commit -a -m "$add a comment" (add and commit modified and deleted files)
 git add -u (add modified and deleted files, not include new files)
 git add . (add new and modified files, not including deleted files)
 git commit --amend -m "$add a comment" (modify the last commit)
