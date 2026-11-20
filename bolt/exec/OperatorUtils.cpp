@@ -295,13 +295,22 @@ std::vector<VectorPtr> wrapChildren(
     }
     if (nulls == nullptr &&
         children[i]->encoding() == VectorEncoding::Simple::DICTIONARY &&
-        children[i]->rawNulls() == nullptr &&
         !children[i]->valueVector()->containingLazyAndWrapped()) {
       auto baseValues = children[i]->valueVector();
+      BufferPtr newNulls;
+      if (const auto* childNulls = children[i]->rawNulls()) {
+        newNulls = allocateNulls(size, mapping->pool());
+        auto* rawNewNulls = newNulls->asMutable<uint64_t>();
+        for (auto j = 0; j < size; ++j) {
+          if (bits::isBitNull(childNulls, curIndex[j])) {
+            bits::setNull(rawNewNulls, j);
+          }
+        }
+      }
       auto newMapping = old2newMappings.find(children[i]->wrapInfo());
       if (newMapping != old2newMappings.end()) {
         wrappedChildren[i] =
-            wrapChild(size, newMapping->second, baseValues, nullptr);
+            wrapChild(size, newMapping->second, baseValues, newNulls);
       } else {
         // generate new mapping and wrap child.value
         auto newBuffer =
@@ -311,7 +320,7 @@ std::vector<VectorPtr> wrapChildren(
         for (auto j = 0; j < size; ++j) {
           newIndex[j] = childIndex[curIndex[j]];
         }
-        wrappedChildren[i] = wrapChild(size, newBuffer, baseValues, nullptr);
+        wrappedChildren[i] = wrapChild(size, newBuffer, baseValues, newNulls);
         old2newMappings[children[i]->wrapInfo()] = newBuffer;
       }
     } else {
