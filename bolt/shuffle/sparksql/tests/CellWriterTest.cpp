@@ -2633,28 +2633,51 @@ TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
     for (const bool rss : {false, true}) {
       SCOPED_TRACE(fmt::format(
           "{}, {}", nested ? "nested" : "flat", rss ? "rss" : "local"));
-      const auto write = [&](int64_t bytesPerStream, int64_t minBytes) {
+      const auto write = [&](int64_t bytesPerStream,
+                             int64_t minBytes,
+                             int64_t spillMemoryBytes) {
         auto options = writerOptions(kPartitions, rss);
         options.cellOptions.cellSpillBytesPerStream = bytesPerStream;
         options.cellOptions.cellSpillMinBytes = minBytes;
+        options.cellOptions.spillMemoryBytes = spillMemoryBytes;
         auto written = test::writeShuffle(options, input, pool());
         test::expectReadsBack(
             input, written, arrow::Compression::LZ4_FRAME, pool());
         return written;
       };
-      const auto low = write(64 << 10, 0);
-      const auto high = write(std::numeric_limits<int64_t>::max(), 0);
+      const auto defaultSpillMemory =
+          writerOptions(kPartitions, rss).cellOptions.spillMemoryBytes;
+      const auto low = write(64 << 10, 0, defaultSpillMemory);
+      const auto high =
+          write(std::numeric_limits<int64_t>::max(), 0, defaultSpillMemory);
       if (rss) {
         EXPECT_EQ(low.metrics.spillCount, high.metrics.spillCount);
         EXPECT_EQ(
             low.metrics.totalBytesWritten, high.metrics.totalBytesWritten);
       } else {
-        // Spills into the spill memory, which writes nothing to disk
-        // without memory pressure: totalBytesEvicted, the bytes on disk,
-        // need not move.
-        EXPECT_GT(low.metrics.totalSpillFiles, 0);
+        // Without memory pressure, runs stay in spill memory: nothing reaches
+        // disk, so neither totalBytesEvicted nor totalSpillFiles moves, while
+        // sealSpillTime records the in-memory spills.
+        EXPECT_GT(low.metrics.sealSpillTime, 0);
+        EXPECT_EQ(low.metrics.totalBytesEvicted, 0);
+        EXPECT_EQ(low.metrics.totalSpillFiles, 0);
+        EXPECT_EQ(high.metrics.sealSpillTime, 0);
         EXPECT_EQ(high.metrics.totalSpillFiles, 0);
-        EXPECT_EQ(write(64 << 10, 64 << 20).metrics.totalSpillFiles, 0);
+        const auto floored = write(64 << 10, 64 << 20, defaultSpillMemory);
+        EXPECT_EQ(floored.metrics.sealSpillTime, 0);
+        EXPECT_EQ(floored.metrics.totalSpillFiles, 0);
+
+        // With spill memory off, the same threshold runs land on disk and both
+        // disk-spill metrics count them.
+        const auto lowDisk = write(64 << 10, 0, 0);
+        EXPECT_GT(lowDisk.metrics.totalBytesEvicted, 0);
+        EXPECT_GT(lowDisk.metrics.totalSpillFiles, 0);
+        const auto highDisk = write(std::numeric_limits<int64_t>::max(), 0, 0);
+        EXPECT_EQ(highDisk.metrics.totalBytesEvicted, 0);
+        EXPECT_EQ(highDisk.metrics.totalSpillFiles, 0);
+        const auto flooredDisk = write(64 << 10, 64 << 20, 0);
+        EXPECT_EQ(flooredDisk.metrics.totalBytesEvicted, 0);
+        EXPECT_EQ(flooredDisk.metrics.totalSpillFiles, 0);
       }
     }
   }

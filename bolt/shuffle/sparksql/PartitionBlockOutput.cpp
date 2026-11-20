@@ -464,8 +464,15 @@ void PartialSpiller::mergeToDataFile(
   metrics.totalEvictTime = 0;
   for (auto* spiller : spillers) {
     spiller->spill_.remove();
-    metrics.totalBytesEvicted += spiller->spill_.bytesWritten();
-    metrics.totalSpillFiles += spiller->numSpills_;
+    const int64_t bytesOnDisk = spiller->spill_.bytesWritten();
+    metrics.totalBytesEvicted += bytesOnDisk;
+    const auto& starts = spiller->spillStarts_;
+    metrics.totalSpillFiles += static_cast<int64_t>(
+        std::lower_bound(
+            starts.begin(),
+            starts.end(),
+            static_cast<uint64_t>(bytesOnDisk)) -
+        starts.begin());
     metrics.totalEvictTime +=
         static_cast<int64_t>(spiller->spill_.writeTimeNs());
   }
