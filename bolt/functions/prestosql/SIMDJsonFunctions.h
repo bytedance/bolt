@@ -49,7 +49,7 @@ namespace bytedance::bolt::functions {
 struct ParserContext {
  public:
   explicit ParserContext() noexcept;
-  explicit ParserContext(const char* data, size_t length) noexcept
+  explicit ParserContext(const char* data, size_t length)
       : padded_json(makePaddedJson(data, length)) {}
   void parseElement() {
     jsonEle = domParser().parse(padded_json);
