@@ -497,6 +497,12 @@ struct VectorWriter<Variant> : public VectorWriterBase {
     variantVector_->setNull(offset_, true);
   }
 
+  void finalizeNull() override {
+    // Discard partial value/metadata without committing the rejected row.
+    valueWriter_.finalizeNull();
+    metadataWriter_.finalizeNull();
+  }
+
   void commit(bool isSet) override {
     if (LIKELY(isSet)) {
       commit();

@@ -35,6 +35,8 @@
 #include <memory>
 
 #include "bolt/expression/VectorWriters.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/type/OpaqueCustomTypes.h"
@@ -930,6 +932,36 @@ TEST_F(ArrayWriterTest, writeThenCommitNullVarchar) {
   auto expected = makeArrayVector<StringView>(expectedData);
   expected->setNull(0, true);
   assertEqualVectors(result, expected);
+}
+
+TEST_F(ArrayWriterTest, writeThenCommitNullVariant) {
+  auto result = prepareResult(ARRAY(VARIANT()), 2);
+  exec::VectorWriter<Array<Variant>> writer;
+  writer.init(*result->as<ArrayVector>());
+
+  {
+    writer.setOffset(0);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item().copy_from(
+        VariantValue{StringView("v1"), StringView("m1")});
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item().copy_from(
+        VariantValue{StringView("v2"), StringView("m2")});
+    writer.commit();
+  }
+  writer.finish();
+
+  auto* arrays = result->as<ArrayVector>();
+  auto* variants = arrays->elements()->as<VariantVector>();
+  ASSERT_EQ(arrays->sizeAt(1), 1);
+  auto variant = variants->valueAt(arrays->offsetAt(1));
+  EXPECT_EQ(variant.value.getString(), "v2");
+  EXPECT_EQ(variant.metadata.getString(), "m2");
 }
 
 // ArrayWriter should append and not overwrite elements vectors.

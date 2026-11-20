@@ -40,6 +40,8 @@
 #include <bolt/vector/DecodedVector.h>
 #include <bolt/vector/SelectivityVector.h>
 #include "bolt/expression/VectorWriters.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/type/StringView.h"
@@ -230,6 +232,39 @@ TEST_F(MapWriterTest, writeThenCommitNullVarchar) {
   auto expectedVector = makeMapVector<StringView, StringView>({{}, expected});
   expectedVector->setNull(0, true);
   assertEqualVectors(result, expectedVector);
+}
+
+TEST_F(MapWriterTest, writeThenCommitNullVariant) {
+  auto result = prepareResult(
+      std::make_shared<MapType>(MapType(BIGINT(), VARIANT())), 2);
+  exec::VectorWriter<Map<int64_t, Variant>> writer;
+  writer.init(*result->as<MapVector>());
+
+  {
+    writer.setOffset(0);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter = 1;
+    valueWriter.copy_from(VariantValue{StringView("v1"), StringView("m1")});
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& mapWriter = writer.current();
+    auto [keyWriter, valueWriter] = mapWriter.add_item();
+    keyWriter = 2;
+    valueWriter.copy_from(VariantValue{StringView("v2"), StringView("m2")});
+    writer.commit();
+  }
+  writer.finish();
+
+  auto* maps = result->as<MapVector>();
+  auto* variants = maps->mapValues()->as<VariantVector>();
+  ASSERT_EQ(maps->sizeAt(1), 1);
+  auto variant = variants->valueAt(maps->offsetAt(1));
+  EXPECT_EQ(variant.value.getString(), "v2");
+  EXPECT_EQ(variant.metadata.getString(), "m2");
 }
 
 TEST_F(MapWriterTest, writeThenCommitNullNestedInRow) {
