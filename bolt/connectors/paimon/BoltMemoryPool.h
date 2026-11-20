@@ -17,8 +17,11 @@
 #pragma once
 
 #include <paimon/memory/memory_pool.h>
+#include <atomic>
+#include "bolt/common/io/IoStatistics.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/core/ExpressionEvaluator.h"
+#include "bolt/dwio/common/Statistics.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -35,6 +38,27 @@ class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
 
   core::ExpressionEvaluator* getExpressionEvaluator() const {
     return expressionEvaluator_;
+  }
+
+  // Paimon forwards the memory pool to every file reader. Keep their statistics
+  // in the same query scope.
+  const std::shared_ptr<io::IoStatistics>& ioStats() const {
+    return ioStats_;
+  }
+
+  // Only aggregate RG selection counters. Task statistics may read them while
+  // the driver configures readers. Signed deltas account for predicate changes.
+  void addRuntimeStats(const dwio::common::RuntimeStatistics& stats) {
+    processedStrides_.fetch_add(
+        stats.processedStrides, std::memory_order_relaxed);
+    skippedStrides_.fetch_add(stats.skippedStrides, std::memory_order_relaxed);
+  }
+
+  dwio::common::RuntimeStatistics runtimeStats() const {
+    dwio::common::RuntimeStatistics stats;
+    stats.processedStrides = processedStrides_.load(std::memory_order_relaxed);
+    stats.skippedStrides = skippedStrides_.load(std::memory_order_relaxed);
+    return stats;
   }
 
   void* Malloc(uint64_t size, uint64_t alignment) override {
@@ -79,6 +103,10 @@ class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
  private:
   memory::MemoryPool* const pool_;
   core::ExpressionEvaluator* const expressionEvaluator_;
+  const std::shared_ptr<io::IoStatistics> ioStats_{
+      std::make_shared<io::IoStatistics>()};
+  std::atomic<int64_t> processedStrides_{0};
+  std::atomic<int64_t> skippedStrides_{0};
 };
 
 } // namespace bytedance::bolt::connector::paimon

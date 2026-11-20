@@ -28,6 +28,7 @@
 #include <unordered_set>
 #include <utility>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
@@ -352,6 +353,73 @@ PaimonDataSource::PaimonDataSource(
 
 PaimonDataSource::~PaimonDataSource() = default;
 
+uint64_t PaimonDataSource::getCompletedBytes() {
+  return paimonPool_->ioStats()->rawBytesRead();
+}
+
+std::vector<uint64_t> PaimonDataSource::getCompletedBytesReads() {
+  return paimonPool_->ioStats()->rawBytesReads();
+}
+
+std::vector<uint64_t> PaimonDataSource::getCompletedCntReads() {
+  return paimonPool_->ioStats()->cntReads();
+}
+
+std::vector<uint64_t> PaimonDataSource::getCompletedScanTimeReads() {
+  return paimonPool_->ioStats()->scanTimeReads();
+}
+
+std::unordered_map<std::string, RuntimeCounter>
+PaimonDataSource::runtimeStats() {
+  auto stats = paimonPool_->runtimeStats();
+  auto& ioStats = *paimonPool_->ioStats();
+  std::unordered_map<std::string, RuntimeCounter> result{
+      {"processedStrides", RuntimeCounter(stats.processedStrides)},
+      {"skippedStrides", RuntimeCounter(stats.skippedStrides)},
+      {"rawBytesRead",
+       RuntimeCounter(ioStats.rawBytesRead(), RuntimeCounter::Unit::kBytes)},
+      {"totalScanTime",
+       RuntimeCounter(ioStats.totalScanTime(), RuntimeCounter::Unit::kNanos)},
+      // BufferedInput records planned synchronous reads in microseconds.
+      {"ioWaitWallNanos",
+       RuntimeCounter(
+           ioStats.queryThreadIoLatency().sum() * 1000,
+           RuntimeCounter::Unit::kNanos)},
+      // TableScan's existing histogram logging requires this key. The SDK
+      // provides no native merge timing, so retain the compatibility zero.
+      {"totalMergeTime", RuntimeCounter(0, RuntimeCounter::Unit::kNanos)},
+      {"loadMetaDataTime",
+       RuntimeCounter(
+           ioStats.loadFileMetaDataTimeNs(), RuntimeCounter::Unit::kNanos)},
+      {"totalRemainingFilterTime",
+       RuntimeCounter(
+           totalRemainingFilterTimeNs_.load(std::memory_order_relaxed),
+           RuntimeCounter::Unit::kNanos)},
+      {"overreadBytes",
+       RuntimeCounter(
+           ioStats.rawOverreadBytes(), RuntimeCounter::Unit::kBytes)}};
+  const auto& readStats = ioStats.readStats();
+  size_t bucket = 0;
+  for (const auto* suffix : {"<4k", "<32k", "<128k", ">=128k"}) {
+    result.emplace(
+        std::string("rawBytesRead") + suffix,
+        RuntimeCounter(
+            readStats.rawBytesReads_[bucket].load(std::memory_order_relaxed),
+            RuntimeCounter::Unit::kBytes));
+    result.emplace(
+        std::string("cntRead") + suffix,
+        RuntimeCounter(
+            readStats.cntReads_[bucket].load(std::memory_order_relaxed)));
+    result.emplace(
+        std::string("totalTimeRead") + suffix,
+        RuntimeCounter(
+            readStats.totalTimeReads_[bucket].load(std::memory_order_relaxed),
+            RuntimeCounter::Unit::kNanos));
+    ++bucket;
+  }
+  return result;
+}
+
 void PaimonDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
   auto paimonConnectorSplit =
       std::dynamic_pointer_cast<PaimonConnectorSplit>(split);
@@ -501,10 +569,18 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
 vector_size_t PaimonDataSource::evaluateRemainingFilter(
     RowVectorPtr& rowVector) {
   filterRows_.resizeFill(rowVector->size());
-  expressionEvaluator_->evaluate(
-      remainingFilterExprSet_.get(), filterRows_, *rowVector, filterResult_);
-  return exec::processFilterResults(
-      filterResult_, filterRows_, filterEvalCtx_, pool_);
+  uint64_t elapsedNanos = 0;
+  vector_size_t result;
+  {
+    NanosecondTimer timer(&elapsedNanos);
+    expressionEvaluator_->evaluate(
+        remainingFilterExprSet_.get(), filterRows_, *rowVector, filterResult_);
+    result = exec::processFilterResults(
+        filterResult_, filterRows_, filterEvalCtx_, pool_);
+  }
+  totalRemainingFilterTimeNs_.fetch_add(
+      elapsedNanos, std::memory_order_relaxed);
+  return result;
 }
 
 } // namespace bytedance::bolt::connector::paimon
