@@ -196,6 +196,14 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         return ::paimon::BatchReader::MakeEofBatch();
       }
 
+      // Materialize top-level constants once so array and schema export share
+      // the flat vectors instead of flattening them separately.
+      for (auto& child : result->asUnchecked<RowVector>()->children()) {
+        if (child->isConstantEncoding()) {
+          BaseVector::flattenVector(child);
+        }
+      }
+
       // LOG(INFO) << "NextBatch: result has type " <<
       // result->type()->toString(); LOG(INFO) << "NextBatch: number of rows in
       // batch = " << result->size();
@@ -204,6 +212,9 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       auto arrowSchema = std::make_unique<::ArrowSchema>();
 
       ArrowOptions opts;
+      // Paimon's residual predicate filter cannot convert run-end encoded
+      // arrays to literals, so export constant columns as plain Arrow arrays.
+      opts.flattenConstant = true;
       opts.timestampUnit = static_cast<TimestampUnit>(timestampPrecision_);
       exportToArrow(result, *arrowArray, pool_, opts);
       exportToArrow(result, *arrowSchema, opts);

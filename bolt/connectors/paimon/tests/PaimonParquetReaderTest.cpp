@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 #include <paimon/fs/file_system_factory.h>
 #include <paimon/predicate/literal.h>
@@ -532,6 +533,52 @@ std::unique_ptr<::paimon::FileBatchReader> openReader(
   auto readerRes = builder->Build(parquetPath);
   EXPECT_TRUE(readerRes.ok()) << readerRes.status().message();
   return std::move(readerRes).value();
+}
+
+// All-null numeric columns are returned as constant vectors by the Parquet
+// reader. Paimon's residual predicate filter requires a plain Arrow value type.
+TEST_F(PaimonParquetReaderTest, AllNullBigintExportsPlainArrowType) {
+  constexpr int32_t kRows = 37;
+  constexpr int32_t kBatchSize = 16;
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      BaseVector::createNullConstant(BIGINT(), kRows, leafPool_.get()),
+  });
+  auto path = tempPath("paimon_parquet_all_null_bigint.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+
+  auto reader = openReader(path, kBatchSize, leafPool_.get());
+  vector_size_t totalRows = 0;
+  while (true) {
+    auto batchRes = reader->NextBatch();
+    ASSERT_TRUE(batchRes.ok()) << batchRes.status().ToString();
+    if (::paimon::BatchReader::IsEofBatch(batchRes.value())) {
+      break;
+    }
+    auto pair = std::move(batchRes).value();
+    auto releaseBatch = folly::makeGuard([&]() {
+      if (pair.first->release) {
+        pair.first->release(pair.first.get());
+      }
+      if (pair.second->release) {
+        pair.second->release(pair.second.get());
+      }
+    });
+    // BIGINT must be exported as int64 ("l"), rather than run-end encoded
+    // ("+r"), so Paimon's literal converter can evaluate predicates on it.
+    ASSERT_STREQ(pair.second->children[1]->format, "l");
+    auto batch = std::dynamic_pointer_cast<RowVector>(
+        importFromArrowAsOwner(*pair.second, *pair.first, {}, leafPool_.get()));
+    ASSERT_NE(batch, nullptr);
+    for (vector_size_t row = 0; row < batch->size(); ++row) {
+      EXPECT_TRUE(data->equalValueAt(batch.get(), totalRows + row, row));
+    }
+    totalRows += batch->size();
+  }
+  EXPECT_EQ(totalRows, kRows);
+  reader->Close();
 }
 
 // ---- GetPreviousBatchFirstRowNumber tests
