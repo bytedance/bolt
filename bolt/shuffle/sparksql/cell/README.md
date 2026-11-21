@@ -37,9 +37,9 @@ The rule is the same under every partitioning. Single and round-robin
 partitioning never pick the row-based writer and, where Cell is not chosen,
 write V1 whatever type is forced, as before.
 
-`useCellShuffle()` in Options.h is the one rule the writer and both
-readers follow. A job that sets `preferCellShuffle` writes Cell for its
-single and round-robin exchanges too, so their readers must be
+`useCellShuffle()` in Options.h is the one rule the writer and
+`SparkShuffleReaderNode` follow. A job that sets `preferCellShuffle` writes
+Cell for its single and round-robin exchanges too, so their readers must be
 `SparkShuffleReaderNode` as well.
 
 The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
@@ -157,22 +157,31 @@ push channel.
 ### Read
 
 ```text
-partition bytes --> CellShuffleReader --> block kind
-                                            |
-                  +-------------------------+---------------------+
-                  |                         |                     |
-           flat / adapter                 nested             CompositeRows
-                  |                         |                     |
-          CellPayloadDecoder       CellNestedAssembler     CompositeRowVector
-                  |                 (decoder per space)
-                  +-------------+-----------+
-                                |
+ReaderStreamIterator
+    |
+CompositeShuffleReader (ShuffleStreamCursor + CodecDecompressor)
+    +-- kCompositeRows --> RowBlockReader --> CompositeRowVector
+    |
+    +-- kCellPayload --> CellShuffleReader
+                           /          \
+                  flat / adapter     nested
+                        |              |
+               CellPayloadDecoder  CellNestedAssembler
+              (+ adapter unpack)   (decoder per space)
+                           \          /
                          RowVector batches
 ```
 
-The adapter unpacks its binary column after decoding. Nested assembly
-reconstructs ARRAY, MAP and ROW vectors. Batches contain at most `batchSize`
-rows, and composite rows are never mixed with payload rows.
+- `CompositeShuffleReader` reads streams through `ShuffleStreamCursor`,
+  decompresses via `CodecDecompressor`, and decodes `kCompositeRows` blocks
+  into `CompositeRowVector` batches via `RowBlockReader`.
+- `CellShuffleReader` handles `kCellPayload` blocks: `CellPayloadDecoder`
+  (followed by `CellShuffleTypeAdapter::unpack` when adapted) for flat and
+  adapted schemas, or `CellNestedAssembler` for nested layouts.
+- A payload is read and decompressed whole, then emitted in batches bounded
+  by `batchSize` and `shuffleBatchByteSize`: large payloads split across
+  batches, small payloads combine into one, and composite rows are never
+  mixed with payload rows.
 
 ## 3. Core concepts
 
@@ -570,4 +579,4 @@ output.
 | `CellOutput.h` / `.cpp` | `CellOutput`, `LocalCellOutput` (spill file and merge), `RssCellOutput` (pushes) |
 | `RunCompressor.h` / `.cpp` | Run and null-body compression policy, stream and one-shot forms |
 | `CellPayload.h` / `.cpp` | `CellPayloadDecoder`, null-record expansion, payload pieces the outputs assemble, thresholds |
-| `CellShuffleReader.h` / `.cpp` | The read chain: streams, block kinds, composite rows, batches |
+| `CellShuffleReader.h` / `.cpp` | Cell reader (`CompositeShuffleReader` subclass): `kCellPayload` dispatch, batching, and adapter unpack |
