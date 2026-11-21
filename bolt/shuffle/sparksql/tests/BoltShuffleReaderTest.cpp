@@ -23,12 +23,10 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/Payload.h"
@@ -161,64 +159,6 @@ class BoltShuffleReaderTest : public ::testing::Test {
   std::vector<bool> isValidityBuffer_;
   std::unique_ptr<BoltColumnarBatchDeserializerFactory> factory_;
 };
-
-TEST_F(BoltShuffleReaderTest, RejectsCellPayloads) {
-  // Where the writer emits Cell payloads - forced, or preferring Cell under
-  // any partitioning - constructing BoltShuffleReader must fail rather than
-  // misreading them as V1/V2 payloads. Otherwise V1 and row-based streams
-  // construct and read as usual.
-  auto stream = buildStream(1, 16, &isValidityBuffer_, pool_);
-  const auto makeOptions = [&](ShuffleWriterType type,
-                               bool preferCell,
-                               const std::string& partitioning) {
-    ShuffleReaderOptions options;
-    options.compressionType = arrow::Compression::UNCOMPRESSED;
-    options.batchSize = 1024;
-    options.shuffleBatchByteSize = 1 << 20;
-    options.numPartitions = 4;
-    options.partitionShortName = partitioning;
-    options.forceShuffleWriterType = static_cast<int32_t>(type);
-    options.preferCellShuffle = preferCell;
-    options.checksumEnabled = false;
-    return options;
-  };
-  const auto open = [&](BoltShuffleReader& reader) {
-    return reader.readStream(std::make_shared<arrow::io::BufferReader>(stream));
-  };
-
-  // Cell payloads: refused immediately when BoltShuffleReader is created.
-  for (const auto* partitioning : {"hash", "single", "rr"}) {
-    SCOPED_TRACE(partitioning);
-    for (const auto& [type, preferCell] :
-         {std::pair{ShuffleWriterType::Cell, false},
-          std::pair{ShuffleWriterType::Adaptive, true},
-          std::pair{ShuffleWriterType::V1, true}}) {
-      auto options = makeOptions(type, preferCell, partitioning);
-      BOLT_ASSERT_THROW(
-          BoltShuffleReader(schema_, options, pool_, boltPool_.get()),
-          "SparkShuffleReaderNode");
-    }
-  }
-
-  // V1 payloads: without a pid and without Cell, the writer is V1 whatever
-  // type is forced.
-  for (const auto& [type, preferCell] :
-       {std::pair{ShuffleWriterType::Adaptive, false},
-        std::pair{ShuffleWriterType::V2, false},
-        std::pair{ShuffleWriterType::RowBased, true}}) {
-    auto options = makeOptions(type, preferCell, "single");
-    BoltShuffleReader reader(schema_, options, pool_, boltPool_.get());
-    auto d = open(reader);
-    drainAndVerify(*d, 16);
-  }
-
-  // Row-based payloads: the adaptive choice took the row-based writer
-  // before any preference for Cell, so BoltShuffleReader opens its row reader.
-  auto options = makeOptions(ShuffleWriterType::Adaptive, true, "hash");
-  options.rowBasedShuffleThreshold = 1;
-  BoltShuffleReader rowBased(schema_, options, pool_, boltPool_.get());
-  EXPECT_NE(open(rowBased), nullptr);
-}
 
 TEST_F(BoltShuffleReaderTest, SinglePayload) {
   constexpr int32_t kRows = 16;

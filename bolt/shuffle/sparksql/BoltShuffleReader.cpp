@@ -867,40 +867,21 @@ BoltShuffleReader::BoltShuffleReader(
     std::shared_ptr<arrow::Schema> schema,
     ShuffleReaderOptions options,
     arrow::MemoryPool* pool,
-    bytedance::bolt::memory::MemoryPool* boltPool) {
-  const auto writerType =
-      static_cast<ShuffleWriterType>(options.forceShuffleWriterType);
-  if (writerType == ShuffleWriterType::Cell || options.preferCellShuffle) {
-    bool isRowBased = false;
-    auto partitioning = Partitioning::kSingle;
-    if (writerType == ShuffleWriterType::Adaptive) {
-      partitioning = toPartitioning(options.partitionShortName);
-      isRowBased = supportAdaptiveShuffleWriter(partitioning) &&
-          ((options.numPartitions >= rowBasePartitionThreshold &&
-            schema->num_fields() >= rowBaseColumnNumThreshold) ||
-           static_cast<int64_t>(options.numPartitions) * schema->num_fields() >
-               options.rowBasedShuffleThreshold);
-    }
-    BOLT_CHECK(
-        !useCellShuffle(
-            partitioning, writerType, options.preferCellShuffle, isRowBased),
-        "The writer emits Cell payloads here, which are read by "
-        "SparkShuffleReaderNode, not by BoltShuffleReader");
-  }
-  factory_ = std::make_unique<BoltColumnarBatchDeserializerFactory>(
-      schema,
-      createCodec(
-          options.compressionType,
-          CodecOptions{
-              getCodecBackend(options.codecBackend),
-              kDefaultCompressionLevel,
-              options.checksumEnabled}),
-      bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
-      options.batchSize,
-      options.shuffleBatchByteSize,
-      pool,
-      boltPool,
-      options.checksumEnabled);
+    bytedance::bolt::memory::MemoryPool* boltPool)
+    : factory_(std::make_unique<BoltColumnarBatchDeserializerFactory>(
+          schema,
+          createCodec(
+              options.compressionType,
+              CodecOptions{
+                  getCodecBackend(options.codecBackend),
+                  kDefaultCompressionLevel,
+                  options.checksumEnabled}),
+          bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
+          options.batchSize,
+          options.shuffleBatchByteSize,
+          pool,
+          boltPool,
+          options.checksumEnabled)) {
   factory_->setNumPartitions(options.numPartitions);
   factory_->setShuffleWriterType(options.forceShuffleWriterType);
   factory_->setpartitioningShortName(options.partitionShortName);

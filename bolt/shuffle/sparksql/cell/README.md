@@ -68,9 +68,8 @@ writers.
 
 Reader side (`ShuffleReaderOptions`): the Cell reader is used by
 `SparkShuffleReaderNode` when the same rule picks Cell from the reader's
-`forceShuffleWriterType` and `preferCellShuffle`. `BoltShuffleReader`
-refuses these configurations with a check. The reader takes `compressionType`,
-`batchSize` and `shuffleBatchByteSize` as usual.
+`forceShuffleWriterType` and `preferCellShuffle`. The reader takes
+`compressionType`, `batchSize` and `shuffleBatchByteSize` as usual.
 
 Settings that must match on both sides, because the payloads do not record
 them:
