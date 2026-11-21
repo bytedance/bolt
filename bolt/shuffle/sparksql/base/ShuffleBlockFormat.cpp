@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
 
 #include <folly/Portability.h>
 #include <algorithm>

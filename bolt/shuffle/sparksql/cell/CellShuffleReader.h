@@ -17,7 +17,7 @@
 #pragma once
 
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
-#include "bolt/shuffle/sparksql/block/CompositeShuffleReader.h"
+#include "bolt/shuffle/sparksql/base/CompositeShuffleReader.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"

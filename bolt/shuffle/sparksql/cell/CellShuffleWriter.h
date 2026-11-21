@@ -22,7 +22,7 @@
 
 #include "bolt/vector/ComplexVector.h"
 
-#include "bolt/shuffle/sparksql/block/CompositeShuffleWriter.h"
+#include "bolt/shuffle/sparksql/base/CompositeShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/block/CompositeShuffleReader.h"
+#include "bolt/shuffle/sparksql/base/CompositeShuffleReader.h"
 
 #include <algorithm>
 #include <limits>

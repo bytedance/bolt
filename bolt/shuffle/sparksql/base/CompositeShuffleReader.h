@@ -22,7 +22,7 @@
 
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
-#include "bolt/shuffle/sparksql/block/ShuffleBlockReader.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockReader.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/block/PartitionBlockOutput.h"
+#include "bolt/shuffle/sparksql/base/PartitionBlockOutput.h"
 
 #include <unistd.h>
 #include <algorithm>

@@ -119,7 +119,7 @@
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
 #include "bolt/type/Type.h"
 
 /// Starts a hot Cell kernel on a cache line. Its loops then keep their

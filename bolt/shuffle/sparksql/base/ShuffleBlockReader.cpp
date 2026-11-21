@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/block/ShuffleBlockReader.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockReader.h"
 
 #include <arrow/io/interfaces.h>
 #include <folly/ScopeGuard.h>
