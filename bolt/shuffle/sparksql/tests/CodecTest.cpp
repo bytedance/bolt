@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/StreamCodec.h"
 
@@ -762,8 +764,10 @@ TEST(StreamFrameTest, matchesOneShotFrame) {
         // Independent blocks: no dictionary across blocks, a little larger
         // past one block, and read back the same way.
         CodecOptions independent = options;
-        independent.independentBlocks = true;
+        independent.useIndependentBlocks = true;
+        independent.blockSize = 256 << 10;
         auto blockCompressor = StreamCompressor::create(type, independent);
+        EXPECT_EQ(blockCompressor->recommendedInputSize(), 256 << 10);
         std::vector<uint8_t> blocks;
         for (int64_t at = 0; at < size;) {
           const int64_t piece = std::min<int64_t>(256 << 10, size - at);
@@ -800,6 +804,90 @@ TEST(StreamFrameTest, matchesOneShotFrame) {
       EXPECT_EQ(decoded, input);
     }
   }
+}
+
+TEST(StreamFrameTest, lz4BlockSizeAndFrameState) {
+  const std::string payload(128 << 10, 'a');
+  const auto* data = reinterpret_cast<const uint8_t*>(payload.data());
+  const auto size = static_cast<int64_t>(payload.size());
+  auto codec = Codec::create(CodecType::LZ4_FRAME, CodecOptions{});
+
+  const std::vector<std::pair<int64_t, int64_t>> validSizes = {
+      {0, 64 << 10},
+      {1, 64 << 10},
+      {64 << 10, 64 << 10},
+      {128 << 10, 256 << 10},
+      {256 << 10, 256 << 10},
+      {1 << 20, 1 << 20},
+      {4 << 20, 4 << 20},
+  };
+  for (const auto& [requested, expected] : validSizes) {
+    CodecOptions options;
+    options.useIndependentBlocks = true;
+    options.blockSize = requested;
+    auto compressor = StreamCompressor::create(CodecType::LZ4_FRAME, options);
+    EXPECT_EQ(compressor->recommendedInputSize(), expected);
+  }
+
+  {
+    CodecOptions options;
+    options.blockSize = -1;
+    BOLT_ASSERT_THROW(
+        StreamCompressor::create(CodecType::LZ4_FRAME, options),
+        "non-negative");
+  }
+  {
+    CodecOptions options;
+    options.blockSize = (int64_t{4} << 20) + 1;
+    BOLT_ASSERT_THROW(
+        StreamCompressor::create(CodecType::LZ4_FRAME, options),
+        "exceeds maximum supported size");
+  }
+
+  CodecOptions options;
+  options.useIndependentBlocks = true;
+  options.blockSize = 256 << 10;
+  auto compressor = StreamCompressor::create(CodecType::LZ4_FRAME, options);
+  std::vector<uint8_t> out(compressor->recommendedOutputSize(size));
+
+  // kNotStarted -> reset() -> still kNotStarted.
+  compressor->reset();
+
+  // kNotStarted -> kInProgress -> reset() mid-frame aborts cleanly.
+  auto partial = compressor->compress(data, 4096, out.data(), out.size());
+  EXPECT_EQ(partial.bytesRead, 4096);
+  compressor->reset();
+
+  // Full frame after mid-frame reset: kNotStarted -> kInProgress -> kEnded.
+  auto writeAndVerifyFrame = [&] {
+    std::vector<uint8_t> frame;
+    auto res = compressor->compress(data, size, out.data(), out.size());
+    ASSERT_EQ(res.bytesRead, size);
+    frame.insert(frame.end(), out.begin(), out.begin() + res.bytesWritten);
+    auto end = compressor->end(out.data(), out.size());
+    ASSERT_TRUE(end.noMoreOutput);
+    frame.insert(frame.end(), out.begin(), out.begin() + end.bytesWritten);
+    std::string decoded(payload.size(), '\0');
+    EXPECT_EQ(
+        codec->decompress(
+            frame.data(),
+            static_cast<int64_t>(frame.size()),
+            reinterpret_cast<uint8_t*>(decoded.data()),
+            size),
+        size);
+    EXPECT_EQ(decoded, payload);
+  };
+
+  writeAndVerifyFrame();
+
+  // Writing again in kEnded state without reset() fails.
+  BOLT_ASSERT_THROW(
+      compressor->compress(data, 16, out.data(), out.size()),
+      "frame has already ended");
+
+  // kEnded -> reset() -> kNotStarted reuses context for the next frame.
+  compressor->reset();
+  writeAndVerifyFrame();
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

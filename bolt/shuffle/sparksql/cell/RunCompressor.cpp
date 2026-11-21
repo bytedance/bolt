@@ -96,7 +96,8 @@ RunCompressor::RunCompressor(
     // Independent blocks: the stage is reused for every block, so a linked
     // block would compress against a copied-aside dictionary.
     auto streamOptions = codecOptions;
-    streamOptions.independentBlocks = true;
+    streamOptions.useIndependentBlocks = true;
+    streamOptions.blockSize = kStreamPieceBytes;
     streamCompressor = StreamCompressor::create(
         fromArrowCodecType(options.compressionType), streamOptions);
   } catch (const std::exception&) {

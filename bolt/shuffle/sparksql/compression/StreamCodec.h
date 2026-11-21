@@ -104,8 +104,11 @@ class StreamCompressor {
   bool checksumEnabled() const {
     return options_.checksumEnabled;
   }
-  bool independentBlocks() const {
-    return options_.independentBlocks;
+  bool useIndependentBlocks() const {
+    return options_.useIndependentBlocks;
+  }
+  int64_t blockSize() const {
+    return options_.blockSize;
   }
 
  private:

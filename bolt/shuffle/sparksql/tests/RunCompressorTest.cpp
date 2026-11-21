@@ -242,7 +242,8 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
         CodecBackend::NONE,
         partitionOptions_.compressionLevel,
         partitionOptions_.checksumEnabled,
-        /*independentBlocks=*/true};
+        /*useIndependentBlocks=*/true,
+        /*blockSize=*/256 << 10};
     return StreamCompressor::create(type, codecOptions);
   };
   std::mt19937_64 rng(19);
