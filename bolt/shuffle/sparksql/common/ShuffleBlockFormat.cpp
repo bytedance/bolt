@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <limits>
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
@@ -28,6 +27,8 @@
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+
+static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
 
 namespace {
 
@@ -72,7 +73,7 @@ char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
 }
 
 char* resetBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
-  if (buffer == nullptr || size > buffer->capacity()) {
+  if (buffer == nullptr || !buffer->unique() || size > buffer->capacity()) {
     buffer.reset();
     if (size == 0) {
       return nullptr;
@@ -97,12 +98,10 @@ void appendBytes(
 }
 
 void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool) {
-  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
   appendBytes(out, &value, sizeof(value), pool);
 }
 
 void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool) {
-  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
   appendBytes(out, &value, sizeof(value), pool);
 }
 
@@ -116,18 +115,20 @@ void buildRowBlock(
     BufferPtr& compressedBuffer,
     memory::MemoryPool* pool,
     uint64_t& compressTimeNs) {
-  BOLT_CHECK_LE(
-      numRows,
-      std::numeric_limits<uint32_t>::max(),
-      "too many rows for one row block");
+  BOLT_CHECK_GT(numRows, 0, "row block must contain at least one row");
+  BOLT_CHECK_LE(numRows, kMaxBlockRows, "too many rows for one row block");
   resetBuffer(block, checkedPlus<size_t>(kRowBlockHeaderBytes, rawBytes), pool);
   char* body = block->asMutable<char>() + kRowBlockHeaderBytes;
   uint64_t offset = 0;
   for (size_t i = 0; i < numRows; ++i) {
-    const uint64_t bytes = framedRowBytes(rows[i]);
+    const int32_t rowSize = framedRowSize(rows[i]);
+    BOLT_CHECK_GE(rowSize, 0, "negative framed row size");
+    const uint64_t bytes = sizeof(int32_t) + static_cast<uint64_t>(rowSize);
+    BOLT_CHECK_LE(bytes, rawBytes - offset, "row block size overflow");
     ::memcpy(body + offset, rows[i], bytes);
     offset += bytes;
   }
+  BOLT_CHECK_EQ(offset, rawBytes, "row block size mismatch");
 
   // Compressed when the codec shrinks the body, else stored as is.
   RowBlockHeader header{

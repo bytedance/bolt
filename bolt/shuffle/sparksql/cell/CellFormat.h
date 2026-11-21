@@ -119,7 +119,6 @@
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
 #include "bolt/type/Type.h"
 
@@ -139,7 +138,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 inline constexpr uint32_t kCacheLineBytes = 64;
 
 /// Fixed payload header length, after the CellBlockKind byte. Unlike
-/// kCompositeBlockHeaderBytes, it does not count that byte.
+/// kRowBlockHeaderBytes, it does not count that byte.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 
 /// Most rows one partition gathers in a window, and so one payload holds.
@@ -220,21 +219,6 @@ enum class NullTag : uint8_t {
 /// What a block of a Cell shuffle stream holds: every block on the wire - a
 /// ColumnarPayload or a CompositeRows block - starts with this byte.
 using CellBlockKind = ShuffleBlockKind;
-
-/// CompositeRows header length (counting the kind byte); see
-/// ShuffleBlockFormat.h.
-inline constexpr uint64_t kCompositeBlockHeaderBytes = kRowBlockHeaderBytes;
-
-/// The size prefix of a CompositeRows row. Rows lie back to back, so the
-/// prefix is in general unaligned.
-inline int32_t compositeRowSize(const void* row) {
-  return framedRowSize(row);
-}
-
-/// Bytes of a CompositeRows row with its size prefix.
-inline uint64_t compositeRowBytes(const void* row) {
-  return framedRowBytes(row);
-}
 
 /// How one stream's bytes are produced and parsed.
 enum class StreamKind : uint8_t {
