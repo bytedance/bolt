@@ -108,6 +108,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// partition2RowCount_ for the configured partitioning (single, round-robin,
   /// or leading INTEGER pid column).
   arrow::Status computePartitions(const RowVector& rv);
+
   memory::MemoryPool* const boltPool_;
   /// Shared by the two paths, which never split at the same time. A reclaim
   /// inside a split goes to its active side; composite flushes wait for it.

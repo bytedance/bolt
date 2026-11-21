@@ -17,8 +17,10 @@
 #include "bolt/shuffle/sparksql/common/ShuffleBlockReader.h"
 
 #include <arrow/io/interfaces.h>
+#include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/MemoryCopy.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 
@@ -153,21 +155,23 @@ void RowBlockReader::read(
   }
 
   if (layout == RunLayout::kCombined) {
+    if (stored == 0) {
+      BOLT_FAIL(
+          "malformed {} shuffle block: {} block decompression failed",
+          blockLabel,
+          blockLabel);
+    }
     resetBuffer(compressed_, stored, pool_);
-    if (stored > 0 && !in.read(compressed_->asMutable<char>(), stored)) {
+    if (!in.read(compressed_->asMutable<char>(), stored)) {
       BOLT_FAIL(
           "malformed {} shuffle block: truncated {} block body",
           blockLabel,
           blockLabel);
     }
-    const uint8_t* storedData =
-        stored > 0 ? compressed_->as<uint8_t>() : nullptr;
     resetBuffer(out.buffer, decodedBytes, pool_);
-    uint8_t* decodedData =
-        decodedBytes > 0 ? out.buffer->asMutable<uint8_t>() : nullptr;
-    if (stored == 0 ||
-        !decompressor_->decompress(
-            {storedData, stored}, {decodedData, decodedBytes})) {
+    if (!decompressor_->decompress(
+            {compressed_->as<uint8_t>(), stored},
+            {out.buffer->asMutable<uint8_t>(), decodedBytes})) {
       BOLT_FAIL(
           "malformed {} shuffle block: {} block decompression failed",
           blockLabel,
@@ -175,7 +179,7 @@ void RowBlockReader::read(
     }
   } else {
     resetBuffer(out.buffer, stored, pool_);
-    if (stored > 0 && !in.read(out.buffer->asMutable<char>(), stored)) {
+    if (!in.read(out.buffer->asMutable<char>(), stored)) {
       BOLT_FAIL(
           "malformed {} shuffle block: truncated {} block body",
           blockLabel,
@@ -183,9 +187,14 @@ void RowBlockReader::read(
     }
   }
 
-  const char* body = decodedBytes > 0 ? out.buffer->as<char>() : nullptr;
-  std::vector<std::string_view> rows;
-  rows.reserve(rowCount);
+  const char* body = out.buffer->as<char>();
+  bool ok = false;
+  SCOPE_EXIT {
+    if (!ok) {
+      out.rows.clear();
+    }
+  };
+  out.rows.reserve(rowCount);
   uint64_t pos = 0;
   for (uint32_t i = 0; i < rowCount; ++i) {
     if (decodedBytes - pos < sizeof(int32_t)) {
@@ -202,7 +211,7 @@ void RowBlockReader::read(
           blockLabel,
           blockLabel);
     }
-    rows.emplace_back(body + pos, static_cast<size_t>(size));
+    out.rows.emplace_back(body + pos, static_cast<size_t>(size));
     pos += size;
   }
   if (pos != decodedBytes) {
@@ -211,7 +220,7 @@ void RowBlockReader::read(
         blockLabel,
         blockLabel);
   }
-  out.rows = std::move(rows);
+  ok = true;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

@@ -22,8 +22,6 @@
 
 #pragma once
 
-#include <cstring>
-#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,7 +31,6 @@
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/shuffle/sparksql/common/ShuffleByteSource.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/type/StringView.h"
 #include "bolt/vector/ComplexVector.h"
 

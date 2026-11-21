@@ -29,10 +29,11 @@
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
 #include "bolt/shuffle/sparksql/common/ShuffleByteSource.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+
+class Codec;
 
 /// Base interface for block-based shuffle readers consumed by
 /// SparkShuffleReader. Only invoked at batch boundaries and close().
@@ -73,7 +74,9 @@ class BlockShuffleReader {
 class StreamByteSource final : public ShuffleByteSource {
  public:
   explicit StreamByteSource(std::shared_ptr<arrow::io::InputStream> in)
-      : in_(std::move(in)) {}
+      : in_(std::move(in)) {
+    BOLT_CHECK_NOT_NULL(in_, "shuffle input stream must not be null");
+  }
 
   bool read(void* out, size_t n) override;
   bool atEnd() override;
@@ -88,7 +91,9 @@ class StreamByteSource final : public ShuffleByteSource {
 /// ShuffleDecompressor over a Codec, metering total decompression time.
 class CodecDecompressor final : public ShuffleDecompressor {
  public:
-  explicit CodecDecompressor(Codec* codec) : codec_(codec) {}
+  explicit CodecDecompressor(Codec* codec) : codec_(codec) {
+    BOLT_CHECK_NOT_NULL(codec_, "shuffle decompressor codec must not be null");
+  }
 
   bool decompress(std::span<const uint8_t> in, std::span<uint8_t> out) override;
 
@@ -112,7 +117,9 @@ class ShuffleStreamCursor {
       const CodecDecompressor* decompressor)
       : streams_(std::move(streams)),
         arrowPool_(arrowPool),
-        decompressor_(decompressor) {}
+        decompressor_(decompressor) {
+    BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
+  }
 
   /// Opens streams until a non-empty stream yields a block kind byte.
   /// Returns false when every stream is exhausted.
