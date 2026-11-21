@@ -2059,7 +2059,9 @@ TEST_F(CellWriterTest, compositeBlockKeepsWireHeader) {
         [&](size_t) { return composite; });
     const auto& bytes = written.partitions[0];
     ASSERT_EQ(bytes.size(), 22 + rawBytes);
-    EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 1);
+    EXPECT_EQ(
+        static_cast<uint8_t>(bytes[0]),
+        static_cast<uint8_t>(ShuffleBlockKind::kCompositeRows));
     EXPECT_EQ(memory::loadUnaligned<uint32_t>(bytes.data() + 1), 2);
     EXPECT_EQ(memory::loadUnaligned<uint64_t>(bytes.data() + 5), rawBytes);
     EXPECT_EQ(memory::loadUnaligned<uint64_t>(bytes.data() + 13), rawBytes);

@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
@@ -297,6 +298,42 @@ TEST_F(CellIntegrationTest, readerLeavesStreamReadsOutOfDeserializeTime) {
   EXPECT_LE(
       streams->deserializeNs + streams->decompressNs + readNs,
       streams->totalReadNs);
+}
+
+TEST_F(CellIntegrationTest, legacyReaderRejectsCellPayload) {
+  // ShuffleBlockKind starts at 0x80 so a legacy V1/V2 reader fed Cell output
+  // fails immediately instead of misinterpreting block bytes.
+  constexpr int32_t kPartitions = 1;
+  auto batch = makeRowVector(
+      {makeFlatVector<int64_t>({1, 2, 3, 4}),
+       makeFlatVector<std::string>({"a", "b", "c", "d"})});
+  const auto type = asRowType(batch->type());
+  const auto input = cell::test::roundRobin({batch}, kPartitions);
+  const auto dir = exec::test::TempDirectoryPath::create();
+  auto writerOptions = cell::test::shuffleOptions(
+      dir->path + "/data",
+      kPartitions,
+      arrow::Compression::LZ4_FRAME,
+      /*rss=*/false);
+  const auto written = cell::test::writeShuffle(writerOptions, input, pool());
+
+  const auto streams = std::make_shared<SlowStreamIterator>(
+      written.partitions, std::chrono::microseconds{0});
+  ShuffleReaderOptions readerOptions;
+  readerOptions.numPartitions = kPartitions;
+  readerOptions.partitionShortName = "hash";
+  readerOptions.forceShuffleWriterType =
+      static_cast<int32_t>(ShuffleWriterType::V2);
+  exec::test::CursorParameters params;
+  params.planNode = std::make_shared<SparkShuffleReaderNode>(
+      "reader", type, readerOptions, streams);
+  params.serialExecution = true;
+  auto cursor = exec::test::TaskCursor::create(params);
+  BOLT_ASSERT_THROW(
+      cursor->moveNext(),
+      fmt::format(
+          "unexpected payload type {}",
+          static_cast<int>(ShuffleBlockKind::kCellPayload)));
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

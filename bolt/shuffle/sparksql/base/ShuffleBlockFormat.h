@@ -38,12 +38,14 @@ inline constexpr uint32_t kMaxBlockRows = (1u << 31) - 1;
 inline constexpr uint64_t kMinCompressBytes = 256;
 
 /// What a block of a block-based shuffle stream holds: every block on the
-/// wire starts with this byte.
+/// wire starts with this byte. Values start at 0x80 so they never collide with
+/// legacy V1/V2 Payload::Type (1..3) or RowVectorLayout (9..12); a mismatched
+/// legacy reader therefore fails immediately instead of misinterpreting bytes.
 enum class ShuffleBlockKind : uint8_t {
-  kCellPayload = 0,
-  kCompositeRows = 1,
+  kCellPayload = 0x80,
+  kCompositeRows = 0x81,
   // TODO: Wire up row-based block shuffle writer/reader using kRows.
-  kRows = 2,
+  kRows = 0x82,
 };
 
 /// Human-readable label for a block kind (used in error diagnostics).

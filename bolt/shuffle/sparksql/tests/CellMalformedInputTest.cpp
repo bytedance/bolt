@@ -1184,7 +1184,9 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
   // The next stream's first block still reports an invalid kind.
   EXPECT_EQ(
       errorOf({bigints, '\x07' + tail}, bigint),
-      "(7 vs. 0) unknown cell shuffle block kind");
+      fmt::format(
+          "(7 vs. {}) unknown cell shuffle block kind",
+          static_cast<int>(ShuffleBlockKind::kCellPayload)));
 }
 
 TEST_F(CellMalformedInputTest, edgesOfTheFormatAreRead) {

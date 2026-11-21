@@ -855,22 +855,22 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
   // staging, including unaligned dictionary fallback tails, which changes
   // when cell allocations trigger Run spills.
   static const Golden kGolden[] = {
-      {"p1_none", 2517475, 0x43f7afffad8f6688ULL},
-      {"p7_lz4", 2246101, 0x4530bbef09b209e6ULL},
-      {"p1024_lz4", 3064977, 0x20cd39208da207d3ULL},
-      {"p7_none_rss", 2535284, 0x58eb7a981b31244bULL},
-      {"p1024_lz4_rss", 3064977, 0xf652df9796bf540dULL},
-      {"p7_lz4_partition_seals", 2246778, 0xfbdcd816d8c8920cULL},
-      {"p7_lz4_partition_seals_rss", 2246778, 0xeb80ff5ef947c8feULL},
-      {"p7_none_null_seals", 2542676, 0xbba839d809099ae6ULL},
-      {"p7_lz4_null_seals_rss", 2297123, 0xa746b56b725d20adULL},
-      {"p7_lz4_spills", 2251192, 0xa1d3fba5ccedb123ULL},
-      {"p1024_none_spills", 8757942, 0x6d20626e8577089eULL},
-      {"p7_lz4_spills_rss", 2255058, 0xc79faec398d8df82ULL},
-      {"p1_lz4_seals", 2254213, 0xa98fc2436554c9cbULL},
-      {"p7_lz4_every_limit", 2327804, 0x24fdb326a6fbb07aULL},
-      {"p7_lz4_no_dictionary", 2268893, 0xbca4ebf73b93e31aULL},
-      {"p7_lz4_one_shot", 2224722, 0x77773523d15b6ad3ULL},
+      {"p1_none", 2517475, 0x07f6b3fc3787bd08ULL},
+      {"p7_lz4", 2246101, 0x273936088c570966ULL},
+      {"p1024_lz4", 3064977, 0x5adde339d29ec8d3ULL},
+      {"p7_none_rss", 2535284, 0xae792d488d7b9bcbULL},
+      {"p1024_lz4_rss", 3064977, 0xb14c61f98018db0dULL},
+      {"p7_lz4_partition_seals", 2246778, 0x9757fbcb53680a0cULL},
+      {"p7_lz4_partition_seals_rss", 2246778, 0x444aeb9433b27ffeULL},
+      {"p7_none_null_seals", 2542676, 0x6f050cd0ddcc4be6ULL},
+      {"p7_lz4_null_seals_rss", 2297123, 0x627632977014abadULL},
+      {"p7_lz4_spills", 2251192, 0xb3b7f85821803aa3ULL},
+      {"p1024_none_spills", 8757942, 0xab510bd8ddf7ed9eULL},
+      {"p7_lz4_spills_rss", 2255058, 0x5530f88fd00f1a02ULL},
+      {"p1_lz4_seals", 2254213, 0x3bac644702d13d4bULL},
+      {"p7_lz4_every_limit", 2327804, 0x535210bd0b2cb27aULL},
+      {"p7_lz4_no_dictionary", 2268893, 0x99d2eaa6842daa9aULL},
+      {"p7_lz4_one_shot", 2224722, 0xed5443ec4a455f53ULL},
   };
   for (const bool nonTemporalStores : {false, true}) {
     SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
@@ -950,10 +950,10 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
   // Recorded since the writer packs wide values at whole bytes
   // (kExactPackMaxBits, kBigintPlainMinBits).
   static const Golden kGolden[] = {
-      {"deep_rows_p7_lz4", 751799, 0xab09260e8c2915daULL},
-      {"unknown_fields_p7_none_rss", 273202, 0xc77ba98d9695581fULL},
-      {"deep_nested_p7_lz4_partition_seals", 473433, 0x1f560d7c6d0bb239ULL},
-      {"deep_rows_p7_lz4_adapter", 1340921, 0x5fe55cc0018ef204ULL},
+      {"deep_rows_p7_lz4", 751799, 0xf208c3bcd01dce5aULL},
+      {"unknown_fields_p7_none_rss", 273202, 0xe384ba9ed2c2279fULL},
+      {"deep_nested_p7_lz4_partition_seals", 473433, 0xa1f611d6755bacb9ULL},
+      {"deep_rows_p7_lz4_adapter", 1340921, 0x9340d60a1bc65a84ULL},
   };
   for (const bool nonTemporalStores : {false, true}) {
     SCOPED_TRACE(fmt::format("nonTemporalStores={}", nonTemporalStores));
