@@ -1,0 +1,102 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Scheduled Fuzz Tests
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_sec:
+        description: Duration in seconds to run each fuzzer target
+        required: false
+        type: string
+        default: '1800'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAX_SIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
+  FUZZ_DURATION_SEC: ${{ inputs.duration_sec || '1800' }}
+
+jobs:
+  fuzz:
+    runs-on: [ self-hosted, medium ]
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      options: --user root --init
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzzer:
+          - { name: expression, binary: bolt_expression_fuzzer_test }
+          - { name: spark-expression, binary: spark_expression_fuzzer_test }
+          - { name: aggregation, binary: bolt_aggregation_fuzzer_test }
+          - { name: spark-aggregation, binary: spark_aggregation_fuzzer_test }
+          - { name: window, binary: bolt_window_fuzzer_test }
+          - { name: spark-window, binary: spark_window_fuzzer_test }
+          - { name: join, binary: bolt_join_fuzzer_test }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - id: env-setup
+        uses: ./.github/actions/bolt-build-base
+
+      - name: Bolt build with test utilities
+        run: |
+          make release_spark_with_test
+
+      - name: Locate ${{ matrix.fuzzer.name }} fuzzer binary
+        id: locate
+        run: |
+          binary_path=$(find _build/Release -type f -name "${{ matrix.fuzzer.binary }}" | head -n1)
+          if [ -z "$binary_path" ]; then
+            echo "Could not find built binary ${{ matrix.fuzzer.binary }} under _build/Release" >&2
+            exit 1
+          fi
+          echo "path=$binary_path" >> "$GITHUB_OUTPUT"
+
+      - name: Run ${{ matrix.fuzzer.name }} fuzzer for a bounded duration
+        run: |
+          "${{ steps.locate.outputs.path }}" --duration_sec="$FUZZ_DURATION_SEC"
+
+      - name: Upload fuzzer output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.fuzzer.name }}-${{ github.run_id }}
+          path: |
+            /tmp/velox_*
+            /tmp/bolt_*
+          if-no-files-found: ignore
+          retention-days: 14
