@@ -135,7 +135,7 @@ class CellSplitter {
   }
 
   bool hasWindowRows() const {
-    return totalWindowRows_ != 0;
+    return maxWindowRows_ != 0;
   }
 
   uint32_t maxWindowRows() const {
@@ -349,6 +349,10 @@ class CellSplitter {
       uint8_t* lengthCur,
       uint8_t* dataCur);
 
+  bool isDictEnabled(uint32_t col) const {
+    return dictEnabled_[col] != 0;
+  }
+
   const CellLayout& layout_;
   ChunkAllocator& allocator_;
   CellOutput& output_;
@@ -362,7 +366,6 @@ class CellSplitter {
 
   /// Rows committed per partition in the current window, updated after split.
   std::vector<uint32_t> windowRowCounts_;
-  uint64_t totalWindowRows_{0};
   uint32_t maxWindowRows_{0};
   uint64_t sealCount_{0};
   /// One bit per wire column, set by enableDictionary for the writer lifetime.

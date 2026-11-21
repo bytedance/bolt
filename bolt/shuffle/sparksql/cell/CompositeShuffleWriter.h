@@ -93,6 +93,11 @@ class CompositeShuffleWriter : public ShuffleWriter {
     return inSplitCall_;
   }
 
+  /// True once stop() has begun.
+  bool isStopped() const {
+    return stopped_;
+  }
+
   memory::MemoryPool* const boltPool_;
   /// Shared by the two paths, which never split at the same time. A reclaim
   /// inside a split goes to its active side; composite flushes wait for it.

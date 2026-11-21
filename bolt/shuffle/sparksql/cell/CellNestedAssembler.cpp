@@ -103,26 +103,30 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
       decoder.nonNullCount(col));
   // The stream is decoded once more when its rows are appended; the
   // lengths are not kept.
+  const auto fail = [&error](const char* what) {
+    error = what;
+    return false;
+  };
   uint64_t total = 0;
   int32_t lengths[kLengthsPerRead];
   for (uint32_t left = decoder.nonNullCount(col); left > 0;) {
     const uint32_t n = std::min(left, kLengthsPerRead);
     if (!cursor.next(n, lengths)) {
-      return fail(error, "malformed container length stream");
+      return fail("malformed container length stream");
     }
     for (uint32_t i = 0; i < n; ++i) {
       if (lengths[i] < 0) {
-        return fail(error, "negative container length");
+        return fail("negative container length");
       }
       total += static_cast<uint64_t>(lengths[i]);
     }
     if (total > CellNestedLayout::kMaxPositions) {
-      return fail(error, "container lengths beyond the position limit");
+      return fail("container lengths beyond the position limit");
     }
     left -= n;
   }
   if (!cursor.finished()) {
-    return fail(error, "malformed container length stream");
+    return fail("malformed container length stream");
   }
   payloadPositions_[node.ownedSpace] = total;
   return true;
@@ -240,10 +244,10 @@ vector_size_t* CellNestedAssembler::offsets(uint32_t x, uint64_t entries) {
   if (buffer == nullptr) {
     buffer = AlignedBuffer::allocate<vector_size_t>(size, pool_);
   } else if (buffer->capacity() < bytes) {
-    AlignedBuffer::reallocate<vector_size_t>(
-        &buffer,
-        std::max<uint64_t>(
-            entries, 2 * buffer->size() / sizeof(vector_size_t)));
+    const uint64_t grown = std::min<uint64_t>(
+        std::max<uint64_t>(size, 2 * buffer->size() / sizeof(vector_size_t)),
+        CellNestedLayout::kMaxPositions);
+    AlignedBuffer::reallocate<vector_size_t>(&buffer, grown);
   }
   // size() must cover every entry: a vector validates its offsets against
   // it, and resizing keeps no more of them.
@@ -318,18 +322,6 @@ RowVectorPtr CellNestedAssembler::assemble() {
       nullptr,
       batches[0]->size(),
       std::move(children));
-}
-
-std::unique_ptr<CellBatchSource> makeCellNestedAssembler(
-    const RowTypePtr& type,
-    CellDecompressor* decompressor,
-    memory::MemoryPool* pool,
-    CellDecodeLimits limits) {
-  if (!CellNestedLayout::supports(type)) {
-    return nullptr;
-  }
-  return std::make_unique<CellNestedAssembler>(
-      type, decompressor, pool, limits);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/Memory.h"
@@ -63,7 +64,12 @@ void BufferRunSink::write(const void* data, size_t bytes) {
 }
 
 void BufferRunSink::patch(uint64_t position, const void* data, size_t bytes) {
-  BOLT_CHECK_LE(position + bytes, this->position(), "run patch beyond its end");
+  const uint64_t end = this->position();
+  BOLT_CHECK(
+      position <= end && bytes <= end - position, "run patch beyond its end");
+  if (bytes == 0) {
+    return;
+  }
   ::memcpy(buffer_->asMutable<char>() + position, data, bytes);
 }
 
@@ -134,7 +140,7 @@ void RunCompressor::write(
   }
   const std::span<const uint64_t> sizes = sizes_;
   if (codec_ == nullptr || total < kMinCompressBytes) {
-    storeRun(sink, sizes, visit);
+    storeRun(sink, sizes, total, visit);
     ++stats_.storedRuns;
     if (codec_ != nullptr) {
       ++stats_.tinyFrames;
@@ -150,9 +156,9 @@ void RunCompressor::write(
     streamStats_.resize(numStreams);
   }
   if (total < kMinSeparateRunBytes) {
-    std::vector<char> header(combinedRunHeaderBytes(numStreams));
+    combinedHeader_.assign(combinedRunHeaderBytes(numStreams), 0);
     const uint64_t headerAt = sink.position();
-    sink.write(header.data(), header.size());
+    sink.write(combinedHeader_.data(), combinedHeader_.size());
     const auto visitAll = [&](RunPieceFn fn) {
       for (uint32_t s = 0; s < numStreams; ++s) {
         visit(s, fn);
@@ -171,24 +177,24 @@ void RunCompressor::write(
           [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
     }
     writeCombinedRunHeader(
-        header.data(),
+        combinedHeader_.data(),
         stored == 0 ? RunLayout::kCombinedUncompressed : RunLayout::kCombined,
         stored == 0 ? total : stored,
         sizes);
-    sink.patch(headerAt, header.data(), header.size());
+    sink.patch(headerAt, combinedHeader_.data(), combinedHeader_.size());
     return;
   }
   // kSeparate: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
   ++stats_.separateRuns;
-  std::vector<uint64_t> header(2ull * numStreams, 0);
+  separateHeader_.assign(2ull * numStreams, 0);
   const uint64_t headerAt = sink.position();
   const auto layout = static_cast<uint8_t>(RunLayout::kSeparate);
   sink.write(&layout, 1);
-  sink.write(header.data(), header.size() * sizeof(uint64_t));
+  sink.write(separateHeader_.data(), separateHeader_.size() * sizeof(uint64_t));
   for (uint32_t s = 0; s < numStreams; ++s) {
     const uint64_t bytes = sizes[s];
-    header[s] = bytes;
+    separateHeader_[s] = bytes;
     if (bytes == 0) {
       continue;
     }
@@ -211,30 +217,30 @@ void RunCompressor::write(
       streamStats.outBytes += stored > 0 ? stored : bytes;
     }
     if (stored > 0) {
-      header[s] = stored;
-      header[numStreams + s] = bytes;
+      separateHeader_[s] = stored;
+      separateHeader_[numStreams + s] = bytes;
       continue;
     }
     visitStream([&](const char* data, uint32_t pieceBytes) {
       sink.write(data, pieceBytes);
     });
   }
-  sink.patch(headerAt + 1, header.data(), header.size() * sizeof(uint64_t));
+  sink.patch(
+      headerAt + 1,
+      separateHeader_.data(),
+      separateHeader_.size() * sizeof(uint64_t));
 }
 
 void RunCompressor::storeRun(
     RunSink& sink,
     std::span<const uint64_t> sizes,
+    uint64_t total,
     RunStreamVisitor visit) {
   const auto numStreams = static_cast<uint32_t>(sizes.size());
-  uint64_t total = 0;
-  for (const uint64_t size : sizes) {
-    total += size;
-  }
-  std::vector<char> header(combinedRunHeaderBytes(numStreams));
+  combinedHeader_.resize(combinedRunHeaderBytes(numStreams));
   writeCombinedRunHeader(
-      header.data(), RunLayout::kCombinedUncompressed, total, sizes);
-  sink.write(header.data(), header.size());
+      combinedHeader_.data(), RunLayout::kCombinedUncompressed, total, sizes);
+  sink.write(combinedHeader_.data(), combinedHeader_.size());
   for (uint32_t s = 0; s < numStreams; ++s) {
     visit(
         s, [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
@@ -298,10 +304,19 @@ std::string RunCompressor::Stats::toString() const {
 }
 
 uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
-  const uint64_t bytes = out == nullptr ? 0 : out->size() - at;
+  if (out == nullptr) {
+    BOLT_CHECK_EQ(at, 0, "null body offset past empty buffer");
+    return 0;
+  }
+  BOLT_CHECK_LE(at, out->size(), "null body offset past buffer end");
+  const uint64_t bytes = out->size() - at;
   if (codec_ == nullptr || bytes == 0) {
     return 0;
   }
+  BOLT_CHECK_LE(
+      bytes,
+      std::numeric_limits<uint32_t>::max(),
+      "null body exceeds u32 size limit");
   const auto stored = [&] {
     ++stats_.storedNullBodies;
     stats_.storedNullBytes += bytes;
@@ -447,6 +462,12 @@ uint64_t RunCompressor::streamFrame(
     emitted += static_cast<uint64_t>(end.bytesWritten);
     if (end.noMoreOutput) {
       break;
+    }
+    BOLT_CHECK(
+        end.bytesWritten > 0 || held > 0,
+        "stream compressor end() made no progress");
+    if (held > 0) {
+      drain();
     }
   }
   if (!reachedSink && doesNotShrink(emitted, bytes)) {

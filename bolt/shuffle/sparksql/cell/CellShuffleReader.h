@@ -16,8 +16,6 @@
 
 #pragma once
 
-#include <functional>
-
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
@@ -26,25 +24,7 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Builds batches from nested-layout payloads, whose columns have different
-/// position counts and so need one CellPayloadDecoder per position group
-/// (makeCellNestedAssembler()).
-class CellBatchSource {
- public:
-  virtual ~CellBatchSource() = default;
-
-  /// Reads one payload, its kind byte consumed. On malformed input returns
-  /// false with `error` set.
-  virtual bool beginPayload(CellByteSource& in, std::string& error) = 0;
-
-  /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
-  /// one append when that is <= 0. `nextPayload` begins the next payload,
-  /// false at the end or before a CompositeRows block. nullptr: no row.
-  virtual RowVectorPtr nextBatch(
-      vector_size_t capacity,
-      int64_t byteBudget,
-      const std::function<bool()>& nextPayload) = 0;
-};
+class CellNestedAssembler;
 
 /// The Cell shuffle read chain, complete in itself: pulls reader streams,
 /// parses each stream's blocks (CellFormat.h) - a CellBlockKind byte, then
@@ -56,7 +36,7 @@ class CellBatchSource {
 ///
 /// Its inputs are the stream iterator, the logical schema and the codec.
 /// Batches come out in the logical schema: a nested layout's by a
-/// CellBatchSource, complex columns packed by the writer restored here by
+/// CellNestedAssembler, complex columns packed by the writer restored here by
 /// the type adapter.
 /// Every block opens with a kind byte; CompositeRows blocks come out as
 /// CompositeRowVectors of at most batchSize rows, never concatenated with
@@ -73,6 +53,8 @@ class CellShuffleReader {
       int64_t batchByteSize,
       // The writer's CellShuffleOptions::nativeNestedTypes.
       bool nativeNestedTypes = true);
+
+  ~CellShuffleReader();
 
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
@@ -183,7 +165,7 @@ class CellShuffleReader {
 
   CellPayloadDecoder decoder_;
   /// Set for a nested layout, which it reads in place of decoder_.
-  std::unique_ptr<CellBatchSource> nestedAssembler_;
+  std::unique_ptr<CellNestedAssembler> nestedAssembler_;
   ShuffleRowToColumnarConverter compositeConverter_;
   BufferPtr compositeStored_;
   BufferPtr compositeDecoded_;

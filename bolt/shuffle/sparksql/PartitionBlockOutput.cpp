@@ -166,6 +166,9 @@ void ShuffleSpillFile::openFile() {
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
   BOLT_CHECK(!frozen_, "shuffle spill file appended after it was frozen");
   const uint64_t offset = end_;
+  if (bytes == 0) {
+    return offset;
+  }
   if (memory_ == nullptr || memory_->blockBytes_ == 0) {
     appendToDisk(data, bytes);
     return offset;
@@ -254,7 +257,8 @@ void ShuffleSpillFile::visitMemory(
     return;
   }
   BOLT_CHECK(
-      offset >= diskEnd_ && offset + bytes <= end_ && !blocks_.empty(),
+      offset >= diskEnd_ && offset <= end_ && bytes <= end_ - offset &&
+          !blocks_.empty(),
       "shuffle spill memory read out of range");
   const uint64_t blockBytes = memory_->blockBytes_;
   uint64_t at = offset - diskEnd_;
@@ -289,7 +293,12 @@ void ShuffleSpillFile::flush() {
 }
 
 void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
-  BOLT_CHECK_LE(offset + bytes, end_, "shuffle spill patch beyond its end");
+  BOLT_CHECK(
+      offset <= end_ && bytes <= end_ - offset,
+      "shuffle spill patch beyond its end");
+  if (bytes == 0) {
+    return;
+  }
   const auto* source = static_cast<const char*>(data);
   if (offset < diskEnd_) {
     const size_t onDisk = std::min<uint64_t>(bytes, diskEnd_ - offset);
@@ -306,7 +315,11 @@ void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
 
 void ShuffleSpillFile::read(uint64_t offset, void* out, size_t bytes) const {
   BOLT_CHECK(
-      offset + bytes <= end_, "shuffle spill read beyond what was written");
+      offset <= end_ && bytes <= end_ - offset,
+      "shuffle spill read beyond what was written");
+  if (bytes == 0) {
+    return;
+  }
   auto* dst = static_cast<char*>(out);
   if (offset < diskEnd_) {
     const size_t onDisk = std::min<uint64_t>(bytes, diskEnd_ - offset);
@@ -326,7 +339,11 @@ void ShuffleSpillFile::copyTo(
     uint64_t bytes,
     const std::function<void(const char* data, size_t bytes)>& out) const {
   BOLT_CHECK(
-      offset + bytes <= end_, "shuffle spill read beyond what was written");
+      offset <= end_ && bytes <= end_ - offset,
+      "shuffle spill read beyond what was written");
+  if (bytes == 0) {
+    return;
+  }
   if (offset < diskEnd_) {
     char buffer[64 << 10];
     uint64_t onDisk = std::min(bytes, diskEnd_ - offset);
@@ -384,6 +401,9 @@ void DataFileWriter::beginPartition(uint32_t pid) {
 }
 
 void DataFileWriter::write(const void* data, size_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
   size_t written;
   {
     NanosecondTimer timer(&writeTimeNs_);
@@ -395,10 +415,13 @@ void DataFileWriter::write(const void* data, size_t bytes) {
 }
 
 void DataFileWriter::patch(uint64_t position, const void* data, size_t bytes) {
-  BOLT_CHECK_LE(
-      position + bytes,
-      static_cast<uint64_t>(bytes_),
+  const auto end = static_cast<uint64_t>(bytes_);
+  BOLT_CHECK(
+      position <= end && bytes <= end - position,
       "shuffle data file patch beyond its end");
+  if (bytes == 0) {
+    return;
+  }
   pendingPatches_.emplace_back(
       position, std::string(static_cast<const char*>(data), bytes));
 }
@@ -444,6 +467,7 @@ void PartialSpiller::mergeToDataFile(
     const PartitionWriterOptions& options,
     std::initializer_list<PartialSpiller*> spillers,
     ShuffleWriterMetrics& metrics) {
+  BOLT_CHECK_GE(options.numPartitions, 0, "numPartitions must be non-negative");
   // Nothing may be appended behind the merge: it would break the
   // partition-major order or be missed by partitions already written.
   for (auto* spiller : spillers) {
@@ -451,8 +475,9 @@ void PartialSpiller::mergeToDataFile(
     spiller->spill_.flush();
     spiller->spill_.freeze();
   }
-  DataFileWriter out(options.dataFile, options.numPartitions);
-  for (uint32_t pid = 0; pid < options.numPartitions; ++pid) {
+  const auto numPartitions = static_cast<uint32_t>(options.numPartitions);
+  DataFileWriter out(options.dataFile, numPartitions);
+  for (uint32_t pid = 0; pid < numPartitions; ++pid) {
     out.beginPartition(pid);
     for (auto* spiller : spillers) {
       spiller->writePartitionShare(pid, out);
@@ -469,9 +494,7 @@ void PartialSpiller::mergeToDataFile(
     const auto& starts = spiller->spillStarts_;
     metrics.totalSpillFiles += static_cast<int64_t>(
         std::lower_bound(
-            starts.begin(),
-            starts.end(),
-            static_cast<uint64_t>(bytesOnDisk)) -
+            starts.begin(), starts.end(), static_cast<uint64_t>(bytesOnDisk)) -
         starts.begin());
     metrics.totalEvictTime +=
         static_cast<int64_t>(spiller->spill_.writeTimeNs());
@@ -481,14 +504,18 @@ void PartialSpiller::mergeToDataFile(
 LocalBlockOutput::LocalBlockOutput(
     PartitionWriterOptions options,
     SpillMemory* memory)
-    : PartialSpiller(options, "blocks", memory), options_(std::move(options)) {}
+    : PartialSpiller(options, "blocks", memory), options_(std::move(options)) {
+  BOLT_CHECK_GE(
+      options_.numPartitions, 0, "numPartitions must be non-negative");
+}
 
 void LocalBlockOutput::writeBlocks(const BlockSource& next) {
   BOLT_CHECK(!spill_.isFrozen(), "writeBlocks after the merge");
-  auto& ends = spillOffsets_.emplace_back(options_.numPartitions + 1);
+  const auto numPartitions = static_cast<uint32_t>(options_.numPartitions);
+  auto& ends = spillOffsets_.emplace_back(numPartitions + 1);
   ends[0] = spill_.end();
   BufferPtr block;
-  for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
+  for (uint32_t pid = 0; pid < numPartitions; ++pid) {
     while (next(pid, block)) {
       spill_.append(block->as<char>(), block->size());
     }
@@ -504,22 +531,28 @@ void LocalBlockOutput::finish(ShuffleWriterMetrics& metrics) {
 
 void LocalBlockOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
   for (const auto& ends : spillOffsets_) {
-    out.copyFrom(spill_, ends[pid], ends[pid + 1] - ends[pid]);
+    const uint64_t bytes = ends[pid + 1] - ends[pid];
+    if (bytes > 0) {
+      out.copyFrom(spill_, ends[pid], bytes);
+    }
   }
 }
 
 RssBlockOutput::RssBlockOutput(PartitionWriterOptions options)
     : options_(std::move(options)),
       client_(options_.rssClient),
-      partitionLengths_(options_.numPartitions, 0) {
+      partitionLengths_(std::max(options_.numPartitions, 0), 0) {
+  BOLT_CHECK_GE(
+      options_.numPartitions, 0, "numPartitions must be non-negative");
   BOLT_CHECK_NOT_NULL(
       client_, "a remote shuffle output requires an RSS client");
 }
 
 void RssBlockOutput::writeBlocks(const BlockSource& next) {
   BOLT_CHECK(!finished_, "writeBlocks after finish");
+  const auto numPartitions = static_cast<uint32_t>(options_.numPartitions);
   BufferPtr block;
-  for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
+  for (uint32_t pid = 0; pid < numPartitions; ++pid) {
     while (next(pid, block)) {
       int32_t pushed;
       {
@@ -529,6 +562,7 @@ void RssBlockOutput::writeBlocks(const BlockSource& next) {
             block->asMutable<char>(),
             static_cast<int64_t>(block->size()));
       }
+      BOLT_CHECK_GE(pushed, 0, "RSS pushPartitionData failed");
       partitionLengths_[pid] += pushed;
       pushedBytes_ += pushed;
       ++numPushes_;

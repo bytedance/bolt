@@ -72,7 +72,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       supports(logicalType_),
       "no nested Cell layout for {}",
       logicalType_->toString());
-  spaces_.push_back(Space{kNone, 0, {}, {}, {}, nullptr});
+  spaces_.push_back(Space{0, {}, {}, {}, nullptr});
   for (const auto& child : logicalType_->children()) {
     topNodes_.push_back(addNode(child, 0));
   }
@@ -107,10 +107,6 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
     space.rowType = ROW(std::move(spaceNames), std::move(spaceTypes));
   }
   layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
-  wireSpaces_.reserve(layout_.numWireColumns());
-  for (uint32_t wire = 0; wire < layout_.numWireColumns(); ++wire) {
-    wireSpaces_.push_back(nodes_[layout_.logicalColumn(wire)].space);
-  }
 }
 
 uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
@@ -126,7 +122,7 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
     spaces_[space].containers.push_back(id);
     const uint32_t depth = spaces_[space].depth + 1;
     maxDepth_ = std::max(maxDepth_, depth);
-    spaces_.push_back(Space{id, depth, {}, {}, {}, nullptr});
+    spaces_.push_back(Space{depth, {}, {}, {}, nullptr});
   }
   // A ROW's fields have its positions, a container's children those of its
   // space.

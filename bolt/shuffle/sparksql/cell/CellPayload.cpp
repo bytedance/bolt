@@ -468,11 +468,14 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
     rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
   }
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
-  const uint64_t expandedBytes =
-      static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
-  // Room for the last bitmap's whole last word.
-  auto* bitmap = reinterpret_cast<uint8_t*>(
-      resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
+  uint8_t* bitmap = nullptr;
+  if (rawNullColumns > 0) {
+    const uint64_t expandedBytes =
+        static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
+    // Room for the last bitmap's whole last word.
+    bitmap = reinterpret_cast<uint8_t*>(
+        resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
+  }
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     switch (nullTags_[col]) {
       case NullTag::kAllNull:
@@ -493,7 +496,6 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
           return false;
         }
         bitmaps_[col] = bitmap;
-        bitmapBytes_ = bitmapBytes;
         bitmap += bitmapBytes;
         break;
       }
@@ -507,6 +509,7 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
 bool CellPayloadDecoder::parseRun(
     CellByteSource& in,
     bool onlyRun,
+    bool& streamsInCombinedDecoded,
     std::string& error) {
   uint8_t layoutByte;
   if (!in.read(&layoutByte, 1)) {
@@ -563,8 +566,12 @@ bool CellPayloadDecoder::parseRun(
         if (decoded == 0) {
           // Uncompressed: bytes go to the stream as they are.
           const size_t offset = stream == nullptr ? 0 : stream->size();
+          uint64_t totalSize = 0;
+          if (addOverflows(static_cast<uint64_t>(offset), stored, totalSize)) {
+            return fail(error, "run stream size overflow");
+          }
           auto* out =
-              resizeBuffer(stream, checkedPlus<size_t>(offset, stored), pool_);
+              resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
           if (!in.read(out + offset, stored)) {
             return fail(error, "truncated run buffer");
           }
@@ -577,8 +584,12 @@ bool CellPayloadDecoder::parseRun(
             return fail(error, "truncated run buffer");
           }
           const size_t offset = stream == nullptr ? 0 : stream->size();
+          uint64_t totalSize = 0;
+          if (addOverflows(static_cast<uint64_t>(offset), decoded, totalSize)) {
+            return fail(error, "run stream size overflow");
+          }
           auto* out =
-              resizeBuffer(stream, checkedPlus<size_t>(offset, decoded), pool_);
+              resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
           if (!decompressor_->decompress(
                   {reinterpret_cast<const uint8_t*>(input), stored},
                   {reinterpret_cast<uint8_t*>(out) + offset, decoded})) {
@@ -600,8 +611,11 @@ bool CellPayloadDecoder::parseRun(
         }
         auto& stream = streamBytes_[s];
         const size_t offset = stream == nullptr ? 0 : stream->size();
-        auto* out =
-            resizeBuffer(stream, checkedPlus<size_t>(offset, decoded), pool_);
+        uint64_t totalSize = 0;
+        if (addOverflows(static_cast<uint64_t>(offset), decoded, totalSize)) {
+          return fail(error, "run stream size overflow");
+        }
+        auto* out = resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
         if (!in.read(out + offset, decoded)) {
           return fail(error, "truncated run buffer");
         }
@@ -631,7 +645,7 @@ bool CellPayloadDecoder::parseRun(
               decodedSizes_[s]);
           offset += decodedSizes_[s];
         }
-        streamsInCombinedDecoded_ = true;
+        streamsInCombinedDecoded = true;
         return true;
       }
       size_t offset = 0;
@@ -641,8 +655,14 @@ bool CellPayloadDecoder::parseRun(
         }
         auto& stream = streamBytes_[s];
         const size_t streamOffset = stream == nullptr ? 0 : stream->size();
-        auto* out = resizeBuffer(
-            stream, checkedPlus<size_t>(streamOffset, decodedSizes_[s]), pool_);
+        uint64_t totalSize = 0;
+        if (addOverflows(
+                static_cast<uint64_t>(streamOffset),
+                decodedSizes_[s],
+                totalSize)) {
+          return fail(error, "run stream size overflow");
+        }
+        auto* out = resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
         ::memcpy(out + streamOffset, decodedData + offset, decodedSizes_[s]);
         offset += decodedSizes_[s];
       }
@@ -768,13 +788,13 @@ bool CellPayloadDecoder::parsePayload(
     }
   }
   streamViews_.assign(streamBytes_.size(), std::string_view());
-  streamsInCombinedDecoded_ = false;
+  bool streamsInCombinedDecoded = false;
   for (uint32_t run = 0; run < runCount; ++run) {
-    if (!parseRun(in, runCount == 1, error)) {
+    if (!parseRun(in, runCount == 1, streamsInCombinedDecoded, error)) {
       return false;
     }
   }
-  if (!streamsInCombinedDecoded_) {
+  if (!streamsInCombinedDecoded) {
     for (size_t s = 0; s < streamBytes_.size(); ++s) {
       streamViews_[s] = bufferBytes(streamBytes_[s]);
     }
@@ -858,7 +878,6 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   cursor.indexes = nullptr;
   cursor.matchedRows = 0;
   cursor.matchedRead = 0;
-  cursor.nextDictionary = 0;
   cursor.currentDictionary = 0;
   cursor.currentMatchedLeft = 0;
 
@@ -952,6 +971,8 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   }
   cursor.indexes = reinterpret_cast<const uint8_t*>(lengthBytes.data());
   cursor.matchedRows = matchedSum;
+  cursor.currentDictionary = 0;
+  cursor.currentMatchedLeft = cursor.dictionaries[0].matchedRows;
   cursor.lengthsOrNanos.reset(
       cursor.indexes + matchedSum,
       lengthBytes.size() - matchedSum,
@@ -1073,7 +1094,8 @@ bool CellPayloadDecoder::appendRows(
     std::string& error) {
   BOLT_CHECK_LE(numRows, payloadRowsLeft());
   if (!batchOpen_) {
-    openBatch(capacity);
+    openBatch(
+        std::max<vector_size_t>(capacity, static_cast<vector_size_t>(numRows)));
   }
   const auto failed = [&] {
     rowCount_ = 0;
@@ -1188,7 +1210,7 @@ uint32_t CellPayloadDecoder::appendNulls(uint32_t col, uint32_t numRows) {
       uint32_t dense = 0;
       forEachBitWord(
           bitmaps_[col],
-          bitmapBytes_,
+          payloadBitmapBytes(),
           rowsRead_,
           numRows,
           [&](uint32_t base, uint32_t n, uint64_t word) {
@@ -1235,7 +1257,7 @@ bool CellPayloadDecoder::placeValues(
   uint32_t next = 0;
   forEachBitWord(
       bitmap,
-      bitmapBytes_,
+      payloadBitmapBytes(),
       rowsRead_,
       numRows,
       [&](uint32_t base, uint32_t n, uint64_t word) {
@@ -1318,7 +1340,7 @@ bool CellPayloadDecoder::appendBoolean(
   uint32_t next = 0;
   scatterRows(
       bitmap,
-      bitmapBytes_,
+      payloadBitmapBytes(),
       rowsRead_,
       numRows,
       [&](uint32_t base, uint32_t n) {
@@ -1337,9 +1359,7 @@ bool CellPayloadDecoder::appendTimestamp(
     std::string& error) {
   auto& cursor = cursors_[col];
   auto* scratch = reinterpret_cast<int64_t*>(resetBuffer(
-      timestampScratch_,
-      2 * sizeof(int64_t) * static_cast<size_t>(dense),
-      pool_));
+      denseScratch_, 2 * sizeof(int64_t) * static_cast<size_t>(dense), pool_));
   int64_t* seconds = scratch;
   int64_t* nanos = scratch + dense;
   if (dense > 0 &&
@@ -1371,7 +1391,7 @@ bool CellPayloadDecoder::appendTimestamp(
   uint32_t next = 0;
   scatterRows(
       bitmap,
-      bitmapBytes_,
+      payloadBitmapBytes(),
       rowsRead_,
       numRows,
       [&](uint32_t base, uint32_t n) {
@@ -1398,7 +1418,7 @@ bool CellPayloadDecoder::appendString(
   StringRows rows(
       out,
       dense == numRows ? nullptr : bitmaps_[col],
-      bitmapBytes_,
+      payloadBitmapBytes(),
       rowsRead_,
       numRows);
   const bool ok = cursor.isDictionary
@@ -1575,7 +1595,7 @@ bool CellPayloadDecoder::appendString(
   };
   while (hits > 0) {
     while (cursor.currentMatchedLeft == 0) {
-      cursor.currentDictionary = cursor.nextDictionary++;
+      ++cursor.currentDictionary;
       cursor.currentMatchedLeft =
           cursor.dictionaries[cursor.currentDictionary].matchedRows;
     }
@@ -1750,10 +1770,12 @@ void appendBytes(
 }
 
 void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool) {
+  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
   appendBytes(out, &value, sizeof(value), pool);
 }
 
 void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool) {
+  static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
   appendBytes(out, &value, sizeof(value), pool);
 }
 
@@ -1763,31 +1785,32 @@ void buildNullBody(
     uint32_t rows,
     BufferPtr& out,
     memory::MemoryPool* pool) {
-  const uint32_t numColumns = in.layout->numWireColumns();
-  if (numColumns == 0) {
+  const uint32_t numWireColumns = in.layout->numWireColumns();
+  if (numWireColumns == 0) {
     return;
   }
-  const uint32_t tagBytes = nullTagBytes(numColumns);
+  const uint32_t tagBytes = nullTagBytes(numWireColumns);
   const size_t tagStart = out ? out->size() : 0;
   resizeBuffer(out, checkedPlus<size_t>(tagStart, tagBytes), pool);
   auto* tags = out->asMutable<uint8_t>() + tagStart;
   ::memset(tags, 0, tagBytes);
-  for (uint32_t col = 0; col < numColumns; ++col) {
+  for (uint32_t wireCol = 0; wireCol < numWireColumns; ++wireCol) {
     const uint32_t positions =
-        in.columnPositions != nullptr && in.columnPositions[col] != nullptr
-        ? in.columnPositions[col][pid]
+        in.columnPositions != nullptr && in.columnPositions[wireCol] != nullptr
+        ? in.columnPositions[wireCol][pid]
         : rows;
-    const auto summary = in.nulls->summarize(pid, col, positions);
-    setNullTag(tags, col, summary.tag);
+    const auto summary = in.nulls->summarize(pid, wireCol, positions);
+    setNullTag(tags, wireCol, summary.tag);
   }
   // Records follow the tags for kRawNull columns, in column order, written
   // together once `out` has room for them all.
   std::vector<uint32_t> rawColumns;
   size_t recordsBytes = 0;
-  for (uint32_t col = 0; col < numColumns; ++col) {
-    if (getNullTag(out->as<uint8_t>() + tagStart, col) == NullTag::kRawNull) {
-      rawColumns.push_back(col);
-      recordsBytes += in.nulls->recordsBytes(pid, col);
+  for (uint32_t wireCol = 0; wireCol < numWireColumns; ++wireCol) {
+    if (getNullTag(out->as<uint8_t>() + tagStart, wireCol) ==
+        NullTag::kRawNull) {
+      rawColumns.push_back(wireCol);
+      recordsBytes += in.nulls->recordsBytes(pid, wireCol);
     }
   }
   if (rawColumns.empty()) {
@@ -1814,8 +1837,12 @@ uint64_t appendPayloadPrefix(
   const size_t nullBodyAt = out->size();
   buildNullBody(in, pid, rows, out, pool);
   const uint32_t nullDecodedSize = compressor.compressNullBody(out, nullBodyAt);
-  const uint32_t nullStoredSize =
-      static_cast<uint32_t>(out->size() - nullBodyAt);
+  const size_t nullStoredBytes = out->size() - nullBodyAt;
+  BOLT_CHECK_LE(
+      nullStoredBytes,
+      std::numeric_limits<uint32_t>::max(),
+      "null body exceeds u32 size limit");
+  const auto nullStoredSize = static_cast<uint32_t>(nullStoredBytes);
   folly::storeUnaligned<uint32_t>(
       out->asMutable<char>() + nullSizesAt, nullStoredSize);
   folly::storeUnaligned<uint32_t>(

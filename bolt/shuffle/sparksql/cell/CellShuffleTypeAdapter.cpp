@@ -145,6 +145,9 @@ RowVectorPtr CellShuffleTypeAdapter::unpack(
   rows.reserve(numRows);
   for (vector_size_t i = 0; i < numRows; ++i) {
     BOLT_CHECK(!binary.isNullAt(i), "Cell complex payload must be non-null");
+    // Keep a reference into the vector's buffer: inline StringView::data()
+    // points into the StringView object itself, so a by-value copy would
+    // dangle once this iteration ends.
     const auto& value = binary.data<StringView>()[binary.index(i)];
     rows.emplace_back(value.data(), value.size());
   }

@@ -260,6 +260,8 @@ class DataCells {
     BOLT_DCHECK_GE(allocator_->cellBytes(), kCacheLineBytes);
     auto& info = infos_[chainIndex(pid, stream)];
     if (FOLLY_LIKELY(info.tailLeft >= kCacheLineBytes)) {
+      BOLT_DCHECK_EQ(
+          reinterpret_cast<uintptr_t>(info.tail) % kCacheLineBytes, 0);
       memory::copyNonTemporalAligned(info.tail, data);
       info.tail += kCacheLineBytes;
       info.tailLeft -= kCacheLineBytes;
@@ -535,9 +537,10 @@ class NullCells {
   /// columns' states, which hold for the rows still to come, stay.
   void releasePartition(uint32_t pid);
 
-  /// Bytes of the partitions' moved cells; input to the kNulls seal. Not
-  /// in it, as they stay bounded whatever the window's size: the columns'
-  /// cell arrays, 44 bytes per partition of a column with nulls recorded.
+  /// Bytes of the partitions' moved cells; input to the
+  /// SealReason::kNullBitmapLimit seal. Not in it, as they stay bounded
+  /// whatever the window's size: the columns' cell arrays, 44 bytes per
+  /// partition of a column with nulls recorded.
   int64_t movedCellBytes() const {
     return movedCells_.usedBytes();
   }

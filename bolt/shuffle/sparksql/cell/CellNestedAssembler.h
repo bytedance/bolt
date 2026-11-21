@@ -16,11 +16,12 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
-#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -39,7 +40,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// closes before a new payload's positions would take some space's batch
 /// past that. As for a flat payload, the rows' batch opens at the caller's
 /// capacity.
-class CellNestedAssembler final : public CellBatchSource {
+class CellNestedAssembler {
  public:
   /// Positions one append covers at most, so that a decoder's
   /// per-append scratch stays what a flat batch's takes.
@@ -50,21 +51,21 @@ class CellNestedAssembler final : public CellBatchSource {
       RowTypePtr type,
       CellDecompressor* decompressor,
       memory::MemoryPool* pool,
-      CellDecodeLimits limits);
+      CellDecodeLimits limits = {});
 
-  bool beginPayload(CellByteSource& in, std::string& error) override;
+  /// Reads one payload, its kind byte consumed. On malformed input returns
+  /// false with `error` set.
+  bool beginPayload(CellByteSource& in, std::string& error);
 
+  /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
+  /// one append when that is <= 0. `nextPayload` begins the next payload,
+  /// false at the end or before a CompositeRows block. nullptr: no row.
   RowVectorPtr nextBatch(
       vector_size_t capacity,
       int64_t byteBudget,
-      const std::function<bool()>& nextPayload) override;
+      const std::function<bool()>& nextPayload);
 
  private:
-  bool fail(std::string& error, const char* what) const {
-    error = what;
-    return false;
-  }
-
   /// The positions of container x's space: its lengths in the payload just
   /// opened, added up.
   bool countPositions(uint32_t x, std::string& error);
@@ -98,15 +99,5 @@ class CellNestedAssembler final : public CellBatchSource {
   /// budget counts by.
   uint64_t payloadRowBytes_{1};
 };
-
-/// A CellNestedAssembler of `type` when it takes a nested layout, else nullptr;
-/// `type` must be supported (CellShuffleTypeAdapter::isSupported).
-/// `decompressor` may be null when payloads are known to be uncompressed;
-/// it and `pool` must outlive the result.
-std::unique_ptr<CellBatchSource> makeCellNestedAssembler(
-    const RowTypePtr& type,
-    CellDecompressor* decompressor,
-    memory::MemoryPool* pool,
-    CellDecodeLimits limits = {});
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

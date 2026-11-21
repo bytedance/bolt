@@ -220,8 +220,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       boltPool_);
   splitter_->setStreamCheck(shuffleCheck_.get());
 
-  perPidCounter_.assign(numPartitions_, 0);
-
   initialized_ = true;
   const std::string spillMemory = spillMemory_ == nullptr ? "0"
       : spillMemory_->capBytes() == kNoSpillMemoryCap
@@ -248,7 +246,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 arrow::Status CellShuffleWriter::splitOrdinary(
     RowVectorPtr rv,
     int64_t /*memLimitIgnored: cell memory decisions never use it*/) {
-  BOLT_CHECK(!stopped_, "split after stop");
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
@@ -257,8 +254,9 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     const uint64_t sealSpillStart = sealSpillNs_;
     rv = adapter_->pack(rv, boltPool_);
     // Less the spills of a reclaim that the pack's allocations set off.
-    metrics_.convertTime += static_cast<int64_t>(
-        currentTimeNs() - start - (sealSpillNs_ - sealSpillStart));
+    const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
+    const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
+    metrics_.convertTime += std::max<int64_t>(0, elapsed - sealSpill);
   }
   // Load lazy columns before sizing slices; unloaded columns estimate as zero.
   if (isLazyNotLoaded(*rv)) {
@@ -397,6 +395,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     if (anyNullable) {
       // All nullable columns share this per-partition row index.
       rowIndexInPid_.resize(numRows);
+      perPidCounter_.resize(numPartitions_);
       std::fill(perPidCounter_.begin(), perPidCounter_.end(), 0);
       for (uint32_t row = 0; row < numRows; ++row) {
         rowIndexInPid_[row] = perPidCounter_[row2Partition_[row]]++;
@@ -519,7 +518,7 @@ void CellShuffleWriter::probeDictionary(
     if (!layout_.isStringColumn(col)) {
       continue;
     }
-    if (shredder_ != nullptr && !shredder_->inRowSpace(col)) {
+    if (nestedLayout_ != nullptr && !nestedLayout_->inRowSpace(col)) {
       ++nestedStrings;
       continue;
     }
@@ -652,9 +651,13 @@ void CellShuffleWriter::prepareChunkGrowth() {
       return;
     }
     // Growth retries the freed cells before allocating another chunk.
-    ++pressure_.growthPartialRuns;
-    pressure_.growthPartialRunBytes += splitter_->spillPartitions(
+    const uint64_t spilled = splitter_->spillPartitions(
         static_cast<uint64_t>(allocator_->usedBytes()) / kPartialSpillDivisor);
+    if (spilled > 0) {
+      ++pressure_.growthPartialRuns;
+      pressure_.growthPartialRunBytes += spilled;
+      metrics_.totalBytesEvicted = output_->bytesEvicted();
+    }
   }
 }
 
@@ -718,9 +721,13 @@ void CellShuffleWriter::maybeSeal() {
   if (!isRemote_ && cellData > cellSpillThresholdBytes_) {
     // Spill the largest partitions down to half the data threshold.
     SealSpillTimer timer(*this);
-    ++pressure_.thresholdRuns;
-    pressure_.thresholdRunBytes +=
+    const uint64_t spilled =
         splitter_->spillPartitions(cellData - cellSpillThresholdBytes_ / 2);
+    if (spilled > 0) {
+      ++pressure_.thresholdRuns;
+      pressure_.thresholdRunBytes += spilled;
+      metrics_.totalBytesEvicted = output_->bytesEvicted();
+    }
   }
 }
 
@@ -752,7 +759,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   }
   pressure_.freedIdle += *actual;
   boltPool_->release();
-  if (stopped_) {
+  if (isStopped()) {
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
@@ -778,9 +785,21 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return reclaimWindow(size, actual);
   }
   SealSpillTimer timer(*this);
+  const auto maybeRequestNullSeal = [&]() {
+    // Seal only when enough null state can be freed to justify closing
+    // payloads.
+    if (splitter_->nullMovedBytes() >
+        options_.cellOptions.nullMemLimitBytes / 4) {
+      sealRequested_ = true;
+    }
+  };
   // Avoid a run when idle memory suffices or fewer than two chunks remain.
-  if ((size > 0 && *actual >= size) ||
-      allocator_->allocatedBytes() < 2 * kChunkBytes) {
+  if (size > 0 && *actual >= size) {
+    ++pressure_.idleReclaims;
+    return arrow::Status::OK();
+  }
+  if (allocator_->allocatedBytes() < 2 * kChunkBytes) {
+    maybeRequestNullSeal();
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
@@ -788,15 +807,19 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (size > 0 &&
       splitter_->cellDataBytes() <
           static_cast<uint64_t>(reclaimRunFloorBytes_)) {
+    maybeRequestNullSeal();
     ++pressure_.belowFloorReclaims;
     return arrow::Status::OK();
   }
   // Spill large partitions, then compact to free whole chunks. Fall back to
   // a full run only if the request remains unmet.
   if (size > 0) {
-    ++pressure_.reclaimPartialRuns;
-    pressure_.reclaimPartialRunBytes += splitter_->spillPartitions(
+    const uint64_t spilled = splitter_->spillPartitions(
         static_cast<uint64_t>(std::max(size - *actual, kMinReclaimRunBytes)));
+    if (spilled > 0) {
+      ++pressure_.reclaimPartialRuns;
+      pressure_.reclaimPartialRunBytes += spilled;
+    }
     int64_t freed = allocator_->shrink();
     pressure_.freedByPartialRun += freed;
     *actual += freed;
@@ -818,11 +841,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   }
   // Return reservation slack so the arbitrator can reuse the freed capacity.
   boltPool_->release();
-  // Seal only when enough null state can be freed to justify closing payloads.
-  if (splitter_->nullMovedBytes() >
-      options_.cellOptions.nullMemLimitBytes / 4) {
-    sealRequested_ = true;
-  }
+  maybeRequestNullSeal();
   metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
@@ -855,8 +874,6 @@ arrow::Status CellShuffleWriter::flushOrdinary() {
 }
 
 arrow::Status CellShuffleWriter::stopOrdinary() {
-  BOLT_CHECK(!stopped_, "stop called twice");
-  stopped_ = true;
   if (initialized_) {
     try {
       splitter_->finish(metrics_, columnPositionCounts());

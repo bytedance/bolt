@@ -101,11 +101,6 @@ class CellNestedShredder {
     return columnPositionCounts_;
   }
 
-  /// Whether a layout column has the rows' positions.
-  bool inRowSpace(uint32_t col) const {
-    return layout_.node(col).space == 0;
-  }
-
   /// Splits the prepared batch: the rows' columns at once, committing the
   /// rows, then every container's elements. `row2Partition` has an entry
   /// per prepared row, `partition2RowCount` one per partition.
@@ -177,11 +172,11 @@ class CellNestedShredder {
     BufferPtr rowIndexInPid;
     BufferPtr indices;
     uint32_t size{0};
-    /// The elements lie in a row from `start`; src is unwritten then.
+    /// The elements lie in a row from `start`; `indices` is unwritten then.
     bool contiguous{true};
     vector_size_t start{0};
 
-    /// The elements' indices, as Entries::src takes them.
+    /// The elements' indices, as Entries::indices takes them.
     const vector_size_t* indicesOrNull() const {
       return contiguous ? nullptr : indices->as<vector_size_t>();
     }

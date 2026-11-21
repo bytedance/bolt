@@ -35,72 +35,48 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
   layout.rowType_ = rowType;
   layout.numColumns_ = static_cast<uint32_t>(rowType->size());
   layout.firstStream_.reserve(layout.numColumns_);
-  layout.isString_.reserve(layout.numColumns_);
+  layout.wireOfColumn_.reserve(layout.numColumns_);
   for (uint32_t col = 0; col < layout.numColumns_; ++col) {
     const auto kind = rowType->childAt(col)->kind();
     layout.firstStream_.push_back(
         static_cast<uint32_t>(layout.streams_.size()));
-    layout.wireOfColumn_.push_back(layout.logicalOfWire_.size());
-    if (kind != TypeKind::UNKNOWN) {
-      layout.logicalOfWire_.push_back(col);
+    if (kind == TypeKind::UNKNOWN) {
+      layout.wireOfColumn_.push_back(kInvalidWireColumn);
+      continue;
     }
+    layout.wireOfColumn_.push_back(
+        static_cast<uint32_t>(layout.logicalOfWire_.size()));
+    layout.logicalOfWire_.push_back(col);
     switch (kind) {
-      case TypeKind::UNKNOWN:
-        layout.isString_.push_back(false);
-        break;
       case TypeKind::BOOLEAN:
       case TypeKind::TINYINT:
+      case TypeKind::HUGEINT:
+      case TypeKind::REAL:
+      case TypeKind::DOUBLE:
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kRawFixed, true});
-        layout.isString_.push_back(false);
+            {static_cast<uint16_t>(col), StreamKind::kRawFixed});
         break;
       case TypeKind::SMALLINT:
-        layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
-        layout.isString_.push_back(false);
-        break;
       case TypeKind::INTEGER:
-        layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
-        layout.isString_.push_back(false);
-        break;
       case TypeKind::BIGINT:
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
-        layout.isString_.push_back(false);
+            {static_cast<uint16_t>(col), StreamKind::kEncoded});
         break;
       case TypeKind::TIMESTAMP:
         // The full 16-byte value: Seconds stream first, Nanos stream second,
         // both encoded as Bigint.
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
+            {static_cast<uint16_t>(col), StreamKind::kEncoded});
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
-        layout.isString_.push_back(false);
-        break;
-      case TypeKind::HUGEINT:
-        layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kRawFixed, true});
-        layout.isString_.push_back(false);
-        break;
-      case TypeKind::REAL:
-        layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kRawFixed, false});
-        layout.isString_.push_back(false);
-        break;
-      case TypeKind::DOUBLE:
-        layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kRawFixed, false});
-        layout.isString_.push_back(false);
+            {static_cast<uint16_t>(col), StreamKind::kEncoded});
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
         // Length/Index stream first, Data stream second.
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kEncoded, true});
+            {static_cast<uint16_t>(col), StreamKind::kEncoded});
         layout.streams_.push_back(
-            {static_cast<uint16_t>(col), StreamKind::kStringData, false});
-        layout.isString_.push_back(true);
+            {static_cast<uint16_t>(col), StreamKind::kStringData});
         break;
       default:
         BOLT_UNREACHABLE();
