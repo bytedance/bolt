@@ -89,7 +89,7 @@ class DiskIoSchedulerImpl {
   std::unique_ptr<DepthController> depthController_;
   std::unique_ptr<IoBackend> backend_;
   EventFd wakeupEvent_;
-  ScopedFd epollFd_;
+  ScopedFd eventQueueFd_;
 
   mutable std::mutex mutex_;
   bool stopping_{false};

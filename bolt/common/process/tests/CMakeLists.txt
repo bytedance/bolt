@@ -40,3 +40,9 @@ add_executable(bolt_crash_report_test CrashReportTest.cpp)
 add_test(bolt_crash_report_test bolt_crash_report_test)
 
 target_link_libraries(bolt_crash_report_test PRIVATE bolt_testutils)
+
+if(APPLE)
+  add_executable(bolt_macho_image_test MachOImageTest.cpp)
+  target_link_libraries(bolt_macho_image_test PRIVATE bolt_gtest_main)
+  add_test(bolt_macho_image_test bolt_macho_image_test)
+endif()
