@@ -315,8 +315,9 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     EXPECT_EQ(metrics.totalSpillFiles, 1);
   }
 
-  // Straddling boundary: run 0 is [0, kBlock/2), run 1 is [kBlock/2, 3*kBlock/2)
-  // so half of run 1 reaches disk; run 2 starts at 3*kBlock/2 (in memory).
+  // Straddling boundary: run 0 is [0, kBlock/2), run 1 is [kBlock/2,
+  // 3*kBlock/2) so half of run 1 reaches disk; run 2 starts at 3*kBlock/2 (in
+  // memory).
   {
     SpillMemory memory(pool_.get(), kCap);
     LocalBlockOutput output(makeOptions(), &memory);
@@ -344,6 +345,15 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     EXPECT_EQ(metrics.totalBytesEvicted, 2 * kBlock);
     EXPECT_EQ(metrics.totalSpillFiles, 3);
   }
+}
+
+TEST_F(SpillMemoryTest, zeroByteAppendCreatesNoSpillFile) {
+  const auto opts = options();
+  ShuffleSpillFile spill(opts, "zero", nullptr);
+  EXPECT_EQ(spill.append(nullptr, 0), 0u);
+  EXPECT_EQ(spill.end(), 0u);
+  EXPECT_EQ(spill.bytesWritten(), 0);
+  EXPECT_FALSE(std::filesystem::exists(opts.dataFile + ".zero.spill"));
 }
 
 } // namespace

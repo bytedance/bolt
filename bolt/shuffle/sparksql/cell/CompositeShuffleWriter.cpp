@@ -194,6 +194,9 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
       partitioner_->hasPid(),
       "CellShuffleWriter takes composite rows only under hash or range "
       "partitioning");
+  if (rv->size() == 0) {
+    return arrow::Status::OK();
+  }
   if (!compositeActive_) {
     RETURN_NOT_OK(flushOrdinary());
     compositeActive_ = true;
@@ -279,7 +282,8 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     const uint64_t start = currentTimeNs();
     converter_.convert(rv, row2Partition_, heldRows_);
-    metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
+    metrics_.convertTime +=
+        std::max<int64_t>(0, static_cast<int64_t>(currentTimeNs() - start));
     heldRowBytes_ += rv->totalRowSize();
     metrics_.totalInputRowNumber += numRows;
     metrics_.totalInputBatches += 1;

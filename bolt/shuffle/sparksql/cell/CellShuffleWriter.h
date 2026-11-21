@@ -181,7 +181,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
 
   bool initialized_{false};
   bool inSplit_{false};
-  bool stopped_{false};
   bool sealRequested_{false};
   bool sealing_{false};
   bool dictProbed_{false};

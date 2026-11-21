@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <cstdio>
 #include <span>
 #include <vector>
 
@@ -246,6 +245,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   uint64_t rawBytesWritten_{0};
   /// Pre-compression bytes merged per partition.
   std::vector<int64_t> rawPartitionLengths_;
+  std::vector<uint64_t> segmentSizes_;
   BufferPtr scratch_;
 };
 

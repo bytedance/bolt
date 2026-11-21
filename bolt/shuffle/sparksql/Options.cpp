@@ -137,7 +137,8 @@ std::string ShuffleWriterOptions::toString() const {
   return fmt::format(
       "partitioning={} taskAttemptId={} startPartitionId={} bufferSize={} "
       "bufferReallocThreshold={} shuffleBatchSize={} "
-      "forceShuffleWriterType={} useV2PreallocSizeThreshold={} "
+      "forceShuffleWriterType={} preferCellShuffle={} "
+      "useV2PreallocSizeThreshold={} "
       "enableVectorCombination={} accumulateBatchMaxColumns={} "
       "accumulateBatchMaxBatches={} recommendedColumn2RowSize={} "
       "rowFormat={} rowBasedShuffleThreshold={} shuffleCheckRatio={} "
@@ -151,6 +152,7 @@ std::string ShuffleWriterOptions::toString() const {
       bufferReallocThreshold,
       shuffleBatchSize,
       forceShuffleWriterType,
+      preferCellShuffle,
       useV2PreallocSizeThreshold,
       enableVectorCombination,
       accumulateBatchMaxColumns,

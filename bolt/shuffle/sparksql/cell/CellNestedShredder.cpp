@@ -153,6 +153,10 @@ void releaseOver(BufferPtr& buffer, size_t bytes) {
   }
 }
 
+uint64_t saturatingSub(uint64_t a, uint64_t b) {
+  return a > b ? a - b : 0;
+}
+
 } // namespace
 
 CellNestedShredder::CellNestedShredder(
@@ -192,8 +196,10 @@ CellNestedShredder::CellNestedShredder(
   touched_.reserve(numPartitions_);
   // Output calls borrow this table while constructing null bodies. Columns
   // of a space share its counts; row-space entries use the splitter's rows.
-  columnPositionCounts_.reserve(layout.wireSpaces().size());
-  for (const uint32_t space : layout.wireSpaces()) {
+  const auto& cellLayout = layout.layout();
+  columnPositionCounts_.reserve(cellLayout.numWireColumns());
+  for (uint32_t wire = 0; wire < cellLayout.numWireColumns(); ++wire) {
+    const uint32_t space = layout.node(cellLayout.logicalColumn(wire)).space;
     columnPositionCounts_.push_back(counts_[space]);
   }
 }
@@ -244,12 +250,14 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   const auto& topNodes = layout_.topNodes();
   BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + columnOffset);
   for (uint32_t i = 0; i < topNodes.size(); ++i) {
+    auto child = rv.childAt(i + columnOffset);
     BOLT_CHECK(
-        rv.childAt(i + columnOffset)
-            ->type()
-            ->equivalent(*layout_.node(topNodes[i]).type),
+        child->type()->equivalent(*layout_.node(topNodes[i]).type),
         "Cell input schema changed");
-    decodeNode(topNodes[i], rv.childAt(i + columnOffset));
+    if (child->size() > numRows_) {
+      child = child->slice(0, numRows_);
+    }
+    decodeNode(topNodes[i], child);
   }
 
   // The rows' columns: a leaf as it comes, a ROW as its presence, a
@@ -272,7 +280,7 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   for (const uint32_t container : layout_.space(0).containers) {
     countRange(container, 0, numRows_);
   }
-  shredNs_ += currentTimeNs() - start - (excludedNow() - excluded);
+  shredNs_ += saturatingSub(currentTimeNs() - start, excludedNow() - excluded);
 }
 
 NullClass CellNestedShredder::viewRows(uint32_t col) {
@@ -430,7 +438,7 @@ VectorPtr CellNestedShredder::foldStructNulls(
         nulls, input.structIndices, size, loaded);
   }
   if (nulls == nullptr) {
-    return loaded;
+    return loaded->size() > size ? loaded->slice(0, size) : loaded;
   }
   // A field may stop short of its structs where every struct past it is
   // null: a dictionary reads nothing of it there and leaves its buffers as
@@ -585,7 +593,8 @@ void CellNestedShredder::split(
   releaseOver(identity_, keep * sizeof(vector_size_t));
   // splitNs_ leaves out the excluded time inside the splitter's calls: all
   // of the excluded time comes off here.
-  shredNs_ += currentTimeNs() - start - splitNs_ - (excludedNow() - excluded);
+  shredNs_ += saturatingSub(
+      currentTimeNs() - start, splitNs_ + (excludedNow() - excluded));
 }
 
 int64_t CellNestedShredder::releaseScratch() {
@@ -804,7 +813,7 @@ void CellNestedShredder::wireColumns(const SplitBatch& batch) {
   const uint64_t start = currentTimeNs();
   const uint64_t excluded = excludedNow();
   splitter_.split(batch);
-  splitNs_ += currentTimeNs() - start - (excludedNow() - excluded);
+  splitNs_ += saturatingSub(currentTimeNs() - start, excludedNow() - excluded);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

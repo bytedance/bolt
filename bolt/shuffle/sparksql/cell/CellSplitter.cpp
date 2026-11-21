@@ -586,7 +586,7 @@ void CellSplitter::split(const SplitBatch& batch) {
         const auto splitStrings = [&]<bool kStreaming>() {
           dispatchInputMapping(
               batch.decoded[col], [&]<InputMapping kMapping>() {
-                if (dictEnabled_[col] != 0) {
+                if (isDictEnabled(col)) {
                   hasNulls ? dispatchStringDict<true, kMapping, kStreaming>(
                                  col, batch)
                            : dispatchStringDict<false, kMapping, kStreaming>(
@@ -625,7 +625,6 @@ void CellSplitter::split(const SplitBatch& batch) {
       maxWindowRows_ = windowRowCounts_[pid];
     }
   }
-  totalWindowRows_ += batch.numRows();
 }
 
 CellWindowInput CellSplitter::windowInput(
@@ -813,7 +812,7 @@ void CellSplitter::finish(
   // exist. Finalization does not force an extra spill or sealed window.
   output_.finalize(windowInput(positions), windowHasData, metrics);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (dictEnabled_[col] == 0) {
+    if (!isDictEnabled(col)) {
       continue;
     }
     const auto& stats = dictStats_[col];
@@ -838,7 +837,7 @@ void CellSplitter::flushCaches(const uint8_t* partitionMask) {
   // 0xFF framing to its data stream. A partition with no indexed row wrote
   // nothing and gets no framing (an empty-stream column).
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (dictEnabled_[col] == 0) {
+    if (!isDictEnabled(col)) {
       continue;
     }
     const uint32_t lengthStream = layout_.firstStream(col);
@@ -911,7 +910,6 @@ void CellSplitter::flushCaches(const uint8_t* partitionMask) {
 void CellSplitter::resetWindow() {
   nulls_.reset();
   std::fill(windowRowCounts_.begin(), windowRowCounts_.end(), 0);
-  totalWindowRows_ = 0;
   maxWindowRows_ = 0;
   std::fill(partitionBytes_.begin(), partitionBytes_.end(), 0);
   std::fill(variableBytes_.begin(), variableBytes_.end(), 0);
@@ -919,7 +917,7 @@ void CellSplitter::resetWindow() {
   // A payload is self-contained: every partition re-enters dictionary mode
   // with an empty open segment for the next window.
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (dictEnabled_[col] == 0) {
+    if (!isDictEnabled(col)) {
       continue;
     }
     for (auto& st : dictStates_[col]) {
@@ -937,14 +935,13 @@ void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
       continue;
     }
     nulls_.releasePartition(pid);
-    totalWindowRows_ -= windowRowCounts_[pid];
     windowRowCounts_[pid] = 0;
     partitionBytes_[pid] = 0;
     variableBytes_[pid] = 0;
     // A payload is self-contained: the partition re-enters dictionary mode
     // with an empty open segment for its next payload.
     for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-      if (dictEnabled_[col] == 0) {
+      if (!isDictEnabled(col)) {
         continue;
       }
       auto& st = dictStates_[col][pid];
@@ -954,10 +951,12 @@ void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
       st.uniformLen = DictState::kUniformUnset;
     }
   }
-  maxWindowRows_ =
-      *std::max_element(windowRowCounts_.begin(), windowRowCounts_.end());
-  maxPartitionBytes_ =
-      *std::max_element(partitionBytes_.begin(), partitionBytes_.end());
+  maxWindowRows_ = windowRowCounts_.empty()
+      ? 0
+      : *std::max_element(windowRowCounts_.begin(), windowRowCounts_.end());
+  maxPartitionBytes_ = partitionBytes_.empty()
+      ? 0
+      : *std::max_element(partitionBytes_.begin(), partitionBytes_.end());
 }
 
 void CellSplitter::enableDictionary(uint32_t col) {

@@ -35,6 +35,9 @@ bool CellShuffleReader::StreamSource::read(void* out, size_t n) {
     --n;
     peeked_ = false;
   }
+  if (ended_ && n > 0) {
+    return false;
+  }
   while (n > 0) {
     const auto result = in_->Read(n, dst);
     BOLT_CHECK(
@@ -109,10 +112,16 @@ CellShuffleReader::CellShuffleReader(
           decompressor_.get(),
           pool_),
       nestedAssembler_(
-          nativeNestedTypes
-              ? makeCellNestedAssembler(outputType, decompressor_.get(), pool_)
+          nativeNestedTypes && CellNestedLayout::supports(outputType)
+              ? std::make_unique<CellNestedAssembler>(
+                    outputType,
+                    decompressor_.get(),
+                    pool_,
+                    CellDecodeLimits{})
               : nullptr),
       compositeConverter_(outputType, pool_) {}
+
+CellShuffleReader::~CellShuffleReader() = default;
 
 CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
   // Opening streams and reading blocks is the input's share of the decode
@@ -122,8 +131,11 @@ CellShuffleReader::NextBlock CellShuffleReader::nextBlock() {
   const uint64_t start = currentTimeNs();
   const uint64_t decompressStart = decompressTimeNs();
   SCOPE_EXIT {
-    readTimeNs_ +=
-        currentTimeNs() - start - (decompressTimeNs() - decompressStart);
+    const uint64_t elapsed = currentTimeNs() - start;
+    const uint64_t decompress = decompressTimeNs() - decompressStart;
+    if (elapsed > decompress) {
+      readTimeNs_ += elapsed - decompress;
+    }
   };
   while (!exhausted_) {
     if (source_ == nullptr) {
@@ -200,16 +212,20 @@ void CellShuffleReader::readCompositeBlock() {
     BOLT_FAIL(
         "malformed composite shuffle block: truncated composite block body");
   }
-  const char* body = compositeStored_->as<char>();
+  const uint8_t* storedData =
+      stored > 0 ? compositeStored_->as<uint8_t>() : nullptr;
+  const char* body = reinterpret_cast<const char*>(storedData);
   if (layout == RunLayout::kCombined) {
     resetBuffer(compositeDecoded_, decodedBytes, pool_);
-    if (!decompressor_->decompress(
-            {compositeStored_->as<uint8_t>(), stored},
-            {compositeDecoded_->asMutable<uint8_t>(), decodedBytes})) {
+    uint8_t* decodedData =
+        decodedBytes > 0 ? compositeDecoded_->asMutable<uint8_t>() : nullptr;
+    if (stored == 0 ||
+        !decompressor_->decompress(
+            {storedData, stored}, {decodedData, decodedBytes})) {
       BOLT_FAIL(
           "malformed composite shuffle block: composite block decompression failed");
     }
-    body = compositeDecoded_->as<char>();
+    body = reinterpret_cast<const char*>(decodedData);
   }
 
   std::vector<std::string_view> rows;
@@ -238,19 +254,30 @@ void CellShuffleReader::readCompositeBlock() {
 
 RowVectorPtr CellShuffleReader::nextComposite() {
   const uint64_t start = currentTimeNs();
-  const size_t end = std::min(
+  const size_t limit = std::min(
       compositeRows_.size(),
       nextCompositeRow_ + static_cast<size_t>(std::max(batchSize_, 1)));
-  std::vector<std::string_view> slice(
-      compositeRows_.begin() + nextCompositeRow_, compositeRows_.begin() + end);
+  const uint64_t byteCap = batchByteSize_ > 0
+      ? std::min<uint64_t>(
+            static_cast<uint64_t>(batchByteSize_),
+            std::numeric_limits<int32_t>::max())
+      : static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+  size_t end = nextCompositeRow_;
   uint64_t total = 0;
-  for (const auto& row : slice) {
-    total += row.size();
+  while (end < limit) {
+    const uint64_t rowBytes = compositeRows_[end].size();
+    if (end > nextCompositeRow_ && total + rowBytes > byteCap) {
+      break;
+    }
+    total += rowBytes;
+    ++end;
   }
   BOLT_CHECK_LE(
       total,
       std::numeric_limits<int32_t>::max(),
       "composite rows too large for one vector");
+  std::vector<std::string_view> slice(
+      compositeRows_.begin() + nextCompositeRow_, compositeRows_.begin() + end);
   nextCompositeRow_ = end;
   auto output = compositeConverter_.convertToComposite(
       slice, static_cast<int32_t>(total));

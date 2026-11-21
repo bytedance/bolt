@@ -116,9 +116,9 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/MemoryCopy.h"
 #include "bolt/type/Type.h"
 
@@ -279,10 +279,6 @@ enum class StreamKind : uint8_t {
 struct CellStream {
   uint16_t column; // logical column (rowType child), not wire column
   StreamKind kind;
-  /// Sign extension of kConstNarrow and kBitPack values. String lengths are
-  /// non-negative so either interpretation matches; they are flagged signed
-  /// to match their Bigint encoding.
-  bool isSigned;
 };
 
 /// Maps a shuffle row type (pid column already stripped) onto wire columns
@@ -310,6 +306,8 @@ class CellLayout {
     }
   }
 
+  static constexpr uint32_t kInvalidWireColumn = UINT32_MAX;
+
   static CellLayout create(const RowTypePtr& rowType);
 
   uint32_t numColumns() const {
@@ -322,10 +320,11 @@ class CellLayout {
   }
 
   uint32_t numWireColumns() const {
-    return logicalOfWire_.size();
+    return static_cast<uint32_t>(logicalOfWire_.size());
   }
 
   uint32_t wireColumn(uint32_t column) const {
+    BOLT_DCHECK(!isUnknownColumn(column));
     return wireOfColumn_[column];
   }
 
@@ -349,7 +348,8 @@ class CellLayout {
   }
 
   bool isStringColumn(uint32_t column) const {
-    return isString_[column];
+    const auto kind = rowType_->childAt(column)->kind();
+    return kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY;
   }
 
   const RowTypePtr& rowType() const {
@@ -363,7 +363,6 @@ class CellLayout {
   std::vector<uint32_t> wireOfColumn_;
   std::vector<CellStream> streams_;
   std::vector<uint32_t> firstStream_;
-  std::vector<bool> isString_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

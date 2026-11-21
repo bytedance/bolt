@@ -64,8 +64,6 @@ class CellNestedLayout {
   };
 
   struct Space {
-    /// The container whose elements the space holds; kNone for the rows.
-    uint32_t owner;
     /// Containers between the space and the rows.
     uint32_t depth;
     /// The layout columns at the space's positions, ascending, UNKNOWN
@@ -124,9 +122,9 @@ class CellNestedLayout {
     return maxDepth_;
   }
 
-  /// The space of each wire column's positions.
-  const std::vector<uint32_t>& wireSpaces() const {
-    return wireSpaces_;
+  /// Whether a layout column has the rows' positions (space 0).
+  bool inRowSpace(uint32_t col) const {
+    return nodes_[col].space == 0;
   }
 
  private:
@@ -139,7 +137,6 @@ class CellNestedLayout {
   std::vector<Space> spaces_;
   uint32_t maxDepth_{0};
   CellLayout layout_;
-  std::vector<uint32_t> wireSpaces_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

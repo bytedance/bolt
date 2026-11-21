@@ -74,8 +74,20 @@ std::string bytesOf(const std::vector<T>& values) {
 /// `values` as an encoded stream, as the writer encodes them.
 template <typename T>
 std::string encoded(const std::vector<T>& values) {
+  constexpr uint32_t kValuesPerBlock = kCacheLineBytes / sizeof(T);
+  uint8_t block[kMaxBlockBytes];
   std::string out;
-  encodeStream<T>(values.data(), values.size(), out);
+  size_t i = 0;
+  for (; i + kValuesPerBlock <= values.size(); i += kValuesPerBlock) {
+    const uint32_t bytes =
+        encodeBlock(values.data() + i, kValuesPerBlock, block);
+    out.append(reinterpret_cast<const char*>(block), bytes);
+  }
+  if (i < values.size()) {
+    const uint32_t bytes = encodeBlock(
+        values.data() + i, static_cast<uint32_t>(values.size() - i), block);
+    out.append(reinterpret_cast<const char*>(block), bytes);
+  }
   return out;
 }
 
@@ -1108,10 +1120,11 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
 
 TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
   const auto errorOf = [&](const std::vector<std::string>& streams,
-                           const RowTypePtr& type) -> std::string {
+                           const RowTypePtr& type,
+                           Codec* codec = nullptr) -> std::string {
     try {
       const auto reader =
-          test::makeReader(streams, type, nullptr, pool(), 4096, 1 << 20);
+          test::makeReader(streams, type, codec, pool(), 4096, 1 << 20);
       while (reader->next() != nullptr) {
       }
     } catch (const BoltException& e) {
@@ -1156,6 +1169,17 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
   EXPECT_EQ(
       errorOf({bigints + composite}, bigint),
       "malformed composite shuffle block: truncated composite block header");
+
+  // A compressed composite block with stored == 0 must fail cleanly instead
+  // of dereferencing a null buffer.
+  auto lz4 = createCodec(arrow::Compression::LZ4_FRAME, CodecOptions{});
+  const auto emptyCompressedComposite =
+      std::string(1, static_cast<char>(CellBlockKind::kCompositeRows)) +
+      bytesOf<uint32_t>({1}) + bytesOf<uint64_t>({4, 0}) +
+      std::string(1, static_cast<char>(RunLayout::kCombined));
+  EXPECT_EQ(
+      errorOf({emptyCompressedComposite}, bigint, lz4.get()),
+      "malformed composite shuffle block: composite block decompression failed");
 
   // The next stream's first block still reports an invalid kind.
   EXPECT_EQ(

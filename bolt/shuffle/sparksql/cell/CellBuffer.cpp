@@ -17,8 +17,6 @@
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 
 #include <algorithm>
-#include <cstring>
-#include <functional>
 #include <limits>
 #include <utility>
 
@@ -261,9 +259,7 @@ DataCells::DataCells(
       pool_->allocate(numChains * sizeof(ChainInfo)));
   // The pool aligns to 64 bytes: every ChainInfo stays in one cache line.
   BOLT_CHECK_EQ(reinterpret_cast<uintptr_t>(infos_) % alignof(ChainInfo), 0);
-  if (numChains != 0) {
-    std::fill(infos_, infos_ + numChains, ChainInfo{});
-  }
+  std::fill(infos_, infos_ + numChains, ChainInfo{});
 }
 
 DataCells::~DataCells() {
@@ -368,7 +364,7 @@ void DataCells::appendWithAllocation(
       }
       info.lastCell = id;
       info.tail = allocator_->cellData(id);
-      info.tailLeft = allocator_->cellBytes();
+      info.tailLeft = cellBytes;
       ++info.numCells;
     }
     const uint32_t copy = bytes < info.tailLeft ? bytes : info.tailLeft;

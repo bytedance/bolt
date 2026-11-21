@@ -18,6 +18,7 @@
 
 #include <folly/ScopeGuard.h>
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 #include <sstream>
 
@@ -182,9 +183,14 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     buildNullBody(in, pid, payload.rows, scratch_, pool_);
     payload.nullDecodedSize = compressor_.compressNullBody(scratch_, 0);
     payload.nullOffset = spill_.end();
-    payload.nullLength = scratch_ ? static_cast<uint32_t>(scratch_->size()) : 0;
+    const size_t nullBytes = scratch_ ? scratch_->size() : 0;
+    BOLT_CHECK_LE(
+        nullBytes,
+        std::numeric_limits<uint32_t>::max(),
+        "null body exceeds u32 size limit");
+    payload.nullLength = static_cast<uint32_t>(nullBytes);
     if (payload.nullLength > 0) {
-      spill_.append(scratch_->as<char>(), scratch_->size());
+      spill_.append(scratch_->as<char>(), nullBytes);
     }
     sealed_[pid].push_back(std::move(payload));
     ++numSealedPayloads_;
@@ -249,12 +255,12 @@ void LocalCellOutput::writeSpilledSegment(
     // stream.
     const uint64_t headerBytes = 1 + 16ull * numStreams;
     BOLT_CHECK_GE(segmentBytes, headerBytes, "corrupt cell spill segment");
-    std::vector<uint64_t> sizes(2ull * numStreams);
-    spill_.read(segment.begin + 1, sizes.data(), 16ull * numStreams);
+    segmentSizes_.resize(2ull * numStreams);
+    spill_.read(segment.begin + 1, segmentSizes_.data(), 16ull * numStreams);
     uint64_t decodedSum = 0;
     for (uint32_t s = 0; s < numStreams; ++s) {
-      const uint64_t decoded = sizes[numStreams + s];
-      decodedSum += decoded != 0 ? decoded : sizes[s];
+      const uint64_t decoded = segmentSizes_[numStreams + s];
+      decodedSum += decoded != 0 ? decoded : segmentSizes_[s];
     }
     rawBytesWritten_ += combinedRunHeaderBytes + decodedSum;
     ++copiedSegments_;
@@ -267,11 +273,11 @@ void LocalCellOutput::writeSpilledSegment(
       "corrupt cell spill segment");
   BOLT_CHECK_GE(
       segmentBytes, combinedRunHeaderBytes, "corrupt cell spill segment");
-  std::vector<uint64_t> decodedSizes(numStreams);
+  segmentSizes_.resize(numStreams);
   // Past the layout byte and the u64 stored size.
-  spill_.read(segment.begin + 9, decodedSizes.data(), 8ull * numStreams);
+  spill_.read(segment.begin + 9, segmentSizes_.data(), 8ull * numStreams);
   uint64_t decodedSum = 0;
-  for (const auto size : decodedSizes) {
+  for (const auto size : segmentSizes_) {
     decodedSum += size;
   }
   rawBytesWritten_ += combinedRunHeaderBytes + decodedSum;
@@ -346,12 +352,9 @@ void LocalCellOutput::logWindowDiagnostics(
   uint64_t rows = 0;
   uint64_t resident = 0;
   if (windowHasData) {
-    const uint32_t numStreams = layout_->numStreams();
     for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
       rows += in.rowCounts[pid];
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        resident += in.cells->bytes(pid, s);
-      }
+      resident += residentBytes(in, pid);
     }
   }
   std::ostringstream os;
@@ -403,6 +406,8 @@ void LocalCellOutput::finalize(
     mergeToDataFile(options_, {this, &composite_}, metrics);
   }
   compressor_.releaseWorkspace();
+  segmentSizes_.clear();
+  segmentSizes_.shrink_to_fit();
   scratch_.reset();
   metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);

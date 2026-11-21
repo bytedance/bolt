@@ -247,7 +247,6 @@ class CellPayloadDecoder {
     const uint8_t* indexes{nullptr};
     uint64_t matchedRows{0};
     uint64_t matchedRead{0};
-    size_t nextDictionary{0};
     size_t currentDictionary{0};
     uint32_t currentMatchedLeft{0};
   };
@@ -280,8 +279,13 @@ class CellPayloadDecoder {
   bool expandNulls(uint32_t rowCount, std::string& error);
 
   /// `onlyRun`: the payload's only run, whose combined buffer the streams may
-  /// view in place instead of copying it apart.
-  bool parseRun(CellByteSource& in, bool onlyRun, std::string& error);
+  /// view in place instead of copying it apart. Sets `streamsInCombinedDecoded`
+  /// when stream views point directly into `combinedDecoded_`.
+  bool parseRun(
+      CellByteSource& in,
+      bool onlyRun,
+      bool& streamsInCombinedDecoded,
+      std::string& error);
 
   /// Expands the nulls and opens every column at `rowCount` rows; with none,
   /// runs the whole-stream checks at once.
@@ -370,6 +374,10 @@ class CellPayloadDecoder {
   template <typename T>
   VectorPtr makeFlat(uint32_t col, const TypePtr& type);
 
+  uint64_t payloadBitmapBytes() const {
+    return (static_cast<uint64_t>(rowCount_) + 7) / 8;
+  }
+
   const CellLayout layout_;
   CellDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
@@ -384,7 +392,6 @@ class CellPayloadDecoder {
   /// The payload's decoded streams: into streamBytes_, or into combinedDecoded_
   /// when a onlyRun combined run is decompressed there.
   std::vector<std::string_view> streamViews_;
-  bool streamsInCombinedDecoded_{false};
   BufferPtr nullBody_;
   std::vector<NullTag> nullTags_;
   /// Per kRawNull column, its records in the null body of the reading
@@ -394,7 +401,6 @@ class CellPayloadDecoder {
   /// The kRawNull columns' records expanded, a bitmap per column.
   BufferPtr expandedNulls_;
   std::vector<const uint8_t*> bitmaps_; // into expandedNulls_, per column
-  uint64_t bitmapBytes_{0}; // of each bitmap in expandedNulls_
   std::vector<uint8_t> encodingTags_;
   std::vector<uint64_t> storedSizes_;
   std::vector<uint64_t> decodedSizes_;
@@ -404,9 +410,9 @@ class CellPayloadDecoder {
   BufferPtr compressedScratch_;
   BufferPtr combinedDecoded_;
 
-  // Per-append scratch, at most one batch of dense values.
+  // Per-append scratch, at most one batch of dense values (or dense seconds
+  // followed by dense nanos for TIMESTAMP).
   BufferPtr denseScratch_;
-  BufferPtr timestampScratch_; // dense seconds then nanos
 
   std::vector<ColumnBatch> batch_;
   bool batchOpen_{false};

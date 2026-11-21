@@ -256,7 +256,10 @@ void SparkShuffleReader::close() {
         readNs / 1e6,
         decompressNs / 1e6,
         deserializeNs / 1e6);
-    cellShuffleReader_.reset();
+    {
+      NanosecondTimer timer(&deserializerDestroyTime_);
+      cellShuffleReader_.reset();
+    }
   }
   {
     auto stats = this->stats().rlock();

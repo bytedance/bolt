@@ -238,6 +238,7 @@ class RunCompressor {
   void storeRun(
       RunSink& sink,
       std::span<const uint64_t> sizes,
+      uint64_t total,
       RunStreamVisitor visit);
 
   /// Counts a frame of `bytes`, compressed into `stored` bytes (0: stored
@@ -266,8 +267,10 @@ class RunCompressor {
   /// null body's.
   BufferPtr frame_;
   BufferPtr compressed_;
-  /// write()'s stream sizes.
+  /// write()'s stream sizes and reusable run header scratch buffers.
   std::vector<uint64_t> sizes_;
+  std::vector<char> combinedHeader_;
+  std::vector<uint64_t> separateHeader_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

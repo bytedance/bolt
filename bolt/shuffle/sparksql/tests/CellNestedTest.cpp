@@ -2099,5 +2099,36 @@ TEST_F(CellNestedTest, writerReturnsScratchAfterEachBatch) {
       input, written, arrow::Compression::UNCOMPRESSED, pool());
 }
 
+TEST_F(CellNestedTest, oversizedNonNullStructChildrenAreSlicedToParentSize) {
+  const auto innerType = ROW({"x"}, {BIGINT()});
+  const auto outerType = ROW({"inner"}, {innerType});
+  const auto schema = ROW({"s"}, {outerType});
+
+  // Grandchild has only 4 rows, while inner ROW has 8 rows (valid when the
+  // outer ROW has size 4 and no nulls).
+  auto grandchild = makeFlatVector<int64_t>({10, 20, 30, 40});
+  auto inner = std::make_shared<RowVector>(
+      pool(), innerType, nullptr, 8, std::vector<VectorPtr>{grandchild});
+  auto outer = std::make_shared<RowVector>(
+      pool(), outerType, nullptr, 4, std::vector<VectorPtr>{inner});
+  auto batch = std::make_shared<RowVector>(
+      pool(), schema, nullptr, 4, std::vector<VectorPtr>{outer});
+
+  auto expectedInner = std::make_shared<RowVector>(
+      pool(), innerType, nullptr, 4, std::vector<VectorPtr>{grandchild});
+  auto expectedOuter = std::make_shared<RowVector>(
+      pool(), outerType, nullptr, 4, std::vector<VectorPtr>{expectedInner});
+  auto expectedBatch = std::make_shared<RowVector>(
+      pool(), schema, nullptr, 4, std::vector<VectorPtr>{expectedOuter});
+
+  const auto input = test::roundRobin({batch}, 2);
+  const auto expected = test::roundRobin({expectedBatch}, 2);
+  auto options = writerOptions(2, true);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  const auto written = test::writeShuffle(writer, options, input, pool());
+  test::expectReadsBack(
+      expected, written, arrow::Compression::UNCOMPRESSED, pool());
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell

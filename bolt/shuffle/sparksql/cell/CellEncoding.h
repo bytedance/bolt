@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <string>
 #include <type_traits>
 
 #include "bolt/common/base/MemoryCopy.h"
@@ -100,11 +99,6 @@ packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
 /// Values one block holds at most: a line of SmallInts. A block of T holds
 /// at most kCacheLineBytes / sizeof(T).
 inline constexpr uint32_t kMaxBlockValues = kCacheLineBytes / sizeof(int16_t);
-
-/// The low `bytes` bytes of `value`, little-endian host assumed.
-inline void storeLowBytes(uint8_t* out, uint64_t value, uint32_t bytes) {
-  ::memcpy(out, &value, bytes);
-}
 
 template <typename T, typename Count>
 inline constexpr bool kFullBigintBlock = std::is_same_v<T, int64_t>&&
@@ -215,8 +209,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   uint8_t* pos = out;
   if (deltaBits <= 63 && forWins) {
     *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
-    storeLowBytes(
-        pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
+    folly::storeUnaligned<T>(pos, minValue);
     pos += kWidth;
     // Constant blocks returned above, so deltaBits is nonzero.
     const uint64_t base = static_cast<uint64_t>(minValue);
@@ -340,7 +333,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
         return 0;
       }
       const uint64_t base = static_cast<uint64_t>(
-          signExtend(loadLowBytes(body, kWidth), kWidth * 8));
+          static_cast<int64_t>(memory::loadUnaligned<T>(body)));
       if (param == 0) {
         const T value = static_cast<T>(base);
         for (uint32_t i = 0; i < count; ++i) {
@@ -525,7 +518,7 @@ decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
   }
   T base{};
   if (isForBitPack) {
-    base = static_cast<T>(signExtend(loadLowBytes(in + 1, kWidth), kWidth * 8));
+    base = memory::loadUnaligned<T>(in + 1);
   }
   unpackFieldsAvx2(in + headerBytes, bits, dst);
   finishFieldsAvx2(dst, bits, isForBitPack, base);
@@ -606,25 +599,6 @@ decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
       dst);
 }
 
-/// Encodes a whole source array as an encoded stream: full 64-byte source
-/// blocks then at most one tail block. Appends to out. Used by tests only;
-/// the split path encodes a block at a time as its cache lines fill.
-template <typename T>
-inline void encodeStream(const T* values, size_t count, std::string& out) {
-  constexpr uint32_t kValuesPerBlock = kCacheLineBytes / sizeof(T);
-  uint8_t block[kMaxBlockBytes];
-  size_t i = 0;
-  for (; i + kValuesPerBlock <= count; i += kValuesPerBlock) {
-    const uint32_t bytes = encodeBlock(values + i, kValuesPerBlock, block);
-    out.append(reinterpret_cast<const char*>(block), bytes);
-  }
-  if (i < count) {
-    const uint32_t bytes =
-        encodeBlock(values + i, static_cast<uint32_t>(count - i), block);
-    out.append(reinterpret_cast<const char*>(block), bytes);
-  }
-}
-
 /// Decodes an encoded stream of `valueCount` values in pieces, handed out
 /// in arbitrary-sized reads. A block that straddles two reads is decoded
 /// once and its rest staged here, so the caller never needs room for more
@@ -644,6 +618,9 @@ class StreamCursor {
   /// Writes the next `n` values to dst. False when the stream holds fewer
   /// values or a block is malformed.
   BOLT_CELL_KERNEL bool next(uint64_t n, T* dst) {
+    if (FOLLY_UNLIKELY(n == 0)) {
+      return true;
+    }
     const uint32_t fromStaged =
         std::min<uint64_t>(n, stagedCount_ - stagedPos_);
     ::memcpy(dst, staged_ + stagedPos_, fromStaged * sizeof(T));
