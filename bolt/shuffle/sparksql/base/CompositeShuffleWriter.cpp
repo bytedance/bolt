@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/block/CompositeShuffleWriter.h"
+#include "bolt/shuffle/sparksql/base/CompositeShuffleWriter.h"
 
 #include <folly/ScopeGuard.h>
 #include <algorithm>
 #include <numeric>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/FlatVector.h"
 

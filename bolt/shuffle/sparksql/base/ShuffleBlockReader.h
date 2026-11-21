@@ -27,8 +27,8 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
-#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
-#include "bolt/shuffle/sparksql/block/ShuffleByteSource.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/base/ShuffleByteSource.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql {

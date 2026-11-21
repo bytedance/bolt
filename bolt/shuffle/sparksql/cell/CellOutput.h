@@ -21,7 +21,7 @@
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
-#include "bolt/shuffle/sparksql/block/PartitionBlockOutput.h"
+#include "bolt/shuffle/sparksql/base/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 

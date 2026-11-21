@@ -553,12 +553,12 @@ output.
 
 | File | Contents |
 | --- | --- |
-| `../block/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, packed `RowBlockHeader`, framed row block writer, and buffer helpers |
-| `../block/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
-| `../block/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
-| `../block/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
-| `../block/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
-| `../block/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
+| `../base/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, packed `RowBlockHeader`, framed row block writer, and buffer helpers |
+| `../base/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
+| `../base/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
+| `../base/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
+| `../base/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
+| `../base/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
 | `CellFormat.h` / `.cpp` | Wire format definition and constants; `CellLayout` (row type to wire columns and streams); `BOLT_CELL_KERNEL` |
 | `CellEncoding.h` | Encoding Block encode/decode kernels (scalar and AVX2), `StreamCursor` |
 | `CellBuffer.h` / `.cpp` | `ChunkAllocator`, `DataCells` (chains), `NullClass`, `NullCells` |

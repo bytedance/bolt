@@ -21,7 +21,7 @@
 
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
-#include "bolt/shuffle/sparksql/block/PartitionBlockOutput.h"
+#include "bolt/shuffle/sparksql/base/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {

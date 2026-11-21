@@ -28,7 +28,7 @@
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
-#include "bolt/shuffle/sparksql/block/ShuffleByteSource.h"
+#include "bolt/shuffle/sparksql/base/ShuffleByteSource.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/type/StringView.h"

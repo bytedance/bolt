@@ -46,11 +46,11 @@ bolt_add_library(
   cell/CellShuffleWriter.cpp
   cell/CellFormat.cpp
   cell/RunCompressor.cpp
-  block/CompositeShuffleReader.cpp
-  block/CompositeShuffleWriter.cpp
-  block/PartitionBlockOutput.cpp
-  block/ShuffleBlockFormat.cpp
-  block/ShuffleBlockReader.cpp
+  base/CompositeShuffleReader.cpp
+  base/CompositeShuffleWriter.cpp
+  base/PartitionBlockOutput.cpp
+  base/ShuffleBlockFormat.cpp
+  base/ShuffleBlockReader.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp
