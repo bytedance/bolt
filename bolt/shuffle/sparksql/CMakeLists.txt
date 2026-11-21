@@ -40,13 +40,17 @@ bolt_add_library(
   cell/CellOutput.cpp
   cell/CellPayload.cpp
   cell/CellSplitter.cpp
-  cell/CompositeShuffleWriter.cpp
   cell/CellShuffleCheck.cpp
   cell/CellShuffleReader.cpp
   cell/CellShuffleTypeAdapter.cpp
   cell/CellShuffleWriter.cpp
   cell/CellFormat.cpp
   cell/RunCompressor.cpp
+  base/CompositeShuffleReader.cpp
+  base/CompositeShuffleWriter.cpp
+  base/PartitionBlockOutput.cpp
+  base/ShuffleBlockFormat.cpp
+  base/ShuffleBlockReader.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp
@@ -69,7 +73,6 @@ bolt_add_library(
   partitioner/RoundRobinPartitioner.cpp
   partitioner/SinglePartitioner.cpp
   Options.cpp
-  PartitionBlockOutput.cpp
   Payload.cpp
   ShuffleColumnarToRowConverter.cpp
   ShuffleMemoryPool.cpp

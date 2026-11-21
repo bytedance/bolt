@@ -65,6 +65,7 @@ CellShuffleWriter::CellShuffleWriter(
       isRemote_(
           options_.partitionWriterOptions.partitionWriterType ==
           PartitionWriterType::kCeleborn) {
+  metrics_.useCellShuffle = 1;
   // Composite-only input needs an output before ordinary layout initialization.
   if (isRemote_) {
     BOLT_CHECK_NOT_NULL(
@@ -298,40 +299,6 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   return splitBatch(std::move(rv));
 }
 
-arrow::Status CellShuffleWriter::computeOrdinaryPartitions(
-    const RowVector& rv) {
-  if (options_.partitioning == Partitioning::kSingle) {
-    row2Partition_.assign(rv.size(), 0);
-    std::fill(partition2RowCount_.begin(), partition2RowCount_.end(), 0);
-    partition2RowCount_[0] = rv.size();
-    return arrow::Status::OK();
-  }
-  if (!partitioner_->hasPid()) {
-    return partitioner_->compute(
-        nullptr, rv.size(), row2Partition_, partition2RowCount_);
-  }
-  BOLT_CHECK_GT(rv.childrenSize(), 0, "expected a pid column");
-  const auto& pid = rv.childAt(0);
-  BOLT_CHECK_EQ(
-      static_cast<int32_t>(pid->typeKind()),
-      static_cast<int32_t>(TypeKind::INTEGER),
-      "pid column must be INTEGER");
-  if (pid->isFlatEncoding()) {
-    return partitioner_->compute(
-        pid->asUnchecked<FlatVector<int32_t>>()->rawValues(),
-        rv.size(),
-        row2Partition_,
-        partition2RowCount_);
-  }
-  DecodedVector decoded(*pid);
-  std::vector<int32_t> values(rv.size());
-  for (vector_size_t row = 0; row < rv.size(); ++row) {
-    values[row] = decoded.valueAt<int32_t>(row);
-  }
-  return partitioner_->compute(
-      values.data(), rv.size(), row2Partition_, partition2RowCount_);
-}
-
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   if (shredder_ != nullptr) {
     return splitNested(std::move(rv));
@@ -355,7 +322,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     SCOPE_EXIT {
       inSplit_ = false;
     };
-    RETURN_NOT_OK(computeOrdinaryPartitions(*rv));
+    RETURN_NOT_OK(computePartitions(*rv));
 
     const uint64_t classifyStart = currentTimeNs();
     const uint32_t columnOffset = partitioner_->hasPid() ? 1 : 0;
@@ -465,7 +432,7 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     SCOPE_EXIT {
       inSplit_ = false;
     };
-    RETURN_NOT_OK(computeOrdinaryPartitions(*rv));
+    RETURN_NOT_OK(computePartitions(*rv));
     if (FOLLY_UNLIKELY(!dictProbed_)) {
       probeDictionary(numRows, shredder_->decoded(), shredder_->nullClass());
       dictProbed_ = true;
@@ -891,7 +858,6 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.begin(),
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
-  metrics_.peakBytes = boltPool_->peakBytes();
   metrics_.sealSpillTime += static_cast<int64_t>(sealSpillNs_);
   if (initialized_) {
     logPressure();

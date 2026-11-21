@@ -35,7 +35,7 @@ constexpr uint32_t kLengthsPerRead = 1024;
 
 CellNestedAssembler::CellNestedAssembler(
     RowTypePtr type,
-    CellDecompressor* decompressor,
+    ShuffleDecompressor* decompressor,
     memory::MemoryPool* pool,
     CellDecodeLimits limits)
     : layout_(std::move(type)),
@@ -50,7 +50,9 @@ CellNestedAssembler::CellNestedAssembler(
   }
 }
 
-bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
+bool CellNestedAssembler::beginPayload(
+    ShuffleByteSource& in,
+    std::string& error) {
   uint32_t rowCount = 0;
   if (!payloadDecoder_.readPayload(in, rowCount, error)) {
     return false;

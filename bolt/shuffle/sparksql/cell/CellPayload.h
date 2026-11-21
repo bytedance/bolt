@@ -22,72 +22,19 @@
 
 #pragma once
 
-#include <cstring>
-#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
+#include "bolt/shuffle/sparksql/base/ShuffleByteSource.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/type/StringView.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
-
-/// Pull-based byte input. Reads are exact: short input is a format error the
-/// decoder reports, so read() returns false rather than a partial count.
-class CellByteSource {
- public:
-  virtual ~CellByteSource() = default;
-
-  /// Reads exactly `n` bytes into out. False when the source ends first.
-  virtual bool read(void* out, size_t n) = 0;
-
-  /// True when no byte is left. Lets a stream reader distinguish "clean end
-  /// between payloads" from truncation.
-  virtual bool atEnd() = 0;
-
-  /// Upper bound on bytes still available, SIZE_MAX when unknown. The
-  /// decoder compares declared lengths against it before allocating or
-  /// reading.
-  virtual size_t remainingBound() const {
-    return std::numeric_limits<size_t>::max();
-  }
-};
-
-class MemoryByteSource final : public CellByteSource {
- public:
-  explicit MemoryByteSource(std::span<const uint8_t> bytes)
-      : data_(bytes.data()), size_(bytes.size()) {}
-
-  bool read(void* out, size_t n) override {
-    if (size_ - pos_ < n) {
-      return false;
-    }
-    if (n != 0) {
-      ::memcpy(out, data_ + pos_, n);
-    }
-    pos_ += n;
-    return true;
-  }
-
-  bool atEnd() override {
-    return pos_ == size_;
-  }
-
-  size_t remainingBound() const override {
-    return size_ - pos_;
-  }
-
- private:
-  const uint8_t* const data_;
-  const size_t size_;
-  size_t pos_{0};
-};
 
 /// Bounds on untrusted input; zero disables a limit. The defaults are what
 /// the writer can emit. Run and null-body buffers come from the reader
@@ -99,20 +46,6 @@ struct CellDecodeLimits {
   /// stay far above the runs a writer under memory pressure legitimately
   /// spills into one payload (66105 were seen); the writer checks it too.
   uint32_t maxRunCount{1u << 24};
-};
-
-/// The codec, decompression side. The format never identifies a codec;
-/// writer and reader are configured with the same one by the outer
-/// protocol.
-class CellDecompressor {
- public:
-  virtual ~CellDecompressor() = default;
-
-  /// Decompresses `in` into exactly out.size() bytes at `out`; false when
-  /// the input cannot be decoded or produces a different length.
-  virtual bool decompress(
-      std::span<const uint8_t> in,
-      std::span<uint8_t> out) = 0;
 };
 
 /// Decodes ColumnarPayloads of one schema into RowVectors, streaming: a
@@ -129,7 +62,7 @@ class CellPayloadDecoder {
   /// a compressed buffer is then a format error.
   CellPayloadDecoder(
       CellLayout layout,
-      CellDecompressor* decompressor,
+      ShuffleDecompressor* decompressor,
       memory::MemoryPool* pool,
       CellDecodeLimits limits = {});
 
@@ -141,13 +74,14 @@ class CellPayloadDecoder {
   /// rows then come out through appendRows(). The previous payload must be
   /// fully appended. On malformed input returns false with `error` set,
   /// having consumed an unspecified prefix of `in`.
-  bool beginPayload(CellByteSource& in, std::string& error);
+  bool beginPayload(ShuffleByteSource& in, std::string& error);
 
   /// Reads one payload as beginPayload() does, but opens no column: the
   /// decoders of its columns open it with openPayload(). `rowCount` is the
   /// header's. What it read stays valid until the next readPayload(),
   /// beginPayload() or decode() of this decoder.
-  bool readPayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+  bool
+  readPayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Opens the payload another decoder, `source`, read for this decoder's
   /// columns, column c being source's sourceColumns[c] - one entry per
@@ -212,7 +146,7 @@ class CellPayloadDecoder {
   /// Decodes exactly one payload from `in` as one vector of all its rows.
   /// On success fills `out` and returns true; on malformed input returns
   /// false with `error` set and consumes an unspecified prefix of `in`.
-  bool decode(CellByteSource& in, RowVectorPtr& out, std::string& error);
+  bool decode(ShuffleByteSource& in, RowVectorPtr& out, std::string& error);
 
   const CellLayout& layout() const {
     return layout_;
@@ -266,11 +200,12 @@ class CellPayloadDecoder {
   }
 
   /// Header, null body and every run.
-  bool parsePayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+  bool
+  parsePayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Reads the null body's tags and locates each kRawNull column's records.
   bool parseNullBody(
-      CellByteSource& in,
+      ShuffleByteSource& in,
       uint32_t nullStoredSize,
       uint32_t nullDecodedSize,
       std::string& error);
@@ -282,7 +217,7 @@ class CellPayloadDecoder {
   /// view in place instead of copying it apart. Sets `streamsInCombinedDecoded`
   /// when stream views point directly into `combinedDecoded_`.
   bool parseRun(
-      CellByteSource& in,
+      ShuffleByteSource& in,
       bool onlyRun,
       bool& streamsInCombinedDecoded,
       std::string& error);
@@ -379,7 +314,7 @@ class CellPayloadDecoder {
   }
 
   const CellLayout layout_;
-  CellDecompressor* const decompressor_;
+  ShuffleDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
   const CellDecodeLimits limits_;
   /// Fixed bytes of one decoded row, the batch byte estimate's base.
@@ -440,11 +375,6 @@ BOLT_CELL_KERNEL bool expandNullRecords(
 struct CellWindowInput;
 class RunCompressor;
 
-/// Bytes below which a frame is stored rather than compressed - a run, a
-/// stream of a kSeparate run, a null body, a CompositeRows body: the
-/// codec's frame would not pay for itself. The one threshold for every frame
-/// the Cell writer compresses.
-constexpr uint64_t kMinCompressBytes = 256;
 /// A run at least this large is written kSeparate, each stream its own
 /// frame.
 constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
@@ -454,30 +384,6 @@ constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 inline uint64_t combinedRunHeaderBytes(uint32_t numStreams) {
   return 1 + 8 + 8ull * numStreams;
 }
-
-uint64_t currentTimeNs();
-
-/// Sets the size of `buffer`, allocating or growing it from `pool`, and
-/// returns its data. Keeps the bytes - growth copies them and doubles the
-/// capacity - for buffers appended to; and the capacity on shrink, so one
-/// buffer serves every partition or payload.
-char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool);
-
-/// resizeBuffer() for a workspace about to be overwritten: the bytes are
-/// not kept. Within the capacity it only sets the size; past it, the old
-/// buffer goes back to `pool` before one of exactly `size` is allocated, so
-/// growing neither copies nor holds both, nor over-allocates.
-char* resetBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool);
-
-void appendBytes(
-    BufferPtr& out,
-    const void* data,
-    size_t bytes,
-    memory::MemoryPool* pool);
-
-void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool);
-
-void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool);
 
 /// Appends the null body of one partition.
 void buildNullBody(

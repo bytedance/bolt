@@ -22,12 +22,12 @@
 
 #include "bolt/vector/ComplexVector.h"
 
+#include "bolt/shuffle/sparksql/base/CompositeShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
-#include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -145,7 +145,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   };
 
   void initOnFirstBatch(const RowVector& rv);
-  arrow::Status computeOrdinaryPartitions(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// splitBatch() of a nested layout: seals the window first when the
   /// batch's positions do not fit beside it.
