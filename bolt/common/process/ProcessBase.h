@@ -81,6 +81,12 @@ bool hasBmi2();
 // True if the machine has ARM Neon instructions
 bool hasNeon();
 
+// True if the target supports the SIMD instructions used by bulk readers.
+bool hasSimd();
+
+// True if the CPU and OS support ARM SVE and it is not disabled by flag.
+bool hasSve();
+
 } // namespace process
 } // namespace bolt
 } // namespace bytedance
