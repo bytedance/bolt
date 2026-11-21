@@ -7694,6 +7694,7 @@ TEST_F(HashJoinTest, exceededMaxSpillLevel) {
       .referenceQuery(
           "SELECT t_k1, t_k2, t_v1, u_k1, u_k2, u_v1 FROM t, u WHERE t.t_k1 = u.u_k1")
       .config(core::QueryConfig::kSpillStartPartitionBit, "29")
+      .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, "false")
       .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
         auto joinStats = task->taskStats()
                              .pipelineStats.back()
@@ -8361,6 +8362,63 @@ DEBUG_ONLY_TEST_F(HashJoinTest, taskWaitTimeout) {
 
     queryThread.join();
     waitForAllTasksToBeDeleted();
+  }
+}
+
+TEST_F(HashJoinTest, singleKeySpillRanges) {
+  std::vector<RowVectorPtr> buildVectors;
+  int64_t numBuildRows = 0;
+  for (int32_t size : {512, 2'049, 83}) {
+    buildVectors.push_back(makeRowVector(
+        {"bkey", "bvalue"},
+        {makeFlatVector<int64_t>(size, [](auto /*row*/) { return 7; }),
+         makeFlatVector<int64_t>(
+             size, [&](auto row) { return numBuildRows + row; })}));
+    numBuildRows += size;
+  }
+  auto probe = makeRowVector(
+      {"pkey", "pvalue"},
+      {makeFlatVector<int64_t>({7, 7}), makeFlatVector<int64_t>({10, 20})});
+  createDuckDbTable("t", {probe});
+  createDuckDbTable("u", buildVectors);
+
+  auto ids = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(ids)
+                  .values({probe})
+                  .hashJoin(
+                      {"pkey"},
+                      {"bkey"},
+                      PlanBuilder(ids).values(buildVectors).planNode(),
+                      "",
+                      {"pkey", "pvalue", "bkey", "bvalue"},
+                      core::JoinType::kInner)
+                  .planNode();
+  for (const std::string mode : {"disable", "compression"}) {
+    SCOPED_TRACE(mode);
+    auto spillDirectory = TempDirectoryPath::create();
+    auto task =
+        AssertQueryBuilder(plan, duckDbQueryRunner_)
+            .maxDrivers(1)
+            .spillDirectory(spillDirectory->path)
+            .config(core::QueryConfig::kSpillEnabled, true)
+            .config(core::QueryConfig::kJoinSpillEnabled, true)
+            .config(core::QueryConfig::kJoinSpillMemoryThreshold, 1)
+            .config(core::QueryConfig::kMaxSpillFileSize, 0)
+            // Keep separate write blocks so the row target can roll files.
+            .config(core::QueryConfig::kSpillWriteBufferSize, 0)
+            .config(core::QueryConfig::kMaxSpillLevel, 0)
+            .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, true)
+            .config(core::QueryConfig::kRowBasedSpillMode, mode)
+            .config(core::QueryConfig::kHybridJoinEnabled, false)
+            .config(core::QueryConfig::kJitLevel, -1)
+            .assertResults(
+                "SELECT pkey, pvalue, bkey, bvalue FROM t JOIN u ON pkey = bkey");
+    const auto stats = taskSpilledStats(*task);
+    ASSERT_EQ(stats.first.spilledRows, numBuildRows);
+    ASSERT_GT(stats.first.spilledFiles, 1);
+    const auto planStats = toPlanStats(task->taskStats());
+    const auto& customStats = planStats.at(plan->id()).customStats;
+    ASSERT_EQ(customStats.at("skewedHashBuildUsingRangePartition").sum, 1);
   }
 }
 

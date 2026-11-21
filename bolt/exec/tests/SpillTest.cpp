@@ -468,6 +468,64 @@ TEST_P(SpillTest, DISABLED_spillState) {
   spillStateTest(kGB, 2, 8, 8, {}, 8);
 }
 
+TEST_P(SpillTest, fileRowTarget) {
+  for (const uint64_t targetRows : {0, 10, 12}) {
+    for (const bool immediateFlush : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "targetRows {}, immediateFlush {}", targetRows, immediateFlush));
+      folly::Synchronized<common::SpillStats> stats;
+      common::SpillConfig::SpillIOConfig ioConfig{
+          [&]() -> const std::string& { return tempDir_->path; },
+          updateSpilledBytesCb_,
+          "row-target",
+          0,
+          false,
+          1 << 20,
+          compressionKind_,
+          "",
+          std::nullopt};
+      SpillState state(ioConfig, 1, {}, kGB, pool(), &stats);
+      state.setMaxBatchRows(12);
+      state.setImmediateFlush(immediateFlush);
+      state.setPartitionSpilled(0);
+      for (int batch = 0; batch < 3; ++batch) {
+        state.appendToPartition(
+            0,
+            makeRowVector({makeFlatVector<int64_t>(
+                6, [batch](auto row) { return batch * 6 + row; })}),
+            targetRows);
+        if (batch < 2) {
+          // Reaching the target does not close the file until the next block.
+          ASSERT_EQ(state.numFinishedFiles(0), 0);
+        }
+      }
+
+      auto files = state.finish(0);
+      const std::vector<uint64_t> expectedRows = targetRows == 0
+          ? std::vector<uint64_t>{18}
+          : std::vector<uint64_t>{12, 6};
+      ASSERT_EQ(files.size(), expectedRows.size());
+      int64_t expectedValue = 0;
+      for (size_t i = 0; i < files.size(); ++i) {
+        ASSERT_EQ(files[i].rowCount, expectedRows[i]);
+        auto reader = SpillReadFile::create(files[i], pool(), false);
+        RowVectorPtr output;
+        uint64_t fileRows = 0;
+        while (reader->nextBatch(output)) {
+          DecodedVector values(*output->childAt(0));
+          for (vector_size_t row = 0; row < output->size(); ++row) {
+            ASSERT_EQ(values.valueAt<int64_t>(row), expectedValue++);
+          }
+          fileRows += output->size();
+        }
+        ASSERT_EQ(fileRows, files[i].rowCount);
+      }
+      ASSERT_EQ(expectedValue, 18);
+      ASSERT_EQ(stats.copy().spilledRows, 18);
+    }
+  }
+}
+
 TEST_P(SpillTest, spillTimestamp) {
   // Verify that timestamp type retains it nanosecond precision when spilled and
   // read back.

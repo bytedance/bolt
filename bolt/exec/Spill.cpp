@@ -133,7 +133,8 @@ void SpillState::updateSpilledInputBytes(uint64_t bytes) {
 
 uint64_t SpillState::appendToPartition(
     uint32_t partition,
-    const RowVectorPtr& rows) {
+    const RowVectorPtr& rows,
+    uint64_t targetFileRows) {
   BOLT_CHECK(
       isPartitionSpilled(partition), "Partition {} is not spilled", partition);
 
@@ -160,7 +161,8 @@ uint64_t SpillState::appendToPartition(
         pool_,
         stats_,
         maxBatchRows_,
-        std::nullopt);
+        std::nullopt,
+        targetFileRows);
   }
 
   updateSpilledInputBytes(rows->estimateFlatSize());
@@ -180,7 +182,8 @@ uint64_t SpillState::appendToPartition(
     uint32_t partition,
     const std::vector<char*, memory::SlabAllocator<char*>>& rows,
     RowTypePtr type,
-    const RowFormatInfo& info) {
+    const RowFormatInfo& info,
+    uint64_t targetFileRows) {
   BOLT_CHECK(
       isPartitionSpilled(partition), "Partition {} is not spilled", partition);
 
@@ -203,7 +206,8 @@ uint64_t SpillState::appendToPartition(
         pool_,
         stats_,
         maxBatchRows_,
-        info);
+        info,
+        targetFileRows);
   }
 
   spilledRowCount_[partition] += rows.size();
