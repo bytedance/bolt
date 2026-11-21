@@ -26,6 +26,10 @@
 
 DECLARE_uint64(bm_row_container_data_bytes);
 DECLARE_uint64(bm_row_container_warmup_data_bytes);
+DEFINE_uint64(
+    bolt_benchmark_bm_batch_chunk_heap_target_bytes,
+    128ULL << 20,
+    "Soft heap target for bounded BM appendBatch benchmark cases.");
 DEFINE_string(
     bm_row_container_string_store_mode,
     "copy",
@@ -93,25 +97,56 @@ void storeBatchOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   }
 }
 
-void storeBatchBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+void storeBatchBmConfigured(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes,
+    uint64_t heapTargetBytes,
+    const char* caseName) {
+  const auto mode = stringStoreMode();
   {
     folly::BenchmarkSuspender suspender;
-    warmupStoreBatchBm(options(dataset, dataBytes(bytes)));
+    warmupStoreBatchBm(
+        options(dataset, dataBytes(bytes)), heapTargetBytes, mode);
     suspender.dismiss();
   }
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
     auto opts = options(dataset, dataBytes(bytes));
-    BenchmarkContext context("store-batch-bm", opts.dataBytes);
-    auto container = makeBmRowContainer(dataset, context.bufferManager);
+    BenchmarkContext context(caseName, opts.dataBytes);
+    auto container =
+        makeBmRowContainer(dataset, context.bufferManager, heapTargetBytes);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
-    const auto mode = stringStoreMode();
     suspender.dismiss();
 
     storeReusableInputBatchesBmBatch(*container, input, opts, nullptr, mode);
     folly::doNotOptimizeAway(container->numRows());
     suspender.rehire();
   }
+}
+
+void storeBatchBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+  storeBatchBmConfigured(iterations, dataset, bytes, 0, "store-batch-bm");
+}
+
+void storeBatchBmUnlimited(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
+  storeBatchBmConfigured(
+      iterations, dataset, bytes, kUnlimitedBytes, "store-batch-bm-unlimited");
+}
+
+void storeBatchBmTarget(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
+  storeBatchBmConfigured(
+      iterations,
+      dataset,
+      bytes,
+      FLAGS_bolt_benchmark_bm_batch_chunk_heap_target_bytes,
+      "store-batch-bm-target");
 }
 
 template <bool kUseSimdMemcpy>
@@ -310,31 +345,23 @@ void strCopyBmHeapSimdPrealloc(
   stringCopyPathBmHeapPreallocated<true>(iterations, dataset, bytes);
 }
 
-BENCHMARK_NAMED_PARAM(storeBatchOld, old_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(storeBatchBm, bm_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_DRAW_LINE();
-BENCHMARK_NAMED_PARAM(
-    storeBatchOld,
-    old_variable_small,
-    DatasetKind::kVariableSmall,
-    0);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    storeBatchBm,
-    bm_variable_small,
-    DatasetKind::kVariableSmall,
-    0);
-BENCHMARK_DRAW_LINE();
-BENCHMARK_NAMED_PARAM(
-    storeBatchOld,
-    old_variable_large,
-    DatasetKind::kVariableLarge,
-    0);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    storeBatchBm,
-    bm_variable_large,
-    DatasetKind::kVariableLarge,
-    0);
-BENCHMARK_DRAW_LINE();
+#define BM_BATCH_FOUR_WAY(suffix, dataset)                               \
+  BENCHMARK_NAMED_PARAM(storeBatchOld, old_##suffix, dataset, 0);        \
+  BENCHMARK_RELATIVE_NAMED_PARAM(storeBatchBm, bm_##suffix, dataset, 0); \
+  BENCHMARK_RELATIVE_NAMED_PARAM(                                        \
+      storeBatchBmUnlimited, bm_unlimited_##suffix, dataset, 0);         \
+  BENCHMARK_RELATIVE_NAMED_PARAM(                                        \
+      storeBatchBmTarget, bm_target_##suffix, dataset, 0);               \
+  BENCHMARK_DRAW_LINE()
+
+BM_BATCH_FOUR_WAY(fixed, DatasetKind::kFixed);
+BM_BATCH_FOUR_WAY(variable_small, DatasetKind::kVariableSmall);
+BM_BATCH_FOUR_WAY(variable_large, DatasetKind::kVariableLarge);
+BM_BATCH_FOUR_WAY(array, DatasetKind::kArray);
+BM_BATCH_FOUR_WAY(map, DatasetKind::kMap);
+BM_BATCH_FOUR_WAY(row, DatasetKind::kRow);
+
+#undef BM_BATCH_FOUR_WAY
 BENCHMARK_NAMED_PARAM(
     strCopyBmHeapSimd,
     variable_small,

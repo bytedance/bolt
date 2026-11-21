@@ -20,7 +20,10 @@
 #include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
@@ -554,6 +557,866 @@ TEST_F(BmRowContainerTest, AppendBatchStoresMultipleNonInlineStringColumns) {
   EXPECT_EQ(std::string(47, 'h'), rightFlat->valueAt(3).str());
 }
 
+// rowBlockId identifies physical row-block ownership. Group only adjacent equal
+// ids; the id itself is not a chunk index.
+std::vector<size_t> chunkRowCounts(const std::vector<RowId>& rowIds) {
+  std::vector<size_t> chunkRows;
+  BlockId previousRowBlock{kNoBlock};
+  for (const auto& rowId : rowIds) {
+    if (rowId.rowBlockId != previousRowBlock) {
+      chunkRows.push_back(1);
+      previousRowBlock = rowId.rowBlockId;
+    } else {
+      ++chunkRows.back();
+    }
+  }
+  return chunkRows;
+}
+
+TEST_F(
+    BmRowContainerDiskIoTest,
+    BatchHeapTargetSealsShortChunksAndReloadStrings) {
+  constexpr vector_size_t kRows = 65;
+  constexpr uint32_t kHeapBlockSize = 512;
+  auto ids =
+      makeFlatVector<int64_t>(kRows, [](auto row) { return 1000 + row; });
+  ids->setNull(32, true);
+  auto stringsA = makeFlatVector<std::string>(kRows, [](auto row) {
+    return std::string(40, static_cast<char>('a' + row));
+  });
+  auto stringsB = makeFlatVector<std::string>(kRows, [](auto row) {
+    return std::string(20, static_cast<char>('k' + row));
+  });
+  auto input = makeRowVector({ids, stringsA, stringsB});
+
+  const auto exercise = [&](uint64_t chunkHeapTargetBytes) {
+    BmRowContainer container(
+        {BIGINT(), VARCHAR(), VARCHAR()},
+        {true, false, false},
+        0,
+        bufferManager_,
+        MemoryTag::kTesting,
+        16384,
+        kHeapBlockSize,
+        nullptr,
+        chunkHeapTargetBytes);
+    const auto beforeAppend = bufferManager_->stats().allocatedBlocks;
+    container.appendBatch(input);
+    const auto allocatedBlocks =
+        bufferManager_->stats().allocatedBlocks - beforeAppend;
+    const auto segment = container.spillActiveSegment();
+    auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+    const auto rowIds = session.listRowIds();
+    ASSERT_EQ(kRows, rowIds.size());
+    const auto chunkRows = chunkRowCounts(rowIds);
+    if (chunkHeapTargetBytes != 0) {
+      EXPECT_GT(chunkRows.size(), 1);
+      // The target is soft: the final complete piece can cross it.
+      EXPECT_LE(
+          (allocatedBlocks - chunkRows.size()) * kHeapBlockSize,
+          chunkRows.size() * (chunkHeapTargetBytes + 2 * kHeapBlockSize));
+    } else {
+      EXPECT_EQ(std::vector<size_t>({kRows}), chunkRows);
+    }
+
+    // Load once, release all pins, reclaim the resident blocks, then require
+    // the reordered read below to reload from disk.
+    auto firstLoad = session.loadRowsScoped({rowIds.data(), rowIds.size()});
+    ASSERT_EQ(kRows, firstLoad.size());
+    firstLoad.reset();
+    ASSERT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+    ASSERT_GT(bufferManager_->reclaimableBytes(), 0);
+    const auto beforeReclaim = bufferManager_->stats();
+    memory::MemoryReclaimer::Stats reclaimStats;
+    memory::ScopedMemoryArbitrationContext arbitrationContext(root_.get());
+    ASSERT_GT(
+        root_->reclaim(bufferManager_->reclaimableBytes(), 0, reclaimStats), 0);
+    const auto afterReclaim = bufferManager_->stats();
+    EXPECT_GT(afterReclaim.reclaimedBytes, beforeReclaim.reclaimedBytes);
+
+    constexpr vector_size_t kReadOrder[]{64, 32, 31, 63, 0, 32, 1, 62, 64, 5};
+    std::vector<RowId> reordered;
+    reordered.reserve(std::size(kReadOrder));
+    for (auto source : kReadOrder) {
+      reordered.push_back(rowIds[source]);
+    }
+    auto loaded = session.loadRowsScoped({reordered.data(), reordered.size()});
+    EXPECT_GT(
+        bufferManager_->stats().spillReadCount, afterReclaim.spillReadCount);
+
+    auto idResult = BaseVector::create(BIGINT(), loaded.size(), pool());
+    container.extractColumnResident(
+        loaded.data(), loaded.size(), 0, idResult, true);
+    auto aResult = BaseVector::create(VARCHAR(), loaded.size(), pool());
+    container.extractColumnResident(
+        loaded.data(), loaded.size(), 1, aResult, true);
+    auto bResult = BaseVector::create(VARCHAR(), loaded.size(), pool());
+    container.extractColumnResident(
+        loaded.data(), loaded.size(), 2, bResult, true);
+
+    auto idFlat = idResult->asFlatVector<int64_t>();
+    auto aFlat = aResult->asFlatVector<StringView>();
+    auto bFlat = bResult->asFlatVector<StringView>();
+    ASSERT_NE(nullptr, idFlat);
+    ASSERT_NE(nullptr, aFlat);
+    ASSERT_NE(nullptr, bFlat);
+    for (size_t i = 0; i < std::size(kReadOrder); ++i) {
+      const auto source = kReadOrder[i];
+      EXPECT_EQ(source == 32, idFlat->isNullAt(i));
+      if (source != 32) {
+        EXPECT_EQ(1000 + source, idFlat->valueAt(i));
+      }
+      EXPECT_EQ(
+          std::string(40, static_cast<char>('a' + source)),
+          aFlat->valueAt(i).str());
+      EXPECT_EQ(
+          std::string(20, static_cast<char>('k' + source)),
+          bFlat->valueAt(i).str());
+    }
+  };
+
+  exercise(1024);
+  exercise(0);
+}
+
+TEST_F(BmRowContainerDiskIoTest, BatchHeapTargetSealsComplexValuesAndReload) {
+  constexpr vector_size_t kRows = 65;
+  constexpr uint32_t kHeapBlockSize = 512;
+  std::vector<std::vector<int64_t>> arrayData;
+  std::vector<std::vector<std::pair<int64_t, std::optional<std::string>>>>
+      mapData;
+  arrayData.reserve(kRows);
+  mapData.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    std::vector<int64_t> elements;
+    for (vector_size_t i = 0; i < 2 + row % 3; ++i) {
+      elements.push_back(row * 10 + i);
+    }
+    arrayData.push_back(std::move(elements));
+    mapData.push_back({{row, std::string(18 + row % 5, 'm')}});
+  }
+  auto arrays = makeArrayVector<int64_t>(arrayData);
+  auto maps = makeMapVector<int64_t, std::string>(mapData);
+  auto nestedRows = makeRowVector(
+      {"number", "text"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return 10000 + row; }),
+       makeFlatVector<std::string>(kRows, [](auto row) {
+         const auto length = row == 31 ? 96 : 24 + row % 7;
+         return std::string(length, static_cast<char>('a' + row % 26));
+       })});
+  auto input = makeRowVector({arrays, maps, nestedRows});
+
+  // Keep every complex value below the fixed heap block size, so every heap
+  // block is exactly kHeapBlockSize and the allocated block count bounds the
+  // per-chunk heap.
+  const ContainerRowSerdeOptions options{.isKey = false};
+  std::array<VectorPtr, 3> complexColumns{arrays, maps, nestedRows};
+  for (const auto& column : complexColumns) {
+    for (auto row = 0; row < kRows; ++row) {
+      ASSERT_LT(
+          BmContainerRowSerde::serializedSize(*column, row, options),
+          kHeapBlockSize);
+    }
+  }
+
+  // About two heap blocks per column. The batch needs more, so it spans
+  // several chunks; without a target all rows would share one row block.
+  constexpr uint64_t kChunkHeapTarget = 6 * kHeapBlockSize;
+  BmRowContainer container(
+      {arrays->type(), maps->type(), nestedRows->type()},
+      {false, false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      16384,
+      kHeapBlockSize,
+      nullptr,
+      kChunkHeapTarget);
+  const auto beforeAppend = bufferManager_->stats().allocatedBlocks;
+  container.appendBatch(input);
+  const auto allocatedBlocks =
+      bufferManager_->stats().allocatedBlocks - beforeAppend;
+
+  const auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto rowIds = session.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+  const auto chunkRows = chunkRowCounts(rowIds);
+  ASSERT_GT(chunkRows.size(), 1);
+  EXPECT_LE(
+      (allocatedBlocks - chunkRows.size()) * kHeapBlockSize,
+      chunkRows.size() * (kChunkHeapTarget + 3 * kHeapBlockSize));
+
+  auto loaded = session.loadRowsScoped({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  loaded.reset();
+  ASSERT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+  ASSERT_GT(bufferManager_->reclaimableBytes(), 0);
+  memory::MemoryReclaimer::Stats reclaimStats;
+  memory::ScopedMemoryArbitrationContext arbitrationContext(root_.get());
+  ASSERT_GT(
+      root_->reclaim(bufferManager_->reclaimableBytes(), 0, reclaimStats), 0);
+  const auto afterReclaim = bufferManager_->stats();
+
+  loaded = session.loadRowsScoped({rowIds.data(), rowIds.size()});
+  EXPECT_GT(
+      bufferManager_->stats().spillReadCount, afterReclaim.spillReadCount);
+  for (column_index_t column = 0; column < complexColumns.size(); ++column) {
+    auto result =
+        BaseVector::create(complexColumns[column]->type(), kRows, pool());
+    container.extractColumnResident(
+        loaded.data(), loaded.size(), column, result, true);
+    test::assertEqualVectors(complexColumns[column], result);
+  }
+}
+
+TEST_F(BmRowContainerTest, BatchEstimateSelectsWholeBatchOnlyBelowTarget) {
+  constexpr vector_size_t kRows = 64;
+  constexpr uint32_t kBlockBytes = 16384;
+  const std::vector<TypePtr> types{VARCHAR(), VARCHAR(), BIGINT()};
+  const std::vector<bool> nullable{false, false, false};
+  auto input = makeRowVector({
+      makeFlatVector<std::string>(
+          kRows, [](auto) { return std::string(32, 'a'); }),
+      makeFlatVector<std::string>(
+          kRows, [](auto) { return std::string(32, 'b'); }),
+      wrapInDictionary(
+          makeIndicesInReverse(kRows),
+          makeFlatVector<int64_t>(kRows, [](auto row) { return row; })),
+  });
+  const auto estimate = input->usedSize();
+  ASSERT_GT(estimate, 0);
+  ASSERT_LT(estimate, kBlockBytes);
+  const BmRowLayout layout(types, nullable, 0, kBlockBytes);
+  const auto check = [&](uint64_t target, bool expectWholeBatch) {
+    BmRowContainer container(
+        types,
+        nullable,
+        0,
+        bufferManager_,
+        MemoryTag::kTesting,
+        kBlockBytes,
+        kBlockBytes,
+        nullptr,
+        target);
+    std::vector<char*> rows;
+    container.appendBatch(input, kDefaultPartition, &rows);
+    ASSERT_EQ(kRows, rows.size());
+    const auto offset = layout.column(0).offset;
+    const auto* previous =
+        reinterpret_cast<const StringView*>(rows[31] + offset);
+    const auto* next = reinterpret_cast<const StringView*>(rows[32] + offset);
+    // Whole-batch writes all of column 0 before column 1; pieces interleave
+    // the columns. Both layouts must read back identical values.
+    EXPECT_EQ(
+        expectWholeBatch, previous->data() + previous->size() == next->data());
+    for (column_index_t column = 0; column < types.size(); ++column) {
+      auto output = BaseVector::create(types[column], kRows, pool());
+      container.extractColumnResident(rows.data(), rows.size(), column, output);
+      test::assertEqualVectors(input->childAt(column), output);
+    }
+  };
+  check(estimate + 1, true);
+  check(estimate, false);
+}
+
+TEST_F(BmRowContainerTest, BatchEstimateUsesPiecesForStringDictionary) {
+  constexpr vector_size_t kRows = 64;
+  constexpr uint32_t kBlockBytes = 16384;
+  const std::vector<TypePtr> types{VARCHAR(), VARCHAR()};
+  const std::vector<bool> nullable{false, false};
+  auto values =
+      makeFlatVector<std::string>({std::string(32, 'a'), std::string(32, 'b')});
+  std::vector<vector_size_t> indices(kRows);
+  for (auto i = 0; i < kRows; ++i) {
+    indices[i] = i % 2;
+  }
+  auto input = makeRowVector({
+      BaseVector::wrapInConstant(kRows, 0, values),
+      wrapInDictionary(makeIndices(indices), values),
+  });
+  BmRowContainer container(
+      types,
+      nullable,
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      kBlockBytes,
+      kBlockBytes,
+      nullptr,
+      1 << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_EQ(kRows, rows.size());
+  const BmRowLayout layout(types, nullable, 0, kBlockBytes);
+  const auto offset = layout.column(0).offset;
+  const auto* previous = reinterpret_cast<const StringView*>(rows[31] + offset);
+  const auto* next = reinterpret_cast<const StringView*>(rows[32] + offset);
+  EXPECT_NE(previous->data() + previous->size(), next->data());
+  for (column_index_t column = 0; column < 2; ++column) {
+    auto output = BaseVector::create(VARCHAR(), kRows, pool());
+    container.extractColumnResident(rows.data(), rows.size(), column, output);
+    test::assertEqualVectors(input->childAt(column), output);
+  }
+}
+
+TEST_F(BmRowContainerTest, BatchEstimateHandlesUnloadedLazyInput) {
+  constexpr vector_size_t kRows = 64;
+  constexpr uint32_t kBlockBytes = 16384;
+  auto lazy = makeLazyFlatVector<std::string>(
+      kRows, [](auto) { return std::string(32, 'l'); });
+  auto other = makeFlatVector<std::string>(
+      kRows, [](auto) { return std::string(32, 'r'); });
+  auto input = makeRowVector({lazy, other});
+  ASSERT_FALSE(lazy->isLoaded());
+  BmRowContainer container(
+      {VARCHAR(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      kBlockBytes,
+      kBlockBytes,
+      nullptr,
+      1 << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_TRUE(lazy->isLoaded());
+  ASSERT_EQ(kRows, rows.size());
+  const BmRowLayout layout(
+      {VARCHAR(), VARCHAR()}, {false, false}, 0, kBlockBytes);
+  const auto offset = layout.column(0).offset;
+  const auto* previous = reinterpret_cast<const StringView*>(rows[31] + offset);
+  const auto* next = reinterpret_cast<const StringView*>(rows[32] + offset);
+  // An incomplete estimate chooses pieces even though the target is large.
+  EXPECT_NE(previous->data() + previous->size(), next->data());
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(lazy->loadedVectorShared(), result);
+}
+
+TEST_F(BmRowContainerTest, BatchEstimateHandlesDictionaryOverLazyInput) {
+  constexpr vector_size_t kRows = 160;
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "dictionary-lazy-wide-strings",
+      1ULL << 30,
+      memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  auto lazy = makeLazyFlatVector<std::string>(
+      kRows, [](auto) { return std::string(1 << 20, 'l'); });
+  auto dictionary = wrapInDictionary(makeIndicesInReverse(kRows), lazy);
+  auto input = makeRowVector({dictionary});
+  ASSERT_FALSE(lazy->isLoaded());
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_TRUE(lazy->isLoaded());
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  EXPECT_EQ(
+      (std::vector<size_t>{128, 32}), chunkRowCounts(session.listRowIds()));
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(dictionary, result);
+}
+
+TEST_F(BmRowContainerTest, BatchStoreSkewedDictionaryStrings) {
+  constexpr vector_size_t kRows = 256;
+  auto base = makeFlatVector<std::string>(1024, [](auto row) {
+    return row == 0 ? std::string(64 << 10, 'd') : std::string("x");
+  });
+  auto dictionary =
+      wrapInDictionary(makeIndices(std::vector<vector_size_t>(kRows, 0)), base);
+  auto input = makeRowVector({dictionary});
+  ASSERT_LT(input->usedSize(), 2ULL << 20);
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      16 << 10,
+      1 << 20,
+      nullptr,
+      2ULL << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_EQ(kRows, rows.size());
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  EXPECT_GT(chunkRowCounts(session.listRowIds()).size(), 1);
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(dictionary, result);
+}
+
+TEST_F(BmRowContainerDiskIoTest, SkewedDictionarySealsAtHeapTarget) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "dictionary-skewed-wide-strings",
+      1ULL << 30,
+      memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  constexpr vector_size_t kRows = 256;
+  constexpr uint32_t kStringBytes = 1 << 20;
+  auto base = makeFlatVector<std::string>(1024, [](auto row) {
+    return row == 0 ? std::string(kStringBytes, 'd') : std::string("x");
+  });
+  auto dictionary =
+      wrapInDictionary(makeIndices(std::vector<vector_size_t>(kRows, 0)), base);
+  auto input = makeRowVector({dictionary});
+  ASSERT_LT(input->usedSize(), 128ULL << 20);
+
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  container.appendBatch(input);
+  const auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto rowIds = session.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+  EXPECT_GT(chunkRowCounts(rowIds).size(), 1);
+
+  auto firstLoad = session.loadRowsScoped({rowIds.data(), rowIds.size()});
+  firstLoad.reset();
+  memory::MemoryReclaimer::Stats reclaimStats;
+  memory::ScopedMemoryArbitrationContext arbitrationContext(root_.get());
+  ASSERT_GT(
+      root_->reclaim(bufferManager_->reclaimableBytes(), 0, reclaimStats), 0);
+  const auto beforeRead = bufferManager_->stats().spillReadCount;
+  auto loaded = session.loadRowsScoped({rowIds.data(), 1});
+  EXPECT_GT(bufferManager_->stats().spillReadCount, beforeRead);
+  auto result = BaseVector::create(VARCHAR(), 1, pool());
+  container.extractColumnResident(loaded.data(), 1, 0, result);
+  EXPECT_EQ(
+      result->asFlatVector<StringView>()->valueAt(0).str(),
+      std::string(kStringBytes, 'd'));
+}
+
+TEST_F(BmRowContainerTest, BatchEstimateUsesFlattenedStringStats) {
+  constexpr vector_size_t kRows = 256;
+  auto base = makeFlatVector<std::string>({std::string(64 << 10, 'd')});
+  VectorPtr values =
+      wrapInDictionary(makeIndices(std::vector<vector_size_t>(kRows, 0)), base);
+  BaseVector::flattenVector(values);
+  ASSERT_TRUE(values->asFlatVector<StringView>()->stringStats().has_value());
+  auto input = makeRowVector({values});
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      16 << 10,
+      1 << 20,
+      nullptr,
+      2ULL << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  EXPECT_GT(chunkRowCounts(session.listRowIds()).size(), 1);
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(values, result);
+}
+
+TEST_F(BmRowContainerTest, BatchStoreSharedStringBuffers) {
+  constexpr vector_size_t kRows = 256;
+  auto base = makeFlatVector<std::string>({std::string(64 << 10, 's')});
+  auto shared = BaseVector::create(VARCHAR(), kRows, pool());
+  auto* flat = shared->asFlatVector<StringView>();
+  flat->acquireSharedStringBuffers(base.get());
+  const auto value = base->asFlatVector<StringView>()->valueAt(0);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    flat->setNoCopy(row, value);
+  }
+  ASSERT_FALSE(flat->stringStats().has_value());
+  auto input = makeRowVector({shared});
+  ASSERT_LT(input->usedSize(), 2ULL << 20);
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      16 << 10,
+      1 << 20,
+      nullptr,
+      2ULL << 20);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_EQ(kRows, rows.size());
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(shared, result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapTargetCutsOnlyPastTheTarget) {
+  constexpr uint32_t kHeapBlockSize = 1024;
+  auto input = makeRowVector({
+      makeFlatVector<std::string>(
+          65, [](auto) { return std::string(64, 'a'); }),
+      makeFlatVector<std::string>(
+          65, [](auto) { return std::string(64, 'b'); }),
+  });
+  // Each column fits 16 values per block and needs five blocks for 65 rows.
+  // The fifth pair opens at row 64 and brings the chunk to exactly 10 blocks.
+  constexpr uint64_t kBatchHeapBytes = 10 * kHeapBlockSize;
+  const auto exercise = [&](uint64_t target,
+                            BmBatchStringStoreMode mode,
+                            const std::vector<size_t>& expectedChunkRows) {
+    SCOPED_TRACE(
+        fmt::format("target={} mode={}", target, static_cast<int>(mode)));
+    BmRowContainer container(
+        {VARCHAR(), VARCHAR()},
+        {false, false},
+        0,
+        bufferManager_,
+        MemoryTag::kTesting,
+        16384,
+        kHeapBlockSize,
+        nullptr,
+        target);
+    std::vector<char*> rows;
+    container.appendBatch(input, kDefaultPartition, &rows, mode);
+    const auto segment = container.activeSegmentId();
+    auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+    EXPECT_EQ(expectedChunkRows, chunkRowCounts(session.listRowIds()));
+    for (column_index_t column = 0; column < 2; ++column) {
+      auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+      container.extractColumnResident(rows.data(), rows.size(), column, result);
+      test::assertEqualVectors(input->childAt(column), result);
+    }
+  };
+  exercise(kBatchHeapBytes, BmBatchStringStoreMode::kCopy, {65});
+  // A complete final piece may cross the soft target.
+  exercise(kBatchHeapBytes - 1, BmBatchStringStoreMode::kCopy, {65});
+  // Referenced strings allocate no heap, so even a tiny target never cuts.
+  exercise(1, BmBatchStringStoreMode::kReferenceInputStringForBenchmark, {65});
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateStartsFreshAfterSealing) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "fresh-chunk-estimate", 1ULL << 30, memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  BmRowContainer container(
+      {VARCHAR(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  auto large = makeFlatVector<std::string>({std::string(1 << 20, 'x')});
+  auto small = makeFlatVector<std::string>({std::string(64, 'y')});
+  container.appendBatch(makeRowVector({
+      BaseVector::wrapInConstant(128, 0, large),
+      BaseVector::wrapInConstant(128, 0, small),
+  }));
+
+  auto input = makeRowVector({
+      makeFlatVector<std::string>(
+          65, [](auto) { return std::string(64, 'a'); }),
+      makeFlatVector<std::string>(
+          65, [](auto) { return std::string(64, 'b'); }),
+  });
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(193, ids.size());
+  EXPECT_NE(ids[127].rowBlockId, ids[128].rowBlockId);
+  // The small follow-up batch should fit in the new chunk.
+  EXPECT_EQ(ids[128].rowBlockId, ids[192].rowBlockId);
+  for (column_index_t column = 0; column < 2; ++column) {
+    auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), column, result);
+    test::assertEqualVectors(input->childAt(column), result);
+  }
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateHandlesSuddenWideFlatInput) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "large-batch-estimate", 1ULL << 30, memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  auto narrow = makeRowVector({makeFlatVector<std::string>(
+      128, [](auto) { return std::string(64, 'n'); })});
+  auto wide = makeRowVector({makeFlatVector<std::string>(
+      65, [](auto row) { return std::string(2 << 20, 'a' + row % 26); })});
+  std::vector<char*> rows;
+  container.appendBatch(narrow, kDefaultPartition, &rows);
+  container.appendBatch(wide, kDefaultPartition, &rows);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(193, ids.size());
+  EXPECT_NE(ids.front().rowBlockId, ids.back().rowBlockId);
+  auto result = BaseVector::create(VARCHAR(), 65, pool());
+  container.extractColumnResident(rows.data() + 128, 65, 0, result);
+  test::assertEqualVectors(wide->childAt(0), result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateHandlesWidthChangeWithinBatch) {
+  constexpr vector_size_t kNarrowRows = 32;
+  constexpr vector_size_t kWideRows = 64;
+  constexpr uint64_t kTargetBytes = 8ULL << 20;
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "batch-width-change", 1ULL << 30, memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  auto values =
+      makeFlatVector<std::string>(kNarrowRows + kWideRows, [](auto row) {
+        return row < kNarrowRows ? std::string(64, 'n')
+                                 : std::string(1 << 20, 'w');
+      });
+  auto input = makeRowVector({values});
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      kTargetBytes);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(kNarrowRows + kWideRows, ids.size());
+  const auto chunks = chunkRowCounts(ids);
+  EXPECT_GT(chunks.size(), 1);
+  // The soft target permits the last piece to overshoot. The wide run must
+  // still not accumulate into one chunk after the width change.
+  size_t wideInChunk = 0;
+  for (vector_size_t i = kNarrowRows; i < ids.size(); ++i) {
+    if (i == kNarrowRows || ids[i].rowBlockId != ids[i - 1].rowBlockId) {
+      wideInChunk = 0;
+    }
+    EXPECT_LE(++wideInChunk, 40);
+  }
+  auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(values, result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapTargetSealsAfterFixed32RowPiece) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "fixed-piece-wide-strings",
+      1ULL << 30,
+      memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+
+  // The maximum object_data width observed in the 20261024 case: three
+  // values fit in a 4 MiB heap block. Prime with 31 rows so the 128 MiB
+  // threshold is crossed within, rather than at the start of, a piece.
+  auto value = makeFlatVector<std::string>({std::string(1'121'206, 'x')});
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  container.appendBatch(
+      makeRowVector({BaseVector::wrapInConstant(31, 0, value)}));
+  container.appendBatch(
+      makeRowVector({BaseVector::wrapInConstant(128, 0, value)}));
+
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(159, ids.size());
+  EXPECT_EQ((std::vector<size_t>{95, 64}), chunkRowCounts(ids));
+  std::vector<RowId> selected{ids[0], ids[94], ids[95], ids[158]};
+  auto loaded = session.loadRowsScoped({selected.data(), selected.size()});
+  auto result = BaseVector::create(VARCHAR(), selected.size(), pool());
+  container.extractColumnResident(
+      loaded.data(), selected.size(), 0, result, true);
+  test::assertEqualVectors(
+      BaseVector::wrapInConstant(selected.size(), 0, value), result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateAccountsForRepeatedString) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "large-batch-estimate", 1ULL << 30, memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  auto value = makeFlatVector<std::string>({std::string(1 << 20, 'x')});
+  auto input = makeRowVector({BaseVector::wrapInConstant(512, 0, value)});
+  ASSERT_LT(input->usedSize(), 128ULL << 20);
+  RecordProperty("used_bytes", std::to_string(input->usedSize()));
+  RecordProperty(
+      "estimated_flat_bytes", std::to_string(input->estimateFlatSize()));
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  const auto before = bufferManager_->stats();
+  container.appendBatch(input);
+  const auto stored = bufferManager_->stats();
+  const auto residentGrowth = stored.pinnedResidentBytes +
+      stored.unpinnedResidentBytes - before.pinnedResidentBytes -
+      before.unpinnedResidentBytes;
+  // Multiple chunks are expected; a complete piece can cross the target.
+  EXPECT_GE(residentGrowth, 528ULL << 20);
+  EXPECT_LE(residentGrowth, 552ULL << 20);
+  RecordProperty("resident_bytes", std::to_string(residentGrowth));
+  auto tail =
+      makeRowVector({makeFlatVector<std::string>({std::string(64, 't')})});
+  container.appendBatch(tail);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(513, ids.size());
+  const auto chunkRows = chunkRowCounts(ids);
+  EXPECT_GE(chunkRows.size(), 4);
+  for (const auto count : chunkRows) {
+    EXPECT_LE(count, 132);
+  }
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateAccountsForRepeatedArray) {
+  bufferManager_.reset();
+  root_ = memory::memoryManager()->addRootPool(
+      "large-array-estimate", 1ULL << 30, memory::MemoryReclaimer::create());
+  resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
+  auto value = makeArrayVector<int64_t>({std::vector<int64_t>(65536, 42)});
+  auto repeated = BaseVector::wrapInConstant(512, 0, value);
+  auto input = makeRowVector({repeated});
+  ASSERT_LT(input->usedSize(), 128ULL << 20);
+  BmRowContainer container(
+      {value->type()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      4 << 20,
+      nullptr,
+      128ULL << 20);
+  container.appendBatch(input);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(512, ids.size());
+  // Each serialized array has 512 KiB of values plus its null bitmap; seven
+  // fit in a 4 MiB heap block. The 32-row boundaries seal at rows 224 and 448.
+  EXPECT_EQ(ids[0].rowBlockId, ids[223].rowBlockId);
+  EXPECT_NE(ids[223].rowBlockId, ids[224].rowBlockId);
+  EXPECT_EQ(ids[224].rowBlockId, ids[447].rowBlockId);
+  EXPECT_NE(ids[447].rowBlockId, ids[448].rowBlockId);
+  EXPECT_EQ(ids[448].rowBlockId, ids[511].rowBlockId);
+  std::vector<RowId> selected{
+      ids[0], ids[223], ids[224], ids[447], ids[448], ids[511]};
+  auto loaded = session.loadRowsScoped({selected.data(), selected.size()});
+  auto result = BaseVector::create(value->type(), selected.size(), pool());
+  container.extractColumnResident(loaded.data(), selected.size(), 0, result);
+  test::assertEqualVectors(
+      BaseVector::wrapInConstant(selected.size(), 0, value), result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapEstimateExpandsNestedRepeatedConstants) {
+  constexpr vector_size_t kRows = 128;
+  auto value = makeFlatVector<std::string>({std::string(4096, 'x')});
+  auto elements = BaseVector::wrapInConstant(8, 0, value);
+  auto array = makeArrayVector(std::vector<vector_size_t>{0}, elements);
+  auto repeated = BaseVector::wrapInConstant(kRows, 0, array);
+  auto input = makeRowVector({repeated});
+  BmRowContainer container(
+      {array->type()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      16 << 10,
+      64 << 10,
+      nullptr,
+      256 << 10);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = session.listRowIds();
+  ASSERT_EQ(kRows, ids.size());
+  EXPECT_GT(chunkRowCounts(ids).size(), 1);
+  auto result = BaseVector::create(array->type(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  test::assertEqualVectors(repeated, result);
+}
+
+TEST_F(BmRowContainerTest, BatchHeapTargetAllowsOversizedSingleValue) {
+  const std::string oversized(400, 'z');
+  auto input = makeRowVector({makeFlatVector<std::string>({oversized})});
+  BmRowContainer container(
+      {VARCHAR()},
+      {false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      4096,
+      64,
+      nullptr,
+      128);
+
+  container.appendBatch(input);
+  const auto segment = container.activeSegmentId();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto rowIds = session.listRowIds();
+  ASSERT_EQ(1, rowIds.size());
+  auto loaded = session.loadRowsScoped({rowIds.data(), rowIds.size()});
+  auto result = BaseVector::create(VARCHAR(), 1, pool());
+  container.extractColumnResident(loaded.data(), 1, 0, result, true);
+  auto* flatResult = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flatResult);
+  EXPECT_EQ(oversized, flatResult->valueAt(0).str());
+}
+
 TEST_F(
     BmRowContainerDiskIoTest,
     AppendBatchReloadsMultipleStringColumnsAcrossChunks) {
@@ -564,7 +1427,9 @@ TEST_F(
       bufferManager_,
       MemoryTag::kTesting,
       128,
-      64);
+      64,
+      nullptr,
+      256);
   constexpr vector_size_t kRows = 12;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row + 100; }),

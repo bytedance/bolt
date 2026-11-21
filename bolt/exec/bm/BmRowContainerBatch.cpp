@@ -21,12 +21,97 @@
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/type/HugeInt.h"
+#include "bolt/vector/ComplexVector.h"
 
+#include <algorithm>
 #include <limits>
 #include <span>
 
 namespace bytedance::bolt::exec::bm {
 namespace {
+
+// Estimate bytes that usedSize() misses when values are repeated. This is a
+// hint for choosing a write size, not an upper bound on serialized bytes.
+uint64_t estimateExtraBytes(const BaseVector& vector, bool& incomplete) {
+  using Encoding = VectorEncoding::Simple;
+  uint64_t extra = 0;
+  switch (vector.encoding()) {
+    case Encoding::LAZY:
+      if (isLazyNotLoaded(vector)) {
+        incomplete = true;
+        return 0;
+      }
+      return estimateExtraBytes(*vector.loadedVector(), incomplete);
+    case Encoding::DICTIONARY:
+    case Encoding::SEQUENCE:
+      // Dictionary indices may repeatedly select a wide value even when the
+      // backing vector's average value size is small.
+      incomplete |= isLazyNotLoaded(vector) ||
+          (vector.encoding() == Encoding::DICTIONARY &&
+           !vector.type()->isFixedWidth());
+      return 0;
+    case Encoding::CONSTANT: {
+      const auto& backing = vector.valueVector();
+      if (backing && isLazyNotLoaded(*backing)) {
+        incomplete = true;
+        return 0;
+      }
+      if (vector.size() == 0 || vector.isNullAt(0)) {
+        return 0;
+      }
+      if (vector.typeKind() == TypeKind::VARCHAR ||
+          vector.typeKind() == TypeKind::VARBINARY) {
+        const auto value =
+            vector.asUnchecked<SimpleVector<StringView>>()->valueAt(0);
+        extra = static_cast<uint64_t>(value.size()) * (vector.size() - 1);
+        break;
+      }
+      if (vector.type()->isFixedWidth()) {
+        return 0;
+      }
+      if (!backing) {
+        incomplete = true;
+        return 0;
+      }
+      const auto backingExtra = estimateExtraBytes(*backing, incomplete);
+      extra = backingExtra * vector.size() +
+          backing->usedSize() * (vector.size() - 1);
+      break;
+    }
+    case Encoding::ARRAY:
+      return estimateExtraBytes(
+          *vector.asUnchecked<ArrayVector>()->elements(), incomplete);
+    case Encoding::MAP: {
+      const auto* map = vector.asUnchecked<MapVector>();
+      extra = estimateExtraBytes(*map->mapKeys(), incomplete);
+      extra += estimateExtraBytes(*map->mapValues(), incomplete);
+      break;
+    }
+    case Encoding::ROW:
+      for (const auto& child : vector.asUnchecked<RowVector>()->children()) {
+        if (child) {
+          extra += estimateExtraBytes(*child, incomplete);
+        }
+      }
+      break;
+    case Encoding::FLAT: {
+      if (vector.typeKind() != TypeKind::VARCHAR &&
+          vector.typeKind() != TypeKind::VARBINARY) {
+        return 0;
+      }
+      const auto* flat = vector.asUnchecked<FlatVector<StringView>>();
+      const auto& stats = flat->stringStats();
+      if (!stats) {
+        return 0;
+      }
+      const auto usedBytes = flat->usedSize();
+      return stats->totalBytes > usedBytes ? stats->totalBytes - usedBytes : 0;
+    }
+    default:
+      return 0;
+  }
+  return extra;
+}
 
 // Carries a heap write cursor across the rows of one BatchAppendRange. Rows in
 // a range append their variable-width payload into the same heap block, so the
@@ -41,10 +126,20 @@ namespace {
 //     uncommitted tail), then either commit()s the bytes that fit or, on
 //     overflow, takes a fresh block via reserveInNewBlock() and reserializes.
 struct BatchHeapWriter {
+  BatchHeapWriter(BmSegmentCollection* segments, ChunkData* chunk)
+      : segments(segments), chunk(chunk) {
+    if (chunk != nullptr && !chunk->heapBlocks.empty()) {
+      heap = &chunk->heapBlocks.back();
+      cursor = heap->ptr + heap->used;
+      limit = heap->ptr + heap->size;
+      recordedHeapBlock = heap->id;
+    }
+  }
+
   BmSegmentCollection* segments{nullptr};
   ChunkData* chunk{nullptr};
-  // Heap block the cursor currently writes into; null until the first block is
-  // acquired.
+  // Heap block the cursor currently writes into. A range starts from the
+  // chunk's existing writable tail when one is available.
   BlockRef* heap{nullptr};
   // Next free byte in 'heap' (uncommitted for speculative writes) and one past
   // the block's last writable byte.
@@ -144,29 +239,26 @@ void BmRowContainer::appendBatch(
     return;
   }
 
-  std::vector<BatchAppendRange> ranges;
-  ranges.reserve(input->size());
+  for (auto column = 0; column < inputRow->childrenSize(); ++column) {
+    BOLT_CHECK_EQ(inputRow->childAt(column)->type(), types_[column]);
+  }
+
   if (rows != nullptr) {
     rows->reserve(rows->size() + input->size());
   }
   auto& segment = segments_.activeSegment(partition);
-  segments_.reserveRowsInBatch(segment, 0, input->size(), ranges, rows);
 
-  SelectivityVector allRows(input->size());
-  for (auto column = 0; column < inputRow->childrenSize(); ++column) {
-    const auto& child = inputRow->childAt(column);
-    BOLT_CHECK_EQ(child->type(), types_[column]);
-    DecodedVector decoded(*child, allRows);
+  const auto storeColumn = [&](const DecodedVector& decoded,
+                               vector_size_t column,
+                               folly::Range<const BatchAppendRange*> ranges) {
     const auto& plan = layout_.storePlan(column);
-    const folly::Range<const BatchAppendRange*> rangeView(
-        ranges.data(), ranges.size());
     if (plan.complexKind) {
-      storeComplexColumnBatchRanges(decoded, rangeView, plan);
-      continue;
+      storeComplexColumnBatchRanges(decoded, ranges, plan);
+      return;
     }
     if (plan.stringKind) {
-      storeStringColumnBatchRanges(decoded, rangeView, plan, stringStoreMode);
-      continue;
+      storeStringColumnBatchRanges(decoded, ranges, plan, stringStoreMode);
+      return;
     }
 
     if (plan.nullable) {
@@ -174,16 +266,75 @@ void BmRowContainer::appendBatch(
           storeFixedColumnBatchRangesWithNullsTyped,
           plan.kind,
           decoded,
-          rangeView,
+          ranges,
           plan);
     } else {
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           storeFixedColumnBatchRangesNoNullsTyped,
           plan.kind,
           decoded,
-          rangeView,
+          ranges,
           plan);
     }
+  };
+
+  SelectivityVector allRows(input->size());
+  bool hasHeapColumns = false;
+  for (auto column = 0; column < inputRow->childrenSize(); ++column) {
+    const auto& plan = layout_.storePlan(column);
+    hasHeapColumns |= plan.complexKind ||
+        (plan.stringKind &&
+         stringStoreMode !=
+             BmBatchStringStoreMode::kReferenceInputStringForBenchmark);
+  }
+
+  bool wholeBatch = chunkHeapTargetBytes_ == 0 || !hasHeapColumns;
+  if (!wholeBatch) {
+    auto estimatedBytes = input->usedSize();
+    bool estimateIncomplete = false;
+    estimatedBytes += estimateExtraBytes(*inputRow, estimateIncomplete);
+    const auto& cursor = segment.writeCursor;
+    const auto currentBytes =
+        cursor.chunk != nullptr && cursor.nextRow != cursor.rowBlockEnd
+        ? cursor.chunk->heapAllocatedBytes
+        : 0;
+    wholeBatch = !estimateIncomplete && currentBytes < chunkHeapTargetBytes_ &&
+        estimatedBytes < chunkHeapTargetBytes_ - currentBytes;
+  }
+
+  if (wholeBatch) {
+    std::vector<BatchAppendRange> ranges;
+    ranges.reserve(input->size());
+    segments_.reserveRowsInBatch(segment, 0, input->size(), ranges, rows);
+    const folly::Range<const BatchAppendRange*> rangeView(
+        ranges.data(), ranges.size());
+    for (auto column = 0; column < inputRow->childrenSize(); ++column) {
+      DecodedVector decoded(*inputRow->childAt(column), allRows);
+      storeColumn(decoded, column, rangeView);
+    }
+    segments_.sealChunkAtBatchBoundary(segment);
+    return;
+  }
+
+  std::vector<DecodedVector> decodedColumns(inputRow->childrenSize());
+  for (auto column = 0; column < inputRow->childrenSize(); ++column) {
+    decodedColumns[column].decode(*inputRow->childAt(column), allRows);
+  }
+  // Finish all columns for a bounded number of rows before sealing a chunk.
+  constexpr vector_size_t kMaxPieceRows = 32;
+  vector_size_t sourceBegin = 0;
+  while (sourceBegin < input->size()) {
+    const auto range = segments_.reserveRowsInCurrentChunk(
+        segment,
+        sourceBegin,
+        std::min(kMaxPieceRows, input->size() - sourceBegin),
+        rows);
+    const folly::Range<const BatchAppendRange*> rangeView(&range, 1);
+    for (auto column = 0; column < inputRow->childrenSize(); ++column) {
+      storeColumn(decodedColumns[column], column, rangeView);
+    }
+    segments_.sealChunkAtBatchBoundary(segment);
+    sourceBegin += range.rowCount;
   }
 }
 
@@ -197,7 +348,7 @@ void BmRowContainer::storeComplexColumnBatchRanges(
   const ContainerRowSerdeOptions options{.isKey = column.isKey};
   const auto& source = *decoded.base();
   for (const auto& range : ranges) {
-    BatchHeapWriter writer{&segments_, range.chunk};
+    BatchHeapWriter writer(&segments_, range.chunk);
     auto* row = range.rowBegin;
     auto sourceIndex = range.sourceBegin;
     for (vector_size_t i = 0; i < range.rowCount; ++i) {
@@ -362,7 +513,7 @@ void BmRowContainer::storeStringColumnBatchRanges(
       ? decoded.data<StringView>()
       : nullptr;
   for (const auto& range : ranges) {
-    BatchHeapWriter writer{&segments_, range.chunk};
+    BatchHeapWriter writer(&segments_, range.chunk);
     auto* row = range.rowBegin;
     auto source = range.sourceBegin;
     for (vector_size_t i = 0; i < range.rowCount; ++i) {
