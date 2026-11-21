@@ -251,7 +251,7 @@ void SparkShuffleReader::close() {
     LOG(INFO) << fmt::format(
         "{} totals: rows={}, payloads={}, streams={}, "
         "read={:.3f}ms, decompress={:.3f}ms, decode={:.3f}ms",
-        reader.readerName(),
+        reader.name(),
         reader.rowsRead(),
         reader.payloadsRead(),
         reader.streamsRead(),

@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/common/ShuffleBlockReader.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockReader.h"
 
 #include <arrow/io/interfaces.h>
 #include <folly/ScopeGuard.h>
+#include <cstring>
 
-#include "bolt/common/base/MemoryCopy.h"
+#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -109,19 +110,52 @@ bool ShuffleStreamCursor::nextBlockKind(uint8_t& kind) {
 void RowBlockReader::read(
     ShuffleByteSource& in,
     RowBlock& out,
-    std::string_view blockLabel) {
+    ShuffleBlockKind kind) {
   out.rows.clear();
-  uint8_t header[kRowBlockHeaderBytes - 1];
-  if (!in.read(header, sizeof(header))) {
+  out.rowBytes = 0;
+  BufferPtr reusable;
+  if (!out.buffers.empty()) {
+    reusable = std::move(out.buffers[0]);
+    out.buffers.clear();
+  }
+  decodeBlock(in, reusable, out.rows, out.rowBytes, kind);
+  out.buffers.push_back(std::move(reusable));
+}
+
+void RowBlockReader::append(
+    ShuffleByteSource& in,
+    RowBlock& out,
+    ShuffleBlockKind kind) {
+  if (out.rows.empty()) {
+    read(in, out, kind);
+    return;
+  }
+  BufferPtr blockBuffer;
+  decodeBlock(in, blockBuffer, out.rows, out.rowBytes, kind);
+  out.buffers.push_back(std::move(blockBuffer));
+}
+
+void RowBlockReader::decodeBlock(
+    ShuffleByteSource& in,
+    BufferPtr& blockBuffer,
+    std::vector<std::string_view>& rows,
+    uint64_t& rowBytes,
+    ShuffleBlockKind kind) {
+  const std::string_view blockLabel = shuffleBlockKindName(kind);
+  uint8_t rawHeader[kRowBlockHeaderBytes];
+  rawHeader[0] = static_cast<uint8_t>(kind);
+  if (!in.read(rawHeader + 1, kRowBlockHeaderBytes - 1)) {
     BOLT_FAIL(
         "malformed {} shuffle block: truncated {} block header",
         blockLabel,
         blockLabel);
   }
-  const auto rowCount = memory::loadUnaligned<uint32_t>(header);
-  const auto decodedBytes = memory::loadUnaligned<uint64_t>(header + 4);
-  const auto stored = memory::loadUnaligned<uint64_t>(header + 12);
-  const auto layout = static_cast<RunLayout>(header[20]);
+  RowBlockHeader header;
+  ::memcpy(&header, rawHeader, sizeof(header));
+  const uint32_t rowCount = header.rowCount;
+  const uint64_t decodedBytes = header.decodedBytes;
+  const uint64_t stored = header.storedBytes;
+  const RunLayout layout = header.layout;
   if (rowCount == 0 || rowCount > kMaxBlockRows) {
     BOLT_FAIL(
         "malformed {} shuffle block: {} block row count out of range",
@@ -168,18 +202,18 @@ void RowBlockReader::read(
           blockLabel,
           blockLabel);
     }
-    resetBuffer(out.buffer, decodedBytes, pool_);
+    resetBuffer(blockBuffer, decodedBytes, pool_);
     if (!decompressor_->decompress(
             {compressed_->as<uint8_t>(), stored},
-            {out.buffer->asMutable<uint8_t>(), decodedBytes})) {
+            {blockBuffer->asMutable<uint8_t>(), decodedBytes})) {
       BOLT_FAIL(
           "malformed {} shuffle block: {} block decompression failed",
           blockLabel,
           blockLabel);
     }
   } else {
-    resetBuffer(out.buffer, stored, pool_);
-    if (!in.read(out.buffer->asMutable<char>(), stored)) {
+    resetBuffer(blockBuffer, stored, pool_);
+    if (!in.read(blockBuffer->asMutable<char>(), stored)) {
       BOLT_FAIL(
           "malformed {} shuffle block: truncated {} block body",
           blockLabel,
@@ -187,14 +221,17 @@ void RowBlockReader::read(
     }
   }
 
-  const char* body = out.buffer->as<char>();
+  const char* body = blockBuffer->as<char>();
+  const size_t prevRows = rows.size();
+  const uint64_t prevRowBytes = rowBytes;
   bool ok = false;
   SCOPE_EXIT {
     if (!ok) {
-      out.rows.clear();
+      rows.resize(prevRows);
+      rowBytes = prevRowBytes;
     }
   };
-  out.rows.reserve(rowCount);
+  rows.reserve(checkedPlus(prevRows, static_cast<size_t>(rowCount)));
   uint64_t pos = 0;
   for (uint32_t i = 0; i < rowCount; ++i) {
     if (decodedBytes - pos < sizeof(int32_t)) {
@@ -211,7 +248,8 @@ void RowBlockReader::read(
           blockLabel,
           blockLabel);
     }
-    out.rows.emplace_back(body + pos, static_cast<size_t>(size));
+    rows.emplace_back(body + pos, static_cast<size_t>(size));
+    rowBytes += static_cast<uint64_t>(size);
     pos += size;
   }
   if (pos != decodedBytes) {

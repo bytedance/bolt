@@ -65,8 +65,6 @@ CellShuffleWriter::CellShuffleWriter(
       isRemote_(
           options_.partitionWriterOptions.partitionWriterType ==
           PartitionWriterType::kCeleborn) {
-  // Set once here so every path reports it (ordinary, composite, empty,
-  // local or RSS); nothing later assigns metrics_ as a whole.
   metrics_.useCellShuffle = 1;
   // Composite-only input needs an output before ordinary layout initialization.
   if (isRemote_) {

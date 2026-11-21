@@ -211,7 +211,7 @@ std::string payload(
     const std::string& encodingTags,
     const std::vector<std::string>& runs,
     uint32_t nullDecodedSize = 0) {
-  std::string out(1, static_cast<char>(CellBlockKind::kPayload));
+  std::string out(1, static_cast<char>(ShuffleBlockKind::kCellPayload));
   put(out, rows);
   put(out, static_cast<uint32_t>(runs.size()));
   put(out, uint64_t{0});
@@ -727,7 +727,7 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
   // byte, an encoding tags byte and one stored run.
   const auto bigints = written(makeRowVector(
       {makeFlatVector<int64_t>(100, [](auto row) { return row * 7; })}));
-  ASSERT_EQ(bigints[0], static_cast<char>(CellBlockKind::kPayload));
+  ASSERT_EQ(bigints[0], static_cast<char>(ShuffleBlockKind::kCellPayload));
   ASSERT_EQ(bigints.substr(kRowCountAt, 4), std::string("\x64\0\0\0", 4));
   ASSERT_EQ(bigints.substr(kRunCountAt, 4), std::string("\x01\0\0\0", 4));
   ASSERT_EQ(bigints.substr(kNullStoredSizeAt, 4), std::string("\x01\0\0\0", 4));
@@ -1134,7 +1134,7 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
     return "";
   };
   // Reject a malformed block after a valid payload, retaining its cause.
-  std::string tooManyRuns(1, static_cast<char>(CellBlockKind::kPayload));
+  std::string tooManyRuns(1, static_cast<char>(ShuffleBlockKind::kCellPayload));
   put(tooManyRuns, uint32_t{5});
   put(tooManyRuns, CellDecodeLimits{}.maxRunCount + 1);
   put(tooManyRuns, uint64_t{0});
@@ -1164,7 +1164,7 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
       "malformed cell shuffle payload: truncated payload header");
 
   const auto composite =
-      std::string(1, static_cast<char>(CellBlockKind::kCompositeRows)) +
+      std::string(1, static_cast<char>(ShuffleBlockKind::kCompositeRows)) +
       bytesOf<uint32_t>({3});
   EXPECT_EQ(
       errorOf({bigints + composite}, bigint),
@@ -1174,7 +1174,7 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
   // of dereferencing a null buffer.
   auto lz4 = createCodec(arrow::Compression::LZ4_FRAME, CodecOptions{});
   const auto emptyCompressedComposite =
-      std::string(1, static_cast<char>(CellBlockKind::kCompositeRows)) +
+      std::string(1, static_cast<char>(ShuffleBlockKind::kCompositeRows)) +
       bytesOf<uint32_t>({1}) + bytesOf<uint64_t>({4, 0}) +
       std::string(1, static_cast<char>(RunLayout::kCombined));
   EXPECT_EQ(

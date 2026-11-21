@@ -24,7 +24,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
-#include "bolt/shuffle/sparksql/common/PartitionBlockOutput.h"
+#include "bolt/shuffle/sparksql/block/PartitionBlockOutput.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 namespace {

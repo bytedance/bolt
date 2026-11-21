@@ -21,7 +21,7 @@
 /// kMaxPayloadRows are writer policy.
 ///
 /// A partition's shuffle bytes are blocks back to back, each opening with a
-/// CellBlockKind byte. A ColumnarPayload holds some rows of one partition:
+/// ShuffleBlockKind byte. A ColumnarPayload holds some rows of one partition:
 ///
 ///   header      24 bytes: rowCount u32, runCount u32, variableBytes u64
 ///               (a writer statistic, unused by the reader), nullStoredSize
@@ -119,7 +119,7 @@
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
 #include "bolt/type/Type.h"
 
 /// Starts a hot Cell kernel on a cache line. Its loops then keep their
@@ -137,7 +137,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// kMaxBlockBytes bounds the encoded size.
 inline constexpr uint32_t kCacheLineBytes = 64;
 
-/// Fixed payload header length, after the CellBlockKind byte. Unlike
+/// Fixed payload header length, after the ShuffleBlockKind byte. Unlike
 /// kRowBlockHeaderBytes, it does not count that byte.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 
@@ -215,10 +215,6 @@ enum class NullTag : uint8_t {
   kRawNull = 0b10,
   kReserved = 0b11,
 };
-
-/// What a block of a Cell shuffle stream holds: every block on the wire - a
-/// ColumnarPayload or a CompositeRows block - starts with this byte.
-using CellBlockKind = ShuffleBlockKind;
 
 /// How one stream's bytes are produced and parsed.
 enum class StreamKind : uint8_t {

@@ -27,8 +27,8 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
-#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
-#include "bolt/shuffle/sparksql/common/ShuffleByteSource.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/block/ShuffleByteSource.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -66,7 +66,7 @@ class BlockShuffleReader {
   virtual uint64_t streamsRead() const = 0;
 
   /// Reader name for summary logging.
-  virtual std::string_view readerName() const = 0;
+  virtual std::string_view name() const = 0;
 };
 
 /// ShuffleByteSource over an arrow input stream, with one byte of lookahead
@@ -183,15 +183,25 @@ class ShuffleStreamCursor {
   uint64_t streamsOpened_{0};
 };
 
-/// Decoded framed rows from a single row block. `buffer` owns the backing
-/// memory referenced by every string_view in `rows`.
+/// Decoded framed rows from one or more row blocks. `buffers` owns the
+/// backing memory referenced by every string_view in `rows`.
 struct RowBlock {
-  BufferPtr buffer;
+  std::vector<BufferPtr> buffers;
   std::vector<std::string_view> rows;
+  uint64_t rowBytes{0};
+
+  bool empty() const {
+    return rows.empty();
+  }
+
+  size_t size() const {
+    return rows.size();
+  }
 
   void clear() {
     rows.clear();
-    buffer.reset();
+    buffers.clear();
+    rowBytes = 0;
   }
 };
 
@@ -200,23 +210,39 @@ struct RowBlock {
 /// when needed.
 ///
 /// Output is written into a caller-owned `RowBlock`:
-/// - Reusing one `RowBlock` across calls reuses its backing buffer capacity.
-/// - Passing a fresh `RowBlock` (or moving `out.buffer` into a retention list)
-///   lets callers accumulate rows across multiple blocks without invalidating
-///   earlier string_views.
+/// - `read()` replaces `out` with one block and reuses a single unique backing
+///   buffer across calls.
+/// - `append()` appends a block's backing buffer and row views onto `out` so
+///   callers can combine small row blocks across multiple blocks/streams into
+///   one larger batch without copying rows or invalidating earlier views.
 class RowBlockReader {
  public:
   RowBlockReader(ShuffleDecompressor* decompressor, memory::MemoryPool* pool)
       : decompressor_(decompressor), pool_(pool) {}
 
-  /// Reads one row block whose kind byte was already consumed. Populates
-  /// `out.buffer` and `out.rows`. Throws on malformed input.
+  /// Reads one row block whose kind byte was already consumed, replacing `out`.
+  /// Throws on malformed input.
   void read(
       ShuffleByteSource& in,
       RowBlock& out,
-      std::string_view blockLabel = "composite");
+      ShuffleBlockKind kind = ShuffleBlockKind::kCompositeRows);
+
+  /// Reads one row block whose kind byte was already consumed and appends its
+  /// backing buffer and row views to `out`. On malformed input, throws without
+  /// modifying previously accumulated rows in `out`.
+  void append(
+      ShuffleByteSource& in,
+      RowBlock& out,
+      ShuffleBlockKind kind = ShuffleBlockKind::kRows);
 
  private:
+  void decodeBlock(
+      ShuffleByteSource& in,
+      BufferPtr& blockBuffer,
+      std::vector<std::string_view>& rows,
+      uint64_t& rowBytes,
+      ShuffleBlockKind kind);
+
   ShuffleDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
   /// Scratch for compressed input bytes; retained across blocks.

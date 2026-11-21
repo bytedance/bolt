@@ -191,7 +191,7 @@ rows, and composite rows are never mixed with payload rows.
 | Run | A set of cells written out to free memory. It never closes a payload; a payload can hold several runs, oldest first. |
 | Segment | One partition's slice of a spilled run in the spill file, copied verbatim by the merge. |
 | Frame (COMBINED / SEPARATE) | The unit of compression of a run: one frame over all streams (`kCombined`, or `kCombinedUncompressed` when stored), or one per stream (`kSeparate`). |
-| Block | A unit on the wire, opened by a `CellBlockKind` byte: a payload or a `CompositeRows` block. |
+| Block | A unit on the wire, opened by a `ShuffleBlockKind` byte: a `kCellPayload`, `kCompositeRows`, or `kRows` block. |
 | Position space | In a nested layout, the positions a column has: space 0 is the payload's rows; each ARRAY or MAP owns a space holding its non-null entries' elements. |
 | Null body / null record | Per payload, a `NullTag` per wire column (`kAllNull`, `kNoNull`, `kRawNull`); for a `kRawNull` column, 28-byte records, each a run of up to 32767 positions of one null-ness followed by a bitmap of up to 200 positions. |
 | Dictionary | For a string column chosen by the probe, per partition, segments of up to 16 entries in at most 63 serialized bytes; matched rows store one index byte. |
@@ -553,11 +553,12 @@ output.
 
 | File | Contents |
 | --- | --- |
-| `../common/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, framed row block writer, and buffer helpers |
-| `../common/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
-| `../common/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
-| `../common/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
-| `../common/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
+| `../block/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, packed `RowBlockHeader`, framed row block writer, and buffer helpers |
+| `../block/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
+| `../block/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
+| `../block/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
+| `../block/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
+| `../block/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
 | `CellFormat.h` / `.cpp` | Wire format definition and constants; `CellLayout` (row type to wire columns and streams); `BOLT_CELL_KERNEL` |
 | `CellEncoding.h` | Encoding Block encode/decode kernels (scalar and AVX2), `StreamCursor` |
 | `CellBuffer.h` / `.cpp` | `ChunkAllocator`, `DataCells` (chains), `NullClass`, `NullCells` |

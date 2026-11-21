@@ -383,7 +383,7 @@ void LocalCellOutput::logWindowDiagnostics(
 }
 
 void LocalCellOutput::appendBlockKind() {
-  const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+  const auto kind = static_cast<uint8_t>(ShuffleBlockKind::kCellPayload);
   appendBytes(scratch_, &kind, 1, pool_);
 }
 
@@ -472,7 +472,7 @@ void RssCellOutput::buildPayload(
   const uint32_t numStreams = layout_->numStreams();
   const uint64_t total = residentBytes(in, pid);
   resetBuffer(payload, 0, pool_);
-  const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+  const auto kind = static_cast<uint8_t>(ShuffleBlockKind::kCellPayload);
   appendBytes(payload, &kind, 1, pool_);
   uint64_t raw = appendPayloadPrefix(
       in, pid, total > 0 ? 1 : 0, compressor_, payload, pool_);

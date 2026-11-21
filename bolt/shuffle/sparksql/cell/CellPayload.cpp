@@ -297,7 +297,7 @@ class CellPayloadDecoder::StringRows {
 
 CellPayloadDecoder::CellPayloadDecoder(
     CellLayout layout,
-    CellDecompressor* decompressor,
+    ShuffleDecompressor* decompressor,
     memory::MemoryPool* pool,
     CellDecodeLimits limits)
     : layout_(std::move(layout)),
@@ -384,7 +384,7 @@ bool expandNullRecords(
 }
 
 bool CellPayloadDecoder::parseNullBody(
-    CellByteSource& in,
+    ShuffleByteSource& in,
     uint32_t nullStoredSize,
     uint32_t nullDecodedSize,
     std::string& error) {
@@ -506,7 +506,7 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
 }
 
 bool CellPayloadDecoder::parseRun(
-    CellByteSource& in,
+    ShuffleByteSource& in,
     bool onlyRun,
     bool& streamsInCombinedDecoded,
     std::string& error) {
@@ -671,7 +671,9 @@ bool CellPayloadDecoder::parseRun(
   return fail(error, "unreachable run layout");
 }
 
-bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
+bool CellPayloadDecoder::beginPayload(
+    ShuffleByteSource& in,
+    std::string& error) {
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
@@ -680,7 +682,7 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
 }
 
 bool CellPayloadDecoder::readPayload(
-    CellByteSource& in,
+    ShuffleByteSource& in,
     uint32_t& rowCount,
     std::string& error) {
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "a payload of this decoder is open");
@@ -727,7 +729,7 @@ bool CellPayloadDecoder::openPayload(
 }
 
 bool CellPayloadDecoder::parsePayload(
-    CellByteSource& in,
+    ShuffleByteSource& in,
     uint32_t& rowCount,
     std::string& error) {
   uint8_t header[kPayloadFixedHeaderBytes];
@@ -1700,7 +1702,7 @@ RowVectorPtr CellPayloadDecoder::finishBatch() {
 }
 
 bool CellPayloadDecoder::decode(
-    CellByteSource& in,
+    ShuffleByteSource& in,
     RowVectorPtr& out,
     std::string& error) {
   BOLT_CHECK(!batchOpen_, "a batch is under construction");
