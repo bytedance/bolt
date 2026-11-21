@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
 
-#include <folly/lang/Bits.h>
+#include <folly/Portability.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -29,27 +29,9 @@
 namespace bytedance::bolt::shuffle::sparksql {
 
 static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
-
-namespace {
-
-/// Serializes fields explicitly so native struct padding never enters the wire.
-struct RowBlockHeader {
-  ShuffleBlockKind kind;
-  uint32_t rowCount;
-  uint64_t decodedBytes;
-  uint64_t storedBytes;
-  RunLayout layout;
-
-  void writeTo(char* out) const {
-    out[0] = static_cast<char>(kind);
-    folly::storeUnaligned<uint32_t>(out + 1, rowCount);
-    folly::storeUnaligned<uint64_t>(out + 5, decodedBytes);
-    folly::storeUnaligned<uint64_t>(out + 13, storedBytes);
-    out[21] = static_cast<char>(layout);
-  }
-};
-
-} // namespace
+static_assert(
+    sizeof(RowBlockHeader) == 22,
+    "RowBlockHeader wire size must remain 22 bytes");
 
 uint64_t currentTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -156,7 +138,7 @@ void buildRowBlock(
     }
   }
 
-  header.writeTo(block->asMutable<char>());
+  ::memcpy(block->asMutable<char>(), &header, sizeof(header));
   block->setSize(kRowBlockHeaderBytes + header.storedBytes);
 }
 

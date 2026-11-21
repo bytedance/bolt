@@ -28,12 +28,14 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
-#include "bolt/shuffle/sparksql/common/ShuffleBlockFormat.h"
-#include "bolt/shuffle/sparksql/common/ShuffleBlockReader.h"
-#include "bolt/shuffle/sparksql/common/ShuffleByteSource.h"
+#include "bolt/shuffle/sparksql/block/CompositeShuffleReader.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockReader.h"
+#include "bolt/shuffle/sparksql/block/ShuffleByteSource.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
+#include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 namespace {
@@ -118,18 +120,22 @@ TEST_F(ShuffleBlockCommonTest, rowBlockRoundTripUncompressedAndCompressed) {
       CodecDecompressor decompressor(lz4.get());
       RowBlockReader reader(useCodec ? &decompressor : nullptr, pool_.get());
       RowBlock decoded;
-      reader.read(src, decoded, "test");
+      reader.read(src, decoded, ShuffleBlockKind::kCompositeRows);
 
       EXPECT_TRUE(src.atEnd());
+      ASSERT_EQ(decoded.buffers.size(), 1);
       ASSERT_EQ(decoded.rows.size(), inputRows.size());
+      uint64_t expectedBytes = 0;
       for (size_t i = 0; i < inputRows.size(); ++i) {
         EXPECT_EQ(decoded.rows[i], inputRows[i]);
+        expectedBytes += inputRows[i].size();
       }
+      EXPECT_EQ(decoded.rowBytes, expectedBytes);
     }
   }
 }
 
-TEST_F(ShuffleBlockCommonTest, rowBlockMultiBlockRetentionPreservesViews) {
+TEST_F(ShuffleBlockCommonTest, rowBlockAppendCombinesBlocksAcrossStreams) {
   auto lz4 = createCodec(
       arrow::Compression::LZ4_FRAME,
       CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
@@ -145,7 +151,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockMultiBlockRetentionPreservesViews) {
     BufferPtr compressed;
     uint64_t compressNs = 0;
     buildRowBlock(
-        ShuffleBlockKind::kCompositeRows,
+        ShuffleBlockKind::kRows,
         ptrs.data(),
         ptrs.size(),
         rawBytes,
@@ -158,7 +164,8 @@ TEST_F(ShuffleBlockCommonTest, rowBlockMultiBlockRetentionPreservesViews) {
   };
 
   // Place an empty stream between two block-bearing streams to verify
-  // ShuffleStreamCursor skips empty streams cleanly.
+  // ShuffleStreamCursor skips empty streams cleanly and RowBlockReader::append
+  // combines small blocks across streams into one RowBlock.
   auto streams = std::make_shared<test::MemoryReaderStreamIterator>(
       std::vector<std::vector<char>>{
           {}, makeBlock(firstRows), {}, makeBlock(secondRows), {}});
@@ -168,29 +175,38 @@ TEST_F(ShuffleBlockCommonTest, rowBlockMultiBlockRetentionPreservesViews) {
       streams, arrow::default_memory_pool(), &decompressor);
   RowBlockReader reader(&decompressor, pool_.get());
 
-  std::vector<RowBlock> retained;
-  std::vector<std::string_view> accumulated;
+  RowBlock combined;
   uint8_t kind = 0;
   while (true) {
     auto timer = cursor.timeRead();
     if (!cursor.nextBlockKind(kind)) {
       break;
     }
-    ASSERT_EQ(kind, static_cast<uint8_t>(ShuffleBlockKind::kCompositeRows));
-    auto& block = retained.emplace_back();
-    reader.read(cursor.source(), block, "row");
-    accumulated.insert(accumulated.end(), block.rows.begin(), block.rows.end());
+    ASSERT_EQ(kind, static_cast<uint8_t>(ShuffleBlockKind::kRows));
+    reader.append(cursor.source(), combined, ShuffleBlockKind::kRows);
   }
 
   EXPECT_EQ(cursor.streamsOpened(), 5);
-  ASSERT_EQ(retained.size(), 2);
-  ASSERT_EQ(accumulated.size(), firstRows.size() + secondRows.size());
+  ASSERT_EQ(combined.buffers.size(), 2);
+  ASSERT_EQ(combined.rows.size(), firstRows.size() + secondRows.size());
+  EXPECT_EQ(combined.rowBytes, 64 * 24);
   for (size_t i = 0; i < firstRows.size(); ++i) {
-    EXPECT_EQ(accumulated[i], firstRows[i]);
+    EXPECT_EQ(combined.rows[i], firstRows[i]);
   }
   for (size_t i = 0; i < secondRows.size(); ++i) {
-    EXPECT_EQ(accumulated[firstRows.size() + i], secondRows[i]);
+    EXPECT_EQ(combined.rows[firstRows.size() + i], secondRows[i]);
   }
+
+  // Appending a malformed block leaves previously accumulated rows intact.
+  const std::string truncated(4, '\0');
+  MemoryByteSource badSrc(
+      {reinterpret_cast<const uint8_t*>(truncated.data()), truncated.size()});
+  BOLT_ASSERT_THROW(
+      reader.append(badSrc, combined, ShuffleBlockKind::kRows),
+      "malformed row shuffle block: truncated row block header");
+  EXPECT_EQ(combined.buffers.size(), 2);
+  EXPECT_EQ(combined.rows.size(), firstRows.size() + secondRows.size());
+  EXPECT_EQ(combined.rowBytes, 64 * 24);
 }
 
 TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
@@ -203,7 +219,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
     BOLT_ASSERT_THROW(
-        reader.read(src, out, "row"),
+        reader.read(src, out, ShuffleBlockKind::kRows),
         "malformed row shuffle block: truncated row block header");
   }
 
@@ -214,7 +230,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(header.data()), header.size()});
     BOLT_ASSERT_THROW(
-        reader.read(src, out, "row"),
+        reader.read(src, out, ShuffleBlockKind::kRows),
         "malformed row shuffle block: row block row count out of range");
   }
 
@@ -228,7 +244,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
     BOLT_ASSERT_THROW(
-        reader.read(src, out, "row"),
+        reader.read(src, out, ShuffleBlockKind::kRows),
         "malformed row shuffle block: unsupported row block layout");
   }
 
@@ -242,7 +258,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
     BOLT_ASSERT_THROW(
-        reader.read(src, out, "row"),
+        reader.read(src, out, ShuffleBlockKind::kRows),
         "malformed row shuffle block: stored row block size mismatch");
   }
 
@@ -262,7 +278,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(header.data()), header.size()});
     BOLT_ASSERT_THROW(
-        compressedReader.read(src, out, "row"),
+        compressedReader.read(src, out, ShuffleBlockKind::kRows),
         "malformed row shuffle block: row block decompression failed");
   }
 }
@@ -297,17 +313,19 @@ TEST_F(ShuffleBlockCommonTest, rowBlockSharedBufferIsNotOverwrittenOnReuse) {
   RowBlock reusable;
 
   MemoryByteSource src1({block1->as<uint8_t>() + 1, block1->size() - 1});
-  reader.read(src1, reusable, "row");
+  reader.read(src1, reusable, ShuffleBlockKind::kRows);
+  ASSERT_EQ(reusable.buffers.size(), 1);
   // Retain a copy of the BufferPtr (making it non-unique) and its string_views.
-  BufferPtr retainedBuffer = reusable.buffer;
+  BufferPtr retainedBuffer = reusable.buffers[0];
   std::vector<std::string_view> savedViews = reusable.rows;
 
   // Reading a smaller or equal block into the same RowBlock must allocate a
   // fresh buffer instead of overwriting the shared buffer in place.
   MemoryByteSource src2({block2->as<uint8_t>() + 1, block2->size() - 1});
-  reader.read(src2, reusable, "row");
+  reader.read(src2, reusable, ShuffleBlockKind::kRows);
 
-  EXPECT_NE(retainedBuffer.get(), reusable.buffer.get());
+  ASSERT_EQ(reusable.buffers.size(), 1);
+  EXPECT_NE(retainedBuffer.get(), reusable.buffers[0].get());
   ASSERT_EQ(savedViews.size(), firstRows.size());
   for (size_t i = 0; i < firstRows.size(); ++i) {
     EXPECT_EQ(savedViews[i], firstRows[i]);
@@ -420,6 +438,144 @@ TEST_F(ShuffleBlockCommonTest, streamByteSourcePartialReadsAndEof) {
   EXPECT_TRUE(src.atEnd());
   EXPECT_FALSE(src.read(buf, 1));
   EXPECT_TRUE(src.read(nullptr, 0));
+}
+
+TEST_F(
+    ShuffleBlockCommonTest,
+    compositeShuffleReaderInterleavesCompositeAndRows) {
+  auto outputType = ROW({"v"}, {VARCHAR()});
+
+  // Minimal non-Cell reader exercising CompositeShuffleReader + append().
+  class TestRowBlockShuffleReader final : public CompositeShuffleReader {
+   public:
+    TestRowBlockShuffleReader(
+        std::shared_ptr<ReaderStreamIterator> streams,
+        const RowTypePtr& outputType,
+        memory::MemoryPool* pool,
+        int32_t batchSize)
+        : CompositeShuffleReader(
+              std::move(streams),
+              outputType,
+              /*codec=*/nullptr,
+              arrow::default_memory_pool(),
+              pool,
+              batchSize,
+              /*batchByteSize=*/0),
+          outputType_(outputType) {}
+
+    std::string_view name() const override {
+      return "TestRowBlockShuffleReader";
+    }
+
+   private:
+    RowVectorPtr nextNonComposite() override {
+      RowBlock batch;
+      const uint64_t start = currentTimeNs();
+      while (static_cast<int32_t>(batch.size()) < batchSize()) {
+        if (!readNextBlock([&](uint8_t kind, ShuffleByteSource& src) {
+              BOLT_CHECK_EQ(
+                  kind, static_cast<uint8_t>(ShuffleBlockKind::kRows));
+              rowBlockReader().append(src, batch, ShuffleBlockKind::kRows);
+              incrementPayloadsRead();
+            })) {
+          break;
+        }
+      }
+      if (batch.empty()) {
+        addDecodeTimeNs(currentTimeNs() - start);
+        return nullptr;
+      }
+      auto col = BaseVector::create<FlatVector<StringView>>(
+          VARCHAR(), batch.size(), pool());
+      for (size_t i = 0; i < batch.size(); ++i) {
+        col->set(i, StringView(batch.rows[i]));
+      }
+      auto rv = std::make_shared<RowVector>(
+          pool(),
+          outputType_,
+          nullptr,
+          batch.size(),
+          std::vector<VectorPtr>{col});
+      addDecodeTimeNs(currentTimeNs() - start);
+      return rv;
+    }
+
+    RowTypePtr outputType_;
+  };
+
+  auto makeBlock = [&](ShuffleBlockKind kind,
+                       const std::vector<std::string>& rows) {
+    std::string storage;
+    std::vector<const uint8_t*> ptrs;
+    const uint64_t rawBytes = packFramedRows(rows, storage, ptrs);
+    BufferPtr block;
+    BufferPtr compressed;
+    uint64_t compressNs = 0;
+    buildRowBlock(
+        kind,
+        ptrs.data(),
+        ptrs.size(),
+        rawBytes,
+        nullptr,
+        block,
+        compressed,
+        pool_.get(),
+        compressNs);
+    return toCharVec(block);
+  };
+
+  // Stream 0: kRows ("r1", "r2")
+  // Stream 1: kRows ("r3")
+  // Stream 2: kCompositeRows ("c1", "c2", "c3")
+  // Stream 3: kRows ("r4")
+  auto streams = std::make_shared<test::MemoryReaderStreamIterator>(
+      std::vector<std::vector<char>>{
+          makeBlock(ShuffleBlockKind::kRows, {"r1", "r2"}),
+          makeBlock(ShuffleBlockKind::kRows, {"r3"}),
+          makeBlock(ShuffleBlockKind::kCompositeRows, {"c1", "c2", "c3"}),
+          makeBlock(ShuffleBlockKind::kRows, {"r4"})});
+
+  TestRowBlockShuffleReader reader(streams, outputType, pool_.get(), 2);
+
+  // Batch 1: stream 0's 2 rows fill batchSize=2.
+  auto b1 = reader.next();
+  ASSERT_NE(b1, nullptr);
+  EXPECT_EQ(dynamic_cast<CompositeRowVector*>(b1.get()), nullptr);
+  ASSERT_EQ(b1->size(), 2);
+  EXPECT_EQ(b1->childAt(0)->asFlatVector<StringView>()->valueAt(0), "r1");
+  EXPECT_EQ(b1->childAt(0)->asFlatVector<StringView>()->valueAt(1), "r2");
+
+  // Batch 2: stream 1's 1 row, then hits kCompositeRows in stream 2 and
+  // flushes.
+  auto b2 = reader.next();
+  ASSERT_NE(b2, nullptr);
+  EXPECT_EQ(dynamic_cast<CompositeRowVector*>(b2.get()), nullptr);
+  ASSERT_EQ(b2->size(), 1);
+  EXPECT_EQ(b2->childAt(0)->asFlatVector<StringView>()->valueAt(0), "r3");
+
+  // Batches 3 & 4: CompositeRows sliced into batchSize=2 (2 rows, then 1 row).
+  auto b3 = reader.next();
+  ASSERT_NE(b3, nullptr);
+  EXPECT_NE(dynamic_cast<CompositeRowVector*>(b3.get()), nullptr);
+  EXPECT_EQ(b3->size(), 2);
+
+  auto b4 = reader.next();
+  ASSERT_NE(b4, nullptr);
+  EXPECT_NE(dynamic_cast<CompositeRowVector*>(b4.get()), nullptr);
+  EXPECT_EQ(b4->size(), 1);
+
+  // Batch 5: trailing kRows in stream 3.
+  auto b5 = reader.next();
+  ASSERT_NE(b5, nullptr);
+  EXPECT_EQ(dynamic_cast<CompositeRowVector*>(b5.get()), nullptr);
+  ASSERT_EQ(b5->size(), 1);
+  EXPECT_EQ(b5->childAt(0)->asFlatVector<StringView>()->valueAt(0), "r4");
+
+  EXPECT_EQ(reader.next(), nullptr);
+  EXPECT_EQ(reader.name(), "TestRowBlockShuffleReader");
+  EXPECT_EQ(reader.rowsRead(), 7);
+  EXPECT_EQ(reader.payloadsRead(), 3);
+  EXPECT_EQ(reader.streamsRead(), 4);
 }
 
 } // namespace

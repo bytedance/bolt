@@ -28,16 +28,13 @@
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
+#include "bolt/shuffle/sparksql/block/ShuffleByteSource.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
-#include "bolt/shuffle/sparksql/common/ShuffleByteSource.h"
 #include "bolt/type/StringView.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
-
-using CellByteSource = ShuffleByteSource;
-using CellDecompressor = ShuffleDecompressor;
 
 /// Bounds on untrusted input; zero disables a limit. The defaults are what
 /// the writer can emit. Run and null-body buffers come from the reader
@@ -65,7 +62,7 @@ class CellPayloadDecoder {
   /// a compressed buffer is then a format error.
   CellPayloadDecoder(
       CellLayout layout,
-      CellDecompressor* decompressor,
+      ShuffleDecompressor* decompressor,
       memory::MemoryPool* pool,
       CellDecodeLimits limits = {});
 
@@ -77,13 +74,14 @@ class CellPayloadDecoder {
   /// rows then come out through appendRows(). The previous payload must be
   /// fully appended. On malformed input returns false with `error` set,
   /// having consumed an unspecified prefix of `in`.
-  bool beginPayload(CellByteSource& in, std::string& error);
+  bool beginPayload(ShuffleByteSource& in, std::string& error);
 
   /// Reads one payload as beginPayload() does, but opens no column: the
   /// decoders of its columns open it with openPayload(). `rowCount` is the
   /// header's. What it read stays valid until the next readPayload(),
   /// beginPayload() or decode() of this decoder.
-  bool readPayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+  bool
+  readPayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Opens the payload another decoder, `source`, read for this decoder's
   /// columns, column c being source's sourceColumns[c] - one entry per
@@ -148,7 +146,7 @@ class CellPayloadDecoder {
   /// Decodes exactly one payload from `in` as one vector of all its rows.
   /// On success fills `out` and returns true; on malformed input returns
   /// false with `error` set and consumes an unspecified prefix of `in`.
-  bool decode(CellByteSource& in, RowVectorPtr& out, std::string& error);
+  bool decode(ShuffleByteSource& in, RowVectorPtr& out, std::string& error);
 
   const CellLayout& layout() const {
     return layout_;
@@ -202,11 +200,12 @@ class CellPayloadDecoder {
   }
 
   /// Header, null body and every run.
-  bool parsePayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+  bool
+  parsePayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Reads the null body's tags and locates each kRawNull column's records.
   bool parseNullBody(
-      CellByteSource& in,
+      ShuffleByteSource& in,
       uint32_t nullStoredSize,
       uint32_t nullDecodedSize,
       std::string& error);
@@ -218,7 +217,7 @@ class CellPayloadDecoder {
   /// view in place instead of copying it apart. Sets `streamsInCombinedDecoded`
   /// when stream views point directly into `combinedDecoded_`.
   bool parseRun(
-      CellByteSource& in,
+      ShuffleByteSource& in,
       bool onlyRun,
       bool& streamsInCombinedDecoded,
       std::string& error);
@@ -315,7 +314,7 @@ class CellPayloadDecoder {
   }
 
   const CellLayout layout_;
-  CellDecompressor* const decompressor_;
+  ShuffleDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
   const CellDecodeLimits limits_;
   /// Fixed bytes of one decoded row, the batch byte estimate's base.

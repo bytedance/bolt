@@ -22,12 +22,12 @@
 
 #include "bolt/vector/ComplexVector.h"
 
+#include "bolt/shuffle/sparksql/block/CompositeShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
-#include "bolt/shuffle/sparksql/common/CompositeShuffleWriter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 

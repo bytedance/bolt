@@ -18,6 +18,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <type_traits>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/MemoryCopy.h"
@@ -38,9 +40,24 @@ inline constexpr uint64_t kMinCompressBytes = 256;
 /// What a block of a block-based shuffle stream holds: every block on the
 /// wire starts with this byte.
 enum class ShuffleBlockKind : uint8_t {
-  kPayload = 0,
+  kCellPayload = 0,
   kCompositeRows = 1,
+  // TODO: Wire up row-based block shuffle writer/reader using kRows.
+  kRows = 2,
 };
+
+/// Human-readable label for a block kind (used in error diagnostics).
+inline constexpr std::string_view shuffleBlockKindName(ShuffleBlockKind kind) {
+  switch (kind) {
+    case ShuffleBlockKind::kCellPayload:
+      return "cell payload";
+    case ShuffleBlockKind::kCompositeRows:
+      return "composite";
+    case ShuffleBlockKind::kRows:
+      return "row";
+  }
+  return "unknown";
+}
 
 /// A run's or block's compression layout: all streams/body compressed as one
 /// buffer, each stream compressed on its own, or all bytes stored uncompressed.
@@ -65,7 +82,17 @@ enum class RunLayout : uint8_t {
 /// 4 * rowCount, a non-negative size per row, rows consuming the body
 /// exactly, stored = decodedSize for kCombinedUncompressed, and a codec for
 /// kCombined. The header size counts the kind byte.
-inline constexpr uint64_t kRowBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
+/// Wire header of a framed row block (packed, little-endian, no padding).
+struct __attribute__((packed)) RowBlockHeader {
+  ShuffleBlockKind kind;
+  uint32_t rowCount;
+  uint64_t decodedBytes;
+  uint64_t storedBytes;
+  RunLayout layout;
+};
+
+static_assert(std::is_trivially_copyable_v<RowBlockHeader>);
+inline constexpr uint64_t kRowBlockHeaderBytes = sizeof(RowBlockHeader);
 
 /// The size prefix of a framed row. Rows lie back to back, so the prefix is
 /// in general unaligned.

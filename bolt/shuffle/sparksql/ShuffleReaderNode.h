@@ -37,7 +37,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
-#include "bolt/shuffle/sparksql/common/ShuffleBlockReader.h"
+#include "bolt/shuffle/sparksql/block/ShuffleBlockReader.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
 class SparkShuffleReaderNode : public bytedance::bolt::core::PlanNode {

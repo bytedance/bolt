@@ -49,13 +49,13 @@ class CellNestedAssembler {
   /// `type` must take a nested layout.
   CellNestedAssembler(
       RowTypePtr type,
-      CellDecompressor* decompressor,
+      ShuffleDecompressor* decompressor,
       memory::MemoryPool* pool,
       CellDecodeLimits limits = {});
 
   /// Reads one payload, its kind byte consumed. On malformed input returns
   /// false with `error` set.
-  bool beginPayload(CellByteSource& in, std::string& error);
+  bool beginPayload(ShuffleByteSource& in, std::string& error);
 
   /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
   /// one append when that is <= 0. `nextPayload` begins the next payload,
