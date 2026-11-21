@@ -165,3 +165,18 @@ add_test(
   COMMAND
     bolt_shuffle_local_partition_writer_test
 )
+
+add_executable(bolt_shuffle_celeborn_partition_writer_test CelebornPartitionWriterTest.cpp)
+
+target_link_libraries(
+  bolt_shuffle_celeborn_partition_writer_test
+  PRIVATE
+    bolt_gtest_main
+    GTest::gmock
+)
+
+add_test(
+  NAME bolt_shuffle_celeborn_partition_writer_test
+  COMMAND
+    bolt_shuffle_celeborn_partition_writer_test
+)
