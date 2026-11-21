@@ -225,6 +225,7 @@ void HashAggregation::initialize() {
             << ", supportRowBasedOutput_ = " << supportRowBasedOutput_
             << ", outputType_ = " << outputType_->toString()
             << ", isPartialStep = " << isPartialStep_;
+  updateReclaimable();
 
   aggregationNode_.reset();
 }
@@ -260,6 +261,7 @@ bool HashAggregation::preferPartialSpill(
        100 * numOutput / numInputRows_ <= partialAggregationSpillMaxPct_);
   if (preferPartialSpill_) {
     groupingSet_->setPreferPartialSpill(preferPartialSpill_);
+    updateReclaimable();
   }
   return preferPartialSpill_;
 }
@@ -385,8 +387,10 @@ void HashAggregation::updateRuntimeStats() {
 
 void HashAggregation::recordSpillStats() {
   auto spillStatsOr = groupingSet_->spilledStats();
-  if (spillStatsOr.has_value()) {
-    Operator::recordSpillStats(spillStatsOr.value());
+  if (spillStatsOr.has_value() && spillStatsOr.value() != recordedSpillStats_) {
+    const auto delta = spillStatsOr.value() - recordedSpillStats_;
+    Operator::recordSpillStats(delta);
+    recordedSpillStats_ = spillStatsOr.value();
   }
 }
 
@@ -543,6 +547,11 @@ void triggerSegfault() {
 }
 
 RowVectorPtr HashAggregation::getOutput() {
+  auto reclaimableGuard = folly::makeGuard([this]() {
+    if (noMoreInput_) {
+      updateReclaimable();
+    }
+  });
   if (BOLT_TEST_VALUE_ENABLED()) {
     bool injectSegfault = false;
     BOLT_TEST_ADJUST(
@@ -610,7 +619,15 @@ RowVectorPtr HashAggregation::getOutput() {
   }
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
-  auto maxOutputRows = isGlobal_ ? 1 : outputBatchRows(estimatedOutputRowSize_);
+  const auto initialOutputRows =
+      isGlobal_ ? 1 : outputBatchRows(estimatedOutputRowSize_);
+  auto maxOutputRows = initialOutputRows;
+  if (!isGlobal_ && !isDistinct_ && groupingSet_->hasSpilled() &&
+      queryConfig.aggregationDynamicFinalSpillEnabled()) {
+    // Spill merge applies the byte limit to its live merge state. A stale
+    // pre-spill average must not collapse output to one row per batch.
+    maxOutputRows = queryConfig.maxOutputBatchRows();
+  }
   // if aggregate function is vid_split_agg_metrics, set output rows up to 1k
   if (!isGlobal_ && containsVidSplit_ && numOutputRows_ == 0) {
     maxOutputRows = 5;
@@ -620,14 +637,21 @@ RowVectorPtr HashAggregation::getOutput() {
   auto accumulatorRowSize = groupingSet_->estimateOutputRowSize().value_or(0);
   avgRowSize_ = std::max(accumulatorRowSize, avgRowSize_);
 
-  // Reuse output vectors if possible.
-  prepareOutput(maxOutputRows, supportRowBasedOutput_);
+  groupingSet_->ensureOutputFits(
+      maxOutputRows, queryConfig.preferredOutputBatchBytes());
+  // Admission can synchronously reclaim the resident run. Prepare the output
+  // shell only after the GroupingSet has re-read its output state.
+  // The merge row limit can be much larger than a byte-sized batch for wide
+  // output. Allocate using the row-size estimate and grow to the actual size.
+  prepareOutput(
+      std::min(initialOutputRows, maxOutputRows), supportRowBasedOutput_);
 
   const bool hasData = groupingSet_->getOutput(
       maxOutputRows,
       queryConfig.preferredOutputBatchBytes(),
       resultIterator_,
       output_);
+  recordSpillStats();
   if (!hasData) {
     resultIterator_.reset();
     if (noMoreInput_) {
@@ -710,15 +734,20 @@ RowVectorPtr HashAggregation::getDistinctOutput() {
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
   const auto maxOutputRows = outputBatchRows(estimatedOutputRowSize_);
+  groupingSet_->ensureOutputFits(
+      maxOutputRows, queryConfig.preferredOutputBatchBytes());
   prepareOutput(maxOutputRows, false);
   if (!groupingSet_->getOutput(
           maxOutputRows,
           queryConfig.preferredOutputBatchBytes(),
           resultIterator_,
           output_)) {
+    recordSpillStats();
+    recordSpillReadStats();
     finished_ = true;
     return nullptr;
   }
+  recordSpillStats();
   numOutputRows_ += output_->size();
   return output_;
 }
@@ -731,6 +760,7 @@ void HashAggregation::noMoreInput() {
   recordSpillStats();
   // Release the extra reserved memory right after processing all the inputs.
   pool()->release();
+  updateReclaimable();
 }
 
 bool HashAggregation::isFinished() {
@@ -738,6 +768,24 @@ bool HashAggregation::isFinished() {
     BOLT_CHECK_NULL(accumulatedOutput_);
   }
   return finished_;
+}
+
+bool HashAggregation::canReclaim() const {
+  return reclaimable_.load(std::memory_order_relaxed);
+}
+
+void HashAggregation::updateReclaimable() noexcept {
+  if (groupingSet_ == nullptr) {
+    reclaimable_.store(false, std::memory_order_relaxed);
+    return;
+  }
+  const bool hasReclaimableState = !noMoreInput_ ||
+      (groupingSet_->hasSpilled() ? groupingSet_->dynamicFinalSpillActive()
+                                  : groupingSet_->numRows() > 0);
+  reclaimable_.store(
+      canSpill() && !finished_ && (!isPartialStep_ || preferPartialSpill_) &&
+          hasReclaimableState,
+      std::memory_order_relaxed);
 }
 
 void HashAggregation::reclaim(
@@ -759,11 +807,18 @@ void HashAggregation::reclaim(
 
   if (noMoreInput_) {
     if (groupingSet_->hasSpilled()) {
-      LOG(WARNING)
-          << "Can't reclaim from aggregation operator which has spilled and is under output processing, pool "
-          << pool()->name()
-          << ", memory usage: " << succinctBytes(pool()->currentBytes())
-          << ", reservation: " << succinctBytes(pool()->reservedBytes());
+      if (groupingSet_->dynamicFinalSpillActive()) {
+        groupingSet_->spillRemainingResidentRuns();
+        recordSpillStats();
+        pool()->release();
+        updateReclaimable();
+      } else {
+        LOG(WARNING)
+            << "Can't reclaim from aggregation operator which has spilled and is under output processing, pool "
+            << pool()->name()
+            << ", memory usage: " << succinctBytes(pool()->currentBytes())
+            << ", reservation: " << succinctBytes(pool()->reservedBytes());
+      }
       return;
     }
     if (isDistinct_) {
@@ -777,6 +832,7 @@ void HashAggregation::reclaim(
       groupingSet_->resetTable();
       // Release the minimum reserved memory.
       pool()->release();
+      updateReclaimable();
       return;
     }
 
@@ -786,6 +842,7 @@ void HashAggregation::reclaim(
     // NOTE: we will only spill once during the output processing stage so
     // record stats here.
     recordSpillStats();
+    updateReclaimable();
   } else {
     BOLT_CHECK(
         !isDistinct_ || (input_ == nullptr && !newDistincts_),
@@ -802,6 +859,7 @@ void HashAggregation::reclaim(
 
 void HashAggregation::close() {
   Operator::close();
+  reclaimable_.store(false, std::memory_order_relaxed);
   if (groupingSet_) {
     Operator::recordGroupingSetStats(groupingSet_->getRuntimeStats());
     groupingSet_.reset();

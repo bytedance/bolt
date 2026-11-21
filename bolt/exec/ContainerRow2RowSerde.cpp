@@ -21,7 +21,8 @@ void ContainerRow2RowSerde::serialize(
     char* row,
     char*& current,
     const char* bufferEnd,
-    const RowFormatInfo& info) {
+    const RowFormatInfo& info,
+    bool initializeStringViews) {
   simd::memcpy(current, row, info.fixRowSize);
   char* currentHead = current;
   current += info.fixRowSize;
@@ -43,9 +44,14 @@ void ContainerRow2RowSerde::serialize(
               HashStringAllocator::headerOf(sv.data()));
           stream->readBytes(current, sv.size());
         }
-        // clear data ptr of StringView to increase compress ratio
-        *(char**)(currentHead + rowColumn.offset() + sizeof(uint64_t)) =
-            nullptr;
+        if (initializeStringViews) {
+          *reinterpret_cast<StringView*>(currentHead + rowColumn.offset()) =
+              StringView(current, sv.size());
+        } else {
+          // clear data ptr of StringView to increase compress ratio
+          *(char**)(currentHead + rowColumn.offset() + sizeof(uint64_t)) =
+              nullptr;
+        }
         current += sv.size();
         BOLT_CHECK(current <= bufferEnd);
       }

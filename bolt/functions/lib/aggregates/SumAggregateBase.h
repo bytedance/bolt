@@ -81,23 +81,30 @@ class SumAggregateBase
 
   FLATTEN void
   extractValues(char** groups, int32_t numGroups, VectorPtr* result) override {
-    BaseAggregate::template doExtractValues<ResultType>(
-        groups, numGroups, result, [&](char* group) {
-          // 'ResultType' and 'TAccumulator' might not be same such as sum(real)
-          // and we do an explicit type conversion here.
-          return (ResultType)(*BaseAggregate::Aggregate::template value<
-                              TAccumulator>(group));
-        });
+    extract<ResultType>(groups, numGroups, result, 0);
+  }
+
+  FLATTEN void extractValuesWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset) override {
+    extract<ResultType>(groups, numGroups, result, resultOffset);
   }
 
   FLATTEN void extractAccumulators(
       char** groups,
       int32_t numGroups,
       VectorPtr* result) override {
-    BaseAggregate::template doExtractValues<TAccumulator>(
-        groups, numGroups, result, [&](char* group) {
-          return *BaseAggregate::Aggregate::template value<TAccumulator>(group);
-        });
+    extract<TAccumulator>(groups, numGroups, result, 0);
+  }
+
+  FLATTEN void extractAccumulatorsWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset) override {
+    extract<TAccumulator>(groups, numGroups, result, resultOffset);
   }
 
   FLATTEN void addRawInput(
@@ -183,6 +190,24 @@ class SumAggregateBase
   }
 
  private:
+  template <typename T>
+  void extract(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset) {
+    BaseAggregate::template doExtractValues<T>(
+        groups,
+        numGroups,
+        result,
+        [&](char* group) {
+          // The result and accumulator differ for sum(real).
+          return static_cast<T>(
+              *BaseAggregate::Aggregate::template value<TAccumulator>(group));
+        },
+        resultOffset);
+  }
+
   /// Update functions that check for overflows for integer types.
   /// For floating points, an overflow results in +/- infinity which is a
   /// valid output.
