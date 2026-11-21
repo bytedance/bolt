@@ -399,7 +399,7 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
   // preferCellShuffle takes priority over a forced V1 or V2, not over a
   // forced RowBased, under every partitioning: single and round-robin take
   // Cell exactly where hash does, and V1 elsewhere. The readers decide
-  // through writesCellShuffle(), which must agree with the writer the
+  // through useCellShuffle(), which must agree with the writer the
   // factory returns.
   struct Case {
     Partitioning partitioning;
@@ -447,7 +447,7 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
     // The readers' mirror: a narrow schema, so the adaptive choice is not
     // the row-based writer.
     EXPECT_EQ(
-        writesCellShuffle(
+        useCellShuffle(
             c.partitioning,
             c.forced,
             c.prefer,
@@ -455,7 +455,7 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
         c.cell);
   }
   // An adaptive choice of the row-based writer stays row-based.
-  EXPECT_FALSE(writesCellShuffle(
+  EXPECT_FALSE(useCellShuffle(
       Partitioning::kHash, ShuffleWriterType::Adaptive, true, true));
 }
 
@@ -2445,10 +2445,10 @@ TEST_F(CellWriterTest, spillMemoryKeepsTheNewestSealsUnderALimit) {
 
 TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
   // splitTime is the split alone, as V1 counts it: the seals, spills and
-  // pushes done inside the splits are sealSpillTime, flat or nested, local
+  // pushes done inside the splits are spillTime, flat or nested, local
   // or pushed. With the shred time the two fit in the time the split()
   // calls took, so none of it is counted twice. A small write that never
-  // seals or spills has no sealSpillTime, and neither has a write whose
+  // seals or spills has no spillTime, and neither has a write whose
   // only spill is a reclaim between two splits, which the operator counts
   // as externalReclaimTime.
   constexpr int32_t kPartitions = 4;
@@ -2463,7 +2463,7 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
         EXPECT_EQ(metrics.flattenTime > 0, nested);
         EXPECT_LE(
             metrics.splitTime + metrics.flattenTime + metrics.convertTime +
-                metrics.sealSpillTime,
+                metrics.spillTime,
             written.splitWallNs);
       };
       const auto quietOptions = [&]() {
@@ -2479,7 +2479,7 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
       if (!rss) {
         EXPECT_EQ(plain.metrics.totalBytesEvicted, 0);
       }
-      EXPECT_EQ(plain.metrics.sealSpillTime, 0);
+      EXPECT_EQ(plain.metrics.spillTime, 0);
 
       // Payloads sealed past 2 MiB, and cells held to one chunk: seals,
       // pushes on Celeborn, partial spills locally.
@@ -2494,7 +2494,7 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
       if (!rss) {
         EXPECT_GT(busy.metrics.totalSpillFiles, 0);
       }
-      EXPECT_GT(busy.metrics.sealSpillTime, 0);
+      EXPECT_GT(busy.metrics.spillTime, 0);
       test::expectReadsBack(input, busy, arrow::Compression::LZ4_FRAME, pool());
 
       options = quietOptions();
@@ -2515,7 +2515,7 @@ TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
       if (!rss) {
         EXPECT_GT(reclaimed.metrics.totalSpillFiles, 0);
       }
-      EXPECT_EQ(reclaimed.metrics.sealSpillTime, 0);
+      EXPECT_EQ(reclaimed.metrics.spillTime, 0);
       test::expectReadsBack(
           input, reclaimed, arrow::Compression::LZ4_FRAME, pool());
     }
@@ -2657,14 +2657,14 @@ TEST_F(CellWriterTest, cellThresholdSpillsWithoutMemoryPressure) {
       } else {
         // Without memory pressure, runs stay in spill memory: nothing reaches
         // disk, so neither totalBytesEvicted nor totalSpillFiles moves, while
-        // sealSpillTime records the in-memory spills.
-        EXPECT_GT(low.metrics.sealSpillTime, 0);
+        // spillTime records the in-memory spills.
+        EXPECT_GT(low.metrics.spillTime, 0);
         EXPECT_EQ(low.metrics.totalBytesEvicted, 0);
         EXPECT_EQ(low.metrics.totalSpillFiles, 0);
-        EXPECT_EQ(high.metrics.sealSpillTime, 0);
+        EXPECT_EQ(high.metrics.spillTime, 0);
         EXPECT_EQ(high.metrics.totalSpillFiles, 0);
         const auto floored = write(64 << 10, 64 << 20, defaultSpillMemory);
-        EXPECT_EQ(floored.metrics.sealSpillTime, 0);
+        EXPECT_EQ(floored.metrics.spillTime, 0);
         EXPECT_EQ(floored.metrics.totalSpillFiles, 0);
 
         // With spill memory off, the same threshold runs land on disk and both

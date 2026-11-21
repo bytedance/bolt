@@ -94,11 +94,11 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
-  // Mirror of the writer's choice, writesCellShuffle(): Cell when forced,
+  // Mirror of the writer's choice, useCellShuffle(): Cell when forced,
   // or preferred over a forced V1 or V2 or over an adaptive choice that did
   // not pick the row-based writer, under any partitioning. A forced
   // RowBased wins over the preference on both sides.
-  useCellReader_ = writesCellShuffle(
+  useCellReader_ = useCellShuffle(
       partitioning,
       shuffleWriterType_,
       shuffleReaderOptions_.preferCellShuffle,

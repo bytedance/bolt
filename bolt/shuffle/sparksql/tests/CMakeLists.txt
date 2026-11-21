@@ -183,16 +183,27 @@ add_test(
 
 add_executable(
   bolt_shuffle_cell_test
-  CellShuffleCheckTest.cpp
   CellGoldenTest.cpp
   CellMalformedInputTest.cpp
   CellNestedTest.cpp
+  CellShuffleCheckTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
-  ShuffleBlockCommonTest.cpp
+  ShuffleBlockTest.cpp
   SpillMemoryTest.cpp
 )
 
 target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)
 
 add_test(NAME bolt_shuffle_cell_test COMMAND bolt_shuffle_cell_test)
+
+add_executable(bolt_shuffle_cell_integration_test CellIntegrationTest.cpp)
+
+target_link_libraries(
+  bolt_shuffle_cell_integration_test
+  PRIVATE
+    bolt_gtest_main
+    GTest::gmock
+)
+
+add_test(NAME bolt_shuffle_cell_integration_test COMMAND bolt_shuffle_cell_integration_test)

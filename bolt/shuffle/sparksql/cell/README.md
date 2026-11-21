@@ -37,7 +37,7 @@ The rule is the same under every partitioning. Single and round-robin
 partitioning never pick the row-based writer and, where Cell is not chosen,
 write V1 whatever type is forced, as before.
 
-`writesCellShuffle()` in Options.h is the one rule the writer and both
+`useCellShuffle()` in Options.h is the one rule the writer and both
 readers follow. A job that sets `preferCellShuffle` writes Cell for its
 single and round-robin exchanges too, so their readers must be
 `SparkShuffleReaderNode` as well.
@@ -532,8 +532,8 @@ LD_LIBRARY_PATH=<build dir> taskset -c 3 ./bolt_shuffle_benchmark \
   `cell_adaptive_compression`. See `--helpfull`.
 - Each benchmark reports ns per row, plus user counters (split, shred,
   seal and spill, compress, write and evict times, bytes written and raw,
-  pool peak, and so on) in the `--bm_json_verbose` output. `seal_spill_ns`
-  is the writer's `sealSpillTime`: the seals, spills and pushes done inside
+  pool peak, and so on) in the `--bm_json_verbose` output. `spill_ns`
+  is the writer's `spillTime`: the seals, spills and pushes done inside
   its splits - a batch's rows' seal, the partial spills of chunk growths,
   the seals after a batch, the spills of a reclaim reached from inside a
   split - which `splitTime` leaves out, as V1's leaves out its eviction. It

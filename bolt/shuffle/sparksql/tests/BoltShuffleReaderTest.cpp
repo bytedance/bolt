@@ -163,43 +163,40 @@ class BoltShuffleReaderTest : public ::testing::Test {
 };
 
 TEST_F(BoltShuffleReaderTest, RejectsCellPayloads) {
-  // Where the writer emits Cell payloads - forced, or an adaptive choice
-  // preferring Cell, under any partitioning - this factory must refuse the
-  // stream rather than misread it as V1/V2 payloads. Otherwise the writer
-  // is V1 without a pid, which reads as usual.
+  // Where the writer emits Cell payloads - forced, or preferring Cell under
+  // any partitioning - constructing BoltShuffleReader must fail rather than
+  // misreading them as V1/V2 payloads. Otherwise V1 and row-based streams
+  // construct and read as usual.
   auto stream = buildStream(1, 16, &isValidityBuffer_, pool_);
-  const auto makeFactory = [&](ShuffleWriterType type,
+  const auto makeOptions = [&](ShuffleWriterType type,
                                bool preferCell,
                                const std::string& partitioning) {
-    auto factory = std::make_unique<BoltColumnarBatchDeserializerFactory>(
-        schema_,
-        nullptr,
-        rowType_,
-        1024,
-        1 << 20,
-        pool_,
-        boltPool_.get(),
-        false);
-    factory->setShuffleWriterType(static_cast<int32_t>(type));
-    factory->setPreferCellShuffle(preferCell);
-    factory->setNumPartitions(4);
-    factory->setpartitioningShortName(partitioning);
-    return factory;
+    ShuffleReaderOptions options;
+    options.compressionType = arrow::Compression::UNCOMPRESSED;
+    options.batchSize = 1024;
+    options.shuffleBatchByteSize = 1 << 20;
+    options.numPartitions = 4;
+    options.partitionShortName = partitioning;
+    options.forceShuffleWriterType = static_cast<int32_t>(type);
+    options.preferCellShuffle = preferCell;
+    options.checksumEnabled = false;
+    return options;
   };
-  const auto open = [&](BoltColumnarBatchDeserializerFactory& factory) {
-    return factory.createDeserializer(
-        std::make_shared<arrow::io::BufferReader>(stream));
+  const auto open = [&](BoltShuffleReader& reader) {
+    return reader.readStream(std::make_shared<arrow::io::BufferReader>(stream));
   };
 
-  // Cell payloads: refused with the reason.
+  // Cell payloads: refused immediately when BoltShuffleReader is created.
   for (const auto* partitioning : {"hash", "single", "rr"}) {
     SCOPED_TRACE(partitioning);
     for (const auto& [type, preferCell] :
          {std::pair{ShuffleWriterType::Cell, false},
           std::pair{ShuffleWriterType::Adaptive, true},
           std::pair{ShuffleWriterType::V1, true}}) {
-      auto factory = makeFactory(type, preferCell, partitioning);
-      BOLT_ASSERT_THROW(open(*factory), "SparkShuffleReaderNode");
+      auto options = makeOptions(type, preferCell, partitioning);
+      BOLT_ASSERT_THROW(
+          BoltShuffleReader(schema_, options, pool_, boltPool_.get()),
+          "SparkShuffleReaderNode");
     }
   }
 
@@ -209,16 +206,18 @@ TEST_F(BoltShuffleReaderTest, RejectsCellPayloads) {
        {std::pair{ShuffleWriterType::Adaptive, false},
         std::pair{ShuffleWriterType::V2, false},
         std::pair{ShuffleWriterType::RowBased, true}}) {
-    auto factory = makeFactory(type, preferCell, "single");
-    auto d = open(*factory);
+    auto options = makeOptions(type, preferCell, "single");
+    BoltShuffleReader reader(schema_, options, pool_, boltPool_.get());
+    auto d = open(reader);
     drainAndVerify(*d, 16);
   }
 
   // Row-based payloads: the adaptive choice took the row-based writer
-  // before any preference for Cell, so the factory opens its row reader.
-  auto rowBased = makeFactory(ShuffleWriterType::Adaptive, true, "hash");
-  rowBased->setRowBasedShuffleThreshold(1);
-  EXPECT_NE(open(*rowBased), nullptr);
+  // before any preference for Cell, so BoltShuffleReader opens its row reader.
+  auto options = makeOptions(ShuffleWriterType::Adaptive, true, "hash");
+  options.rowBasedShuffleThreshold = 1;
+  BoltShuffleReader rowBased(schema_, options, pool_, boltPool_.get());
+  EXPECT_NE(open(rowBased), nullptr);
 }
 
 TEST_F(BoltShuffleReaderTest, SinglePayload) {

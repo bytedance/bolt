@@ -201,7 +201,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// classifying their nulls, logged at stop. The nested path's is part of
   /// the shred time.
   uint64_t nullClassifyNs_{0};
-  /// What SealSpillTimer measured: sealSpillTime at stop. splitTime,
+  /// What SealSpillTimer measured: spillTime at stop. splitTime,
   /// convertTime and the shred time leave it out.
   uint64_t sealSpillNs_{0};
   /// A SealSpillTimer is running.

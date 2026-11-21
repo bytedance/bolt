@@ -185,7 +185,7 @@ std::string ShuffleWriterMetrics::toString() const {
       "totalBytesEvicted={} totalSpillFiles={} spillCount={} "
       "dictionaryMatchedRows={} dictionaryFallbackRows={} totalWriteTime={} "
       "totalEvictTime={} "
-      "totalCompressTime={} splitTime={} sealSpillTime={} convertTime={} "
+      "totalCompressTime={} splitTime={} spillTime={} convertTime={} "
       "flattenTime={} "
       "computePidTime={} shuffleWriteTime={} externalReclaimTime={} "
       "maxPartitionBufferSize={} avgPreallocSize={} dataSize={} peakBytes={} "
@@ -204,7 +204,7 @@ std::string ShuffleWriterMetrics::toString() const {
       asMillis(totalEvictTime),
       asMillis(totalCompressTime),
       asMillis(splitTime),
-      asMillis(sealSpillTime),
+      asMillis(spillTime),
       asMillis(convertTime),
       asMillis(flattenTime),
       asMillis(computePidTime),

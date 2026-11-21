@@ -272,7 +272,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
   /*
    * decide shuffle write type based on options.
    *
-   * 0. Cell when writesCellShuffle() says so, under any partitioning.
+   * 0. Cell when useCellShuffle() says so, under any partitioning.
    * 1. Otherwise, for partitioning that does not has pid, V1, even with
    * force write type
    * 2. For partitioning that has pid,
@@ -287,7 +287,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
   // takes priority over a forced V1 or V2.
   if (options.forceShuffleWriterType) {
     const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
-    if (writesCellShuffle(
+    if (useCellShuffle(
             options.partitioning,
             forced,
             options.preferCellShuffle,
@@ -357,7 +357,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
   // The adaptive choice, unless row-based (returned above); a forced type
   // reaches here only without a pid, and was not Cell.
   if (options.forceShuffleWriterType == 0 &&
-      writesCellShuffle(
+      useCellShuffle(
           options.partitioning,
           ShuffleWriterType::Adaptive,
           options.preferCellShuffle,

@@ -67,7 +67,7 @@ uint64_t packFramedRows(
   return storage.size();
 }
 
-class ShuffleBlockCommonTest : public testing::Test {
+class ShuffleBlockTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance({});
@@ -80,7 +80,7 @@ class ShuffleBlockCommonTest : public testing::Test {
   std::shared_ptr<memory::MemoryPool> pool_;
 };
 
-TEST_F(ShuffleBlockCommonTest, rowBlockRoundTripUncompressedAndCompressed) {
+TEST_F(ShuffleBlockTest, rowBlockRoundTripUncompressedAndCompressed) {
   auto lz4 = createCodec(
       arrow::Compression::LZ4_FRAME,
       CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
@@ -135,7 +135,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockRoundTripUncompressedAndCompressed) {
   }
 }
 
-TEST_F(ShuffleBlockCommonTest, rowBlockAppendCombinesBlocksAcrossStreams) {
+TEST_F(ShuffleBlockTest, rowBlockAppendCombinesBlocksAcrossStreams) {
   auto lz4 = createCodec(
       arrow::Compression::LZ4_FRAME,
       CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
@@ -209,7 +209,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockAppendCombinesBlocksAcrossStreams) {
   EXPECT_EQ(combined.rowBytes, 64 * 24);
 }
 
-TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
+TEST_F(ShuffleBlockTest, rowBlockReaderRejectsMalformedInput) {
   RowBlockReader reader(/*decompressor=*/nullptr, pool_.get());
   RowBlock out;
 
@@ -283,7 +283,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockReaderRejectsMalformedInput) {
   }
 }
 
-TEST_F(ShuffleBlockCommonTest, rowBlockSharedBufferIsNotOverwrittenOnReuse) {
+TEST_F(ShuffleBlockTest, rowBlockSharedBufferIsNotOverwrittenOnReuse) {
   auto makeBlock = [&](const std::vector<std::string>& rows) {
     std::string storage;
     std::vector<const uint8_t*> ptrs;
@@ -336,7 +336,7 @@ TEST_F(ShuffleBlockCommonTest, rowBlockSharedBufferIsNotOverwrittenOnReuse) {
   }
 }
 
-TEST_F(ShuffleBlockCommonTest, buildRowBlockValidatesRowCountAndByteLength) {
+TEST_F(ShuffleBlockTest, buildRowBlockValidatesRowCountAndByteLength) {
   BufferPtr block;
   BufferPtr compressed;
   uint64_t compressNs = 0;
@@ -385,7 +385,7 @@ TEST_F(ShuffleBlockCommonTest, buildRowBlockValidatesRowCountAndByteLength) {
       "row block size mismatch");
 }
 
-TEST_F(ShuffleBlockCommonTest, streamByteSourcePartialReadsAndEof) {
+TEST_F(ShuffleBlockTest, streamByteSourcePartialReadsAndEof) {
   class ChunkedInputStream final : public arrow::io::InputStream {
    public:
     ChunkedInputStream(std::string data, size_t maxChunk)
@@ -440,9 +440,7 @@ TEST_F(ShuffleBlockCommonTest, streamByteSourcePartialReadsAndEof) {
   EXPECT_TRUE(src.read(nullptr, 0));
 }
 
-TEST_F(
-    ShuffleBlockCommonTest,
-    compositeShuffleReaderInterleavesCompositeAndRows) {
+TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
   auto outputType = ROW({"v"}, {VARCHAR()});
 
   // Minimal non-Cell reader exercising CompositeShuffleReader + append().

@@ -771,17 +771,6 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
          static_cast<int64_t>(numPartitions_) * schema_->num_fields() >
              rowBasedShuffleThreshold_)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
-  // Mirror of the writer's choice (and of SparkShuffleReaderNode's),
-  // writesCellShuffle(): Cell when forced, or preferred over a forced V1 or
-  // V2 or over an adaptive choice that did not pick the row-based writer,
-  // under any partitioning; otherwise the writer is V1, V2 or row-based,
-  // read here as usual. Cell payloads are not V1/V2/row payloads: only
-  // SparkShuffleReaderNode reads them.
-  BOLT_CHECK(
-      !writesCellShuffle(
-          partitioning, shuffleWriterType_, preferCellShuffle_, isRowBased),
-      "The writer emits Cell payloads here, which are read by "
-      "SparkShuffleReaderNode, not by BoltShuffleReader");
   if (!zstdCodec_) {
     zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
         1 /*not used*/, false, memoryPool_, checksumEnabled_);
@@ -878,28 +867,46 @@ BoltShuffleReader::BoltShuffleReader(
     std::shared_ptr<arrow::Schema> schema,
     ShuffleReaderOptions options,
     arrow::MemoryPool* pool,
-    bytedance::bolt::memory::MemoryPool* boltPool)
-    : factory_(std::make_unique<BoltColumnarBatchDeserializerFactory>(
-          schema,
-          createCodec(
-              options.compressionType,
-              CodecOptions{
-                  getCodecBackend(options.codecBackend),
-                  kDefaultCompressionLevel,
-                  options.checksumEnabled}),
-          bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
-          options.batchSize,
-          options.shuffleBatchByteSize,
-          pool,
-          boltPool,
-          options.checksumEnabled)) {
+    bytedance::bolt::memory::MemoryPool* boltPool) {
+  const auto writerType =
+      static_cast<ShuffleWriterType>(options.forceShuffleWriterType);
+  if (writerType == ShuffleWriterType::Cell || options.preferCellShuffle) {
+    bool isRowBased = false;
+    auto partitioning = Partitioning::kSingle;
+    if (writerType == ShuffleWriterType::Adaptive) {
+      partitioning = toPartitioning(options.partitionShortName);
+      isRowBased = supportAdaptiveShuffleWriter(partitioning) &&
+          ((options.numPartitions >= rowBasePartitionThreshold &&
+            schema->num_fields() >= rowBaseColumnNumThreshold) ||
+           static_cast<int64_t>(options.numPartitions) * schema->num_fields() >
+               options.rowBasedShuffleThreshold);
+    }
+    BOLT_CHECK(
+        !useCellShuffle(
+            partitioning, writerType, options.preferCellShuffle, isRowBased),
+        "The writer emits Cell payloads here, which are read by "
+        "SparkShuffleReaderNode, not by BoltShuffleReader");
+  }
+  factory_ = std::make_unique<BoltColumnarBatchDeserializerFactory>(
+      schema,
+      createCodec(
+          options.compressionType,
+          CodecOptions{
+              getCodecBackend(options.codecBackend),
+              kDefaultCompressionLevel,
+              options.checksumEnabled}),
+      bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
+      options.batchSize,
+      options.shuffleBatchByteSize,
+      pool,
+      boltPool,
+      options.checksumEnabled);
   factory_->setNumPartitions(options.numPartitions);
   factory_->setShuffleWriterType(options.forceShuffleWriterType);
   factory_->setpartitioningShortName(options.partitionShortName);
   factory_->setShuffleBufferSize(options.shuffleBufferSize);
   factory_->setRowFormat(options.rowFormat);
   factory_->setRowBasedShuffleThreshold(options.rowBasedShuffleThreshold);
-  factory_->setPreferCellShuffle(options.preferCellShuffle);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

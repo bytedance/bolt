@@ -858,7 +858,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.begin(),
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
-  metrics_.sealSpillTime += static_cast<int64_t>(sealSpillNs_);
+  metrics_.spillTime += static_cast<int64_t>(sealSpillNs_);
   if (initialized_) {
     logPressure();
   }

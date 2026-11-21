@@ -230,7 +230,7 @@ struct ShuffleReaderOptions {
 
   // The writer side's preferCellShuffle: the writer then writes Cell when
   // adaptive (unless that picks the row-based writer) or forced to V1 or V2
-  // (see writesCellShuffle()). Must match the writer.
+  // (see useCellShuffle()). Must match the writer.
   bool preferCellShuffle = false;
 
   // The writer side's CellShuffleOptions::nativeNestedTypes: whether Cell
@@ -293,7 +293,7 @@ struct ShuffleWriterOptions {
   // Write Cell in place of the adaptive choice, unless that is the
   // row-based writer, and in place of a forced V1 or V2, under every
   // partitioning. A forced RowBased or Cell stays as forced. The readers
-  // must set it alike. See writesCellShuffle().
+  // must set it alike. See useCellShuffle().
   bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
@@ -345,7 +345,7 @@ struct ShuffleWriterMetrics {
   int64_t splitTime{0};
   // CellShuffleWriter: time spent sealing payloads and spilling or pushing
   // cell data during split, excluded from splitTime.
-  int64_t sealSpillTime{0};
+  int64_t spillTime{0};
   int64_t convertTime{0};
   int64_t flattenTime{0};
   int64_t computePidTime{0};
@@ -379,7 +379,7 @@ inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
 /// preferCellShuffle is set, unless it picked the row-based writer
 /// (`isRowBased`, never so without a pid). Where this is false, a
 /// partitioning without a pid (single, round-robin) writes V1.
-inline bool writesCellShuffle(
+inline bool useCellShuffle(
     const Partitioning& /*partitioning*/,
     ShuffleWriterType type,
     bool preferCellShuffle,
