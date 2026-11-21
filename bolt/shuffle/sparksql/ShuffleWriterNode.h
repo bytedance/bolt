@@ -142,7 +142,7 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   // it is not timed twice.
   std::atomic<bool> inShuffleSection_{false};
   std::unique_ptr<BoltArrowMemoryPool> arrowPool_;
-  std::shared_ptr<BoltShuffleWriter> shuffleWriter_;
+  std::shared_ptr<ShuffleWriter> shuffleWriter_;
   bool finished_ = false;
   ReportShuffleStatusCallback reportShuffleStatusCallback_;
 };

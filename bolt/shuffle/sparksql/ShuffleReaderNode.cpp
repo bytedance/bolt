@@ -15,7 +15,9 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
+#include <fmt/format.h>
 #include "bolt/common/time/Timer.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 
@@ -92,6 +94,15 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
+  // Mirror of the writer's choice, writesCellShuffle(): Cell when forced,
+  // or preferred over a forced V1 or V2 or over an adaptive choice that did
+  // not pick the row-based writer, under any partitioning. A forced
+  // RowBased wins over the preference on both sides.
+  useCellReader_ = writesCellShuffle(
+      partitioning,
+      shuffleWriterType_,
+      shuffleReaderOptions_.preferCellShuffle,
+      isRowBased_);
 }
 
 void SparkShuffleReader::init() {
@@ -107,6 +118,26 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
+  }
+
+  if (useCellReader_) {
+    if (!blockShuffleReader_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
+      blockShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+          readerStreamIterator_,
+          outputType_,
+          codec_.get(),
+          arrowPool_.get(),
+          pool(),
+          batchSize_,
+          shuffleBatchByteSize_,
+          shuffleReaderOptions_.cellNativeNestedTypes);
+    }
+    auto output = blockShuffleReader_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
   }
 
   if (reuseBufferedInputStream_) {
@@ -202,6 +233,36 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
+  if (blockShuffleReader_) {
+    // Report decompression and deserialization disjointly, matching the
+    // legacy reader's accounting: deserialization is the decode time less
+    // decompression and reading the input. The legacy reader counts its
+    // reads of the streams in the total read time alone, which holds the
+    // block reader's too.
+    const auto& reader = *blockShuffleReader_;
+    const uint64_t decodeNs = reader.decodeTimeNs();
+    const uint64_t decompressNs = reader.decompressTimeNs();
+    const uint64_t readNs = reader.readTimeNs();
+    const uint64_t deserializeNs =
+        decodeNs > decompressNs + readNs ? decodeNs - decompressNs - readNs : 0;
+    decompressTime_ += decompressNs;
+    deserializeTime_ += deserializeNs;
+    // The three times are disjoint: decode is the deserialization above.
+    LOG(INFO) << fmt::format(
+        "{} totals: rows={}, payloads={}, streams={}, "
+        "read={:.3f}ms, decompress={:.3f}ms, decode={:.3f}ms",
+        reader.name(),
+        reader.rowsRead(),
+        reader.payloadsRead(),
+        reader.streamsRead(),
+        readNs / 1e6,
+        decompressNs / 1e6,
+        deserializeNs / 1e6);
+    {
+      NanosecondTimer timer(&deserializerDestroyTime_);
+      blockShuffleReader_.reset();
+    }
+  }
   {
     auto stats = this->stats().rlock();
     readerStreamIterator_->updateMetrics(
