@@ -18,7 +18,6 @@
 
 #include <arrow/io/interfaces.h>
 #include <folly/ScopeGuard.h>
-#include <cstring>
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/time/Timer.h"

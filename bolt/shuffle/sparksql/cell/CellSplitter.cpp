@@ -16,7 +16,6 @@
 
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 
-#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <functional>
 #include <type_traits>

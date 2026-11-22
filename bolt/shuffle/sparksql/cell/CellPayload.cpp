@@ -17,7 +17,6 @@
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 #include <folly/lang/Assume.h>
-#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <string_view>
 #include <type_traits>

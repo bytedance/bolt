@@ -16,7 +16,6 @@
 
 #include <arrow/buffer.h>
 #include <arrow/io/interfaces.h>
-#include <folly/lang/Bits.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>

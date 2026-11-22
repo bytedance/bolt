@@ -24,7 +24,6 @@
 #pragma once
 
 #include <folly/Portability.h>
-#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>

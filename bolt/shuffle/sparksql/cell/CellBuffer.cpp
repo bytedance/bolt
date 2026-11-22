@@ -21,7 +21,6 @@
 #include <utility>
 
 #include <folly/ScopeGuard.h>
-#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"

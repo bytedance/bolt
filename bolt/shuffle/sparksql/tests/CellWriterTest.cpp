@@ -27,7 +27,6 @@
 #include <type_traits>
 
 #include <fmt/format.h>
-#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/base/tests/GTestUtils.h"

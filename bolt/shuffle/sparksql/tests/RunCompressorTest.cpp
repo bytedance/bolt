@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include <folly/lang/Bits.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>

@@ -24,7 +24,6 @@
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
