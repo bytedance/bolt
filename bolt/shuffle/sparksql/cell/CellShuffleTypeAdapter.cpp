@@ -25,9 +25,10 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
+// Bolt's Type::isPrimitiveType() also excludes VARIANT, FUNCTION, OPAQUE, and
+// INVALID, so check the supported container kinds explicitly.
 bool isComplex(const TypePtr& type) {
-  return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
-      type->kind() == TypeKind::ROW;
+  return type->isArray() || type->isMap() || type->isRow();
 }
 
 } // namespace
@@ -85,7 +86,7 @@ RowVectorPtr CellShuffleTypeAdapter::pack(
   BOLT_CHECK(
       !RowVector::isComposite(input),
       "CellShuffleTypeAdapter does not take composite rows");
-  BOLT_CHECK(
+  BOLT_DCHECK(
       input->type()->equivalent(*logicalType_), "Cell input schema changed");
   if (!hasComplexColumns()) {
     return input;
@@ -136,7 +137,7 @@ RowVectorPtr CellShuffleTypeAdapter::unpack(
   if (!hasComplexColumns()) {
     return input;
   }
-  BOLT_CHECK(
+  BOLT_DCHECK(
       input->type()->equivalent(*physicalType_),
       "Invalid Cell physical schema");
   const vector_size_t numRows = input->size();

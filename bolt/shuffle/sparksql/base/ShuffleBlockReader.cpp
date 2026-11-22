@@ -168,12 +168,6 @@ void RowBlockReader::decodeBlock(
         blockLabel,
         blockLabel);
   }
-  if (stored > in.remainingBound()) {
-    BOLT_FAIL(
-        "malformed {} shuffle block: {} block out of bounds",
-        blockLabel,
-        blockLabel);
-  }
   if (layout == RunLayout::kCombinedUncompressed) {
     if (stored != decodedBytes) {
       BOLT_FAIL(

@@ -21,7 +21,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,6 +41,32 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 namespace {
+
+class MemoryByteSource final : public ShuffleByteSource {
+ public:
+  explicit MemoryByteSource(std::span<const uint8_t> bytes)
+      : data_(bytes.data()), size_(bytes.size()) {}
+
+  bool read(void* out, size_t n) override {
+    if (size_ - pos_ < n) {
+      return false;
+    }
+    if (n != 0) {
+      ::memcpy(out, data_ + pos_, n);
+    }
+    pos_ += n;
+    return true;
+  }
+
+  bool atEnd() override {
+    return pos_ == size_;
+  }
+
+ private:
+  const uint8_t* const data_;
+  const size_t size_;
+  size_t pos_{0};
+};
 
 std::vector<char> toCharVec(const BufferPtr& buf) {
   return std::vector<char>(buf->as<char>(), buf->as<char>() + buf->size());

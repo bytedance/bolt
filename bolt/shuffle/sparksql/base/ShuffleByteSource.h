@@ -18,8 +18,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <limits>
 #include <span>
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -36,43 +34,6 @@ class ShuffleByteSource {
   /// True when no byte is left. Lets a stream reader distinguish "clean end
   /// between blocks" from truncation.
   virtual bool atEnd() = 0;
-
-  /// Upper bound on bytes still available, SIZE_MAX when unknown. The
-  /// decoder compares declared lengths against it before allocating or
-  /// reading.
-  virtual size_t remainingBound() const {
-    return std::numeric_limits<size_t>::max();
-  }
-};
-
-class MemoryByteSource final : public ShuffleByteSource {
- public:
-  explicit MemoryByteSource(std::span<const uint8_t> bytes)
-      : data_(bytes.data()), size_(bytes.size()) {}
-
-  bool read(void* out, size_t n) override {
-    if (size_ - pos_ < n) {
-      return false;
-    }
-    if (n != 0) {
-      ::memcpy(out, data_ + pos_, n);
-    }
-    pos_ += n;
-    return true;
-  }
-
-  bool atEnd() override {
-    return pos_ == size_;
-  }
-
-  size_t remainingBound() const override {
-    return size_ - pos_;
-  }
-
- private:
-  const uint8_t* const data_;
-  const size_t size_;
-  size_t pos_{0};
 };
 
 /// The codec, decompression side. The format never identifies a codec;

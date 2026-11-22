@@ -562,7 +562,7 @@ output.
 | File | Contents |
 | --- | --- |
 | `../base/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, packed `RowBlockHeader`, framed row block writer, and buffer helpers |
-| `../base/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`, `MemoryByteSource`) and `ShuffleDecompressor` |
+| `../base/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`) and `ShuffleDecompressor` |
 | `../base/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
 | `../base/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
 | `../base/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |

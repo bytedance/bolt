@@ -388,9 +388,6 @@ bool CellPayloadDecoder::parseNullBody(
     uint32_t nullStoredSize,
     uint32_t nullDecodedSize,
     std::string& error) {
-  if (nullStoredSize > in.remainingBound()) {
-    return fail(error, "truncated null body");
-  }
   if (nullDecodedSize == 0) {
     auto* nullData = resetBuffer(nullBody_, nullStoredSize, pool_);
     if (!in.read(nullData, nullStoredSize)) {
@@ -536,12 +533,6 @@ bool CellPayloadDecoder::parseRun(
     if (addOverflows(storedSum, size, storedSum)) {
       return fail(error, "run stored sizes overflow");
     }
-  }
-  // Stored sizes must fit the remaining input when the source knows it
-  // (MemoryByteSource). Decoded sizes are bounded only by the pool's
-  // capacity.
-  if (storedSum > in.remainingBound()) {
-    return fail(error, "run larger than the remaining input");
   }
   uint64_t decodedSum = 0;
   for (const auto size : decodedSizes_) {
