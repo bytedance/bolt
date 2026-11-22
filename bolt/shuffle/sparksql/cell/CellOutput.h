@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -237,9 +238,13 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   uint64_t numSealedPayloads_{0};
   /// The merge: spilled segments copied.
   uint64_t copiedSegments_{0};
-  /// The window still in memory, borrowed by finalize() for its merge.
-  const CellWindowInput* resident_{nullptr};
-  bool residentHasData_{false};
+  /// Borrowed finalize() state for writePartitionShare(). `resident` is null
+  /// when no unsealed window data remains to merge.
+  struct MergeInput {
+    const CellWindowInput* resident{nullptr};
+    std::span<const uint8_t> encodingTags;
+  };
+  std::optional<MergeInput> mergeInput_;
 
   /// Pre-compression bytes merged so far.
   uint64_t rawBytesWritten_{0};

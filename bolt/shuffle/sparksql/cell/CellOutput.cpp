@@ -247,16 +247,17 @@ void LocalCellOutput::writeSpilledSegment(
   const uint64_t segmentBytes = segment.end - segment.begin;
   // The spill segment is a run in wire form.
   BOLT_CHECK_GE(segmentBytes, 1, "corrupt cell spill segment");
-  uint8_t layoutByte;
+  uint8_t layoutByte = 0;
   spill_.read(segment.begin, &layoutByte, 1);
-  if (layoutByte == static_cast<uint8_t>(RunLayout::kSeparate)) {
+  const auto layout = static_cast<RunLayout>(layoutByte);
+  if (layout == RunLayout::kSeparate) {
     // Compressed stream by stream at spill time: the final run.
     // A kSeparate run header: layout byte, stored and decoded size per
     // stream.
-    const uint64_t headerBytes = 1 + 16ull * numStreams;
+    const uint64_t headerBytes = separateRunHeaderBytes(numStreams);
     BOLT_CHECK_GE(segmentBytes, headerBytes, "corrupt cell spill segment");
     segmentSizes_.resize(2ull * numStreams);
-    spill_.read(segment.begin + 1, segmentSizes_.data(), 16ull * numStreams);
+    spill_.read(segment.begin + 1, segmentSizes_.data(), headerBytes - 1);
     uint64_t decodedSum = 0;
     for (uint32_t s = 0; s < numStreams; ++s) {
       const uint64_t decoded = segmentSizes_[numStreams + s];
@@ -268,14 +269,16 @@ void LocalCellOutput::writeSpilledSegment(
     return;
   }
   BOLT_CHECK(
-      layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
-          layoutByte == static_cast<uint8_t>(RunLayout::kCombinedUncompressed),
+      layout == RunLayout::kCombined ||
+          layout == RunLayout::kCombinedUncompressed,
       "corrupt cell spill segment");
   BOLT_CHECK_GE(
       segmentBytes, combinedRunHeaderBytes, "corrupt cell spill segment");
   segmentSizes_.resize(numStreams);
-  // Past the layout byte and the u64 stored size.
-  spill_.read(segment.begin + 9, segmentSizes_.data(), 8ull * numStreams);
+  spill_.read(
+      segment.begin + kCombinedRunDecodedSizesOffset,
+      segmentSizes_.data(),
+      sizeof(uint64_t) * numStreams);
   uint64_t decodedSum = 0;
   for (const auto size : segmentSizes_) {
     decodedSum += size;
@@ -395,12 +398,11 @@ void LocalCellOutput::finalize(
   // in memory is written straight into the data file by the merge,
   // alongside any runs the window already spilled mid-stream.
   logWindowDiagnostics(in, windowHasData);
-  resident_ = &in;
-  residentHasData_ = windowHasData;
+  mergeInput_ = MergeInput{windowHasData ? &in : nullptr, in.encodingTags};
   rawPartitionLengths_.assign(in.numPartitions, 0);
   {
     SCOPE_EXIT {
-      resident_ = nullptr;
+      mergeInput_.reset();
     };
     // Per partition: the Cell payloads, then the composite blocks.
     mergeToDataFile(options_, {this, &composite_}, metrics);
@@ -417,13 +419,15 @@ void LocalCellOutput::finalize(
 }
 
 void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
-  BOLT_CHECK_NOT_NULL(resident_, "Cell payloads merged outside finalize()");
+  BOLT_CHECK(
+      mergeInput_.has_value(), "Cell payloads merged outside finalize()");
   const uint64_t rawStart = rawBytesWritten_;
   for (const auto& payload : sealed_[pid]) {
-    writeSealedPayload(out, pid, payload, resident_->encodingTags);
+    writeSealedPayload(out, pid, payload, mergeInput_->encodingTags);
   }
-  if (residentHasData_ && resident_->rowCounts[pid] > 0) {
-    writeResidentPayload(out, *resident_, pid);
+  if (mergeInput_->resident != nullptr &&
+      mergeInput_->resident->rowCounts[pid] > 0) {
+    writeResidentPayload(out, *mergeInput_->resident, pid);
   }
   rawPartitionLengths_[pid] +=
       static_cast<int64_t>(rawBytesWritten_ - rawStart);

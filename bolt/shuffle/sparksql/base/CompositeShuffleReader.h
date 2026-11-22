@@ -93,15 +93,15 @@ class CompositeShuffleReader : public BlockShuffleReader {
     // Opening streams and reading blocks is the input's share of the decode
     // time, decompression aside. Timed per block, not per read.
     auto timer = cursor_.timeRead();
-    ShuffleBlockKind kind{};
-    if (!cursor_.nextBlockKind(kind)) {
+    const auto kind = cursor_.nextBlockKind();
+    if (!kind.has_value()) {
       return false;
     }
-    if (kind == ShuffleBlockKind::kCompositeRows) {
+    if (*kind == ShuffleBlockKind::kCompositeRows) {
       readCompositeBlock();
       return false;
     }
-    onBlock(kind, cursor_.source());
+    onBlock(*kind, cursor_.source());
     return true;
   }
 

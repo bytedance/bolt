@@ -107,15 +107,19 @@ CompositeShuffleWriter::~CompositeShuffleWriter() {
 }
 
 arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
-  BOLT_CHECK(!stopped_, "split after stop");
-  inSplitCall_ = true;
+  BOLT_CHECK(
+      lifecycle_ == LifecycleState::kIdle,
+      "{}",
+      lifecycle_ == LifecycleState::kStopped ? "split after stop"
+                                             : "nested split call");
+  lifecycle_ = LifecycleState::kSplitting;
   SCOPE_EXIT {
-    inSplitCall_ = false;
+    lifecycle_ = LifecycleState::kIdle;
   };
   if (!RowVector::isComposite(rv)) {
-    if (compositeActive_) {
+    if (activeSide_ == ActiveSide::kComposite) {
       flushComposite();
-      compositeActive_ = false;
+      activeSide_ = ActiveSide::kOrdinary;
     }
     return splitOrdinary(std::move(rv), memLimit);
   }
@@ -126,9 +130,9 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   if (rv->size() == 0) {
     return arrow::Status::OK();
   }
-  if (!compositeActive_) {
+  if (activeSide_ == ActiveSide::kOrdinary) {
     RETURN_NOT_OK(flushOrdinary());
-    compositeActive_ = true;
+    activeSide_ = ActiveSide::kComposite;
   }
   splitComposite(std::static_pointer_cast<CompositeRowVector>(rv));
   return arrow::Status::OK();
@@ -137,7 +141,7 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
 arrow::Status CompositeShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
-  if (!compositeActive_) {
+  if (activeSide_ == ActiveSide::kOrdinary) {
     return reclaimOrdinary(size, actual);
   }
   const int64_t before = boltPool_->reservedBytes();
@@ -166,8 +170,12 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
 }
 
 arrow::Status CompositeShuffleWriter::stop() {
-  BOLT_CHECK(!stopped_, "stop called twice");
-  stopped_ = true;
+  BOLT_CHECK(
+      lifecycle_ == LifecycleState::kIdle,
+      "{}",
+      lifecycle_ == LifecycleState::kStopped ? "stop called twice"
+                                             : "stop during split");
+  lifecycle_ = LifecycleState::kStopped;
   // Order matters: stopOrdinary() ends output() - it merges the composite
   // spill file into the data file, or ends the Celeborn attempt - so every
   // held composite row must be in output() before it runs.
@@ -189,10 +197,15 @@ arrow::Status CompositeShuffleWriter::stop() {
 }
 
 void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
+  bool needsFlush = false;
   {
-    compositeInProgress_ = true;
+    BOLT_CHECK(
+        compositeState_ == CompositeState::kIdle,
+        "composite split is already in progress");
+    compositeState_ = CompositeState::kBusy;
     SCOPE_EXIT {
-      compositeInProgress_ = false;
+      needsFlush = (compositeState_ == CompositeState::kFlushDeferred);
+      compositeState_ = CompositeState::kIdle;
     };
     const vector_size_t numRows = rv->size();
     if (numRows == 0) {
@@ -218,7 +231,7 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     metrics_.totalInputRowNumber += numRows;
     metrics_.totalInputBatches += 1;
   }
-  if (flushDeferred_) {
+  if (needsFlush) {
     // A reclaim asked for it: memory pressure, which that reclaim met with
     // the spill memory first.
     flushComposite();
@@ -226,20 +239,22 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
 }
 
 void CompositeShuffleWriter::flushComposite() {
-  if (compositeInProgress_) {
-    flushDeferred_ = true;
+  if (compositeState_ != CompositeState::kIdle) {
+    compositeState_ = CompositeState::kFlushDeferred;
     return;
   }
-  compositeInProgress_ = true;
+  compositeState_ = CompositeState::kBusy;
   SCOPE_EXIT {
-    compositeInProgress_ = false;
+    compositeState_ = CompositeState::kIdle;
   };
   writeComposite();
 }
 
 void CompositeShuffleWriter::writeComposite() {
   SCOPE_EXIT {
-    flushDeferred_ = false;
+    if (compositeState_ == CompositeState::kFlushDeferred) {
+      compositeState_ = CompositeState::kBusy;
+    }
   };
   if (heldRowBytes_ == 0) {
     return;

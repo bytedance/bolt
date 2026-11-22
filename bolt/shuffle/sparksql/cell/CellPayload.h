@@ -379,10 +379,20 @@ class RunCompressor;
 /// frame.
 constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 
+/// Offset of the per-stream decoded size array in a kCombined or
+/// kCombinedUncompressed run header: layout byte + stored size u64.
+constexpr uint64_t kCombinedRunDecodedSizesOffset = 1 + sizeof(uint64_t);
+
 /// Bytes of a kCombined or kCombinedUncompressed run header: layout byte,
 /// stored size u64, decoded size u64 per stream.
 inline uint64_t combinedRunHeaderBytes(uint32_t numStreams) {
-  return 1 + 8 + 8ull * numStreams;
+  return kCombinedRunDecodedSizesOffset + sizeof(uint64_t) * numStreams;
+}
+
+/// Bytes of a kSeparate run header: layout byte, stored size u64 and decoded
+/// size u64 per stream.
+inline uint64_t separateRunHeaderBytes(uint32_t numStreams) {
+  return 1 + 2 * sizeof(uint64_t) * numStreams;
 }
 
 /// Appends the null body of one partition.

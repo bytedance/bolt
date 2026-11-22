@@ -28,12 +28,12 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 bool StreamByteSource::read(void* out, size_t n) {
   auto* dst = reinterpret_cast<uint8_t*>(out);
-  if (peeked_ && n > 0) {
+  if (state_ == State::kPeeked && n > 0) {
     *dst++ = peekByte_;
     --n;
-    peeked_ = false;
+    state_ = State::kOpen;
   }
-  if (ended_ && n > 0) {
+  if (state_ == State::kEnded && n > 0) {
     return false;
   }
   while (n > 0) {
@@ -44,7 +44,7 @@ bool StreamByteSource::read(void* out, size_t n) {
         result.status().ToString());
     const auto got = static_cast<size_t>(*result);
     if (got == 0) {
-      ended_ = true;
+      state_ = State::kEnded;
       return false;
     }
     dst += got;
@@ -54,10 +54,10 @@ bool StreamByteSource::read(void* out, size_t n) {
 }
 
 bool StreamByteSource::atEnd() {
-  if (peeked_) {
+  if (state_ == State::kPeeked) {
     return false;
   }
-  if (ended_) {
+  if (state_ == State::kEnded) {
     return true;
   }
   const auto result = in_->Read(1, &peekByte_);
@@ -66,10 +66,10 @@ bool StreamByteSource::atEnd() {
       "shuffle stream read failed: {}",
       result.status().ToString());
   if (*result == 0) {
-    ended_ = true;
+    state_ = State::kEnded;
     return true;
   }
-  peeked_ = true;
+  state_ = State::kPeeked;
   return false;
 }
 
@@ -85,13 +85,13 @@ bool CodecDecompressor::decompress(
              decodedSize) == decodedSize;
 }
 
-bool ShuffleStreamCursor::nextBlockKind(ShuffleBlockKind& kind) {
+std::optional<ShuffleBlockKind> ShuffleStreamCursor::nextBlockKind() {
   while (!exhausted_) {
     if (source_ == nullptr) {
       auto in = streams_->nextStream(arrowPool_);
       if (in == nullptr) {
         exhausted_ = true;
-        return false;
+        return std::nullopt;
       }
       source_ = std::make_unique<StreamByteSource>(std::move(in));
       ++streamsOpened_;
@@ -102,10 +102,9 @@ bool ShuffleStreamCursor::nextBlockKind(ShuffleBlockKind& kind) {
     }
     uint8_t rawKind = 0;
     BOLT_CHECK(source_->read(&rawKind, 1), "truncated shuffle block");
-    kind = static_cast<ShuffleBlockKind>(rawKind);
-    return true;
+    return static_cast<ShuffleBlockKind>(rawKind);
   }
-  return false;
+  return std::nullopt;
 }
 
 void RowBlockReader::read(

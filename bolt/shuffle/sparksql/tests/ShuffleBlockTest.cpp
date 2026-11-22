@@ -204,13 +204,13 @@ TEST_F(ShuffleBlockTest, rowBlockAppendCombinesBlocksAcrossStreams) {
   RowBlockReader reader(&decompressor, pool_.get());
 
   RowBlock combined;
-  ShuffleBlockKind kind{};
   while (true) {
     auto timer = cursor.timeRead();
-    if (!cursor.nextBlockKind(kind)) {
+    const auto kind = cursor.nextBlockKind();
+    if (!kind.has_value()) {
       break;
     }
-    ASSERT_EQ(kind, ShuffleBlockKind::kRows);
+    ASSERT_EQ(*kind, ShuffleBlockKind::kRows);
     reader.append(cursor.source(), combined, ShuffleBlockKind::kRows);
   }
 

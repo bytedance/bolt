@@ -862,7 +862,7 @@ void CellSplitter::flushCaches(const uint8_t* partitionMask) {
         continue;
       }
       DictState& st = states[pid];
-      if (st.mode != DictState::kModeDict) {
+      if (st.mode != DictState::Mode::kDict) {
         continue; // demoted: framing closed at demote time
       }
       if (st.matched == 0) {
@@ -934,7 +934,7 @@ void CellSplitter::resetWindow() {
     }
     for (auto& st : dictStates_[col]) {
       st.matched = 0;
-      st.mode = DictState::kModeDict;
+      st.mode = DictState::Mode::kDict;
       st.entryCount = 0;
       st.uniformLen = DictState::kUniformUnset;
     }
@@ -958,7 +958,7 @@ void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
       }
       auto& st = dictStates_[col][pid];
       st.matched = 0;
-      st.mode = DictState::kModeDict;
+      st.mode = DictState::Mode::kDict;
       st.entryCount = 0;
       st.uniformLen = DictState::kUniformUnset;
     }
@@ -1145,7 +1145,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
           closeDictSegment(dataStream, pid, st, dataCur, /*last=*/false);
         } else {
           closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
-          st.mode = DictState::kModeFallback;
+          st.mode = DictState::Mode::kFallback;
           // Pending index bytes flush raw before the first staged
           // fallback length reuses the cache line.
           if (lengthCur[pid] > 0) {
@@ -1185,7 +1185,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
   // tail, so this partition demotes now (an empty sequence is still owed
   // when no segment was ever written).
   closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
-  st.mode = DictState::kModeFallback;
+  st.mode = DictState::Mode::kFallback;
   if (lengthCur[pid] > 0) {
     flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
   }
@@ -1224,7 +1224,7 @@ void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
   bool hasDictionary = false;
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
     if (batch.partition2RowCount[pid] != 0 &&
-        states[pid].mode == DictState::kModeDict) {
+        states[pid].mode == DictState::Mode::kDict) {
       hasDictionary = true;
       break;
     }
@@ -1315,7 +1315,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
     const StringView& view = views[index];
     variableBytes_[pid] += view.size();
     DictState& st = states[pid];
-    if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
+    if (FOLLY_LIKELY(st.mode == DictState::Mode::kDict) &&
         appendDictValue<kStreaming>(
             lengthStream, dataStream, pid, st, view, lengthCur, dataCur)) {
       continue;

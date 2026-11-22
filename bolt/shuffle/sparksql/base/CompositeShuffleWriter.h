@@ -90,12 +90,12 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// Inside split(): a reclaim reached now is nested in the split, which
   /// the operator times as a whole, not as externalReclaimTime.
   bool inSplitCall() const {
-    return inSplitCall_;
+    return lifecycle_ == LifecycleState::kSplitting;
   }
 
   /// True once stop() has begun.
   bool isStopped() const {
-    return stopped_;
+    return lifecycle_ == LifecycleState::kStopped;
   }
 
   /// Compression codec configured by PartitionWriterOptions, or null when
@@ -134,12 +134,30 @@ class CompositeShuffleWriter : public ShuffleWriter {
       size_t& nextRow,
       BufferPtr& compressedBuffer);
 
-  bool stopped_{false};
-  bool inSplitCall_{false};
-  /// The last batch was composite: that side is the active one - it takes
-  /// reclaims - and the ordinary side holds nothing, having been flushed
-  /// at the switch. Composite rows may or may not be held (heldRowBytes_).
-  bool compositeActive_{false};
+  enum class LifecycleState : uint8_t {
+    kIdle,
+    kSplitting,
+    kStopped,
+  };
+
+  /// Which path currently owns buffered state and handles reclaims. Only one
+  /// side holds data at a time: switching flushes the other first.
+  enum class ActiveSide : uint8_t {
+    kOrdinary,
+    kComposite,
+  };
+
+  /// Reentrancy state for composite split/write. A flush reached while kBusy
+  /// (e.g. a reclaim triggered by allocation) transitions to kFlushDeferred
+  /// so it runs after the in-flight composite split completes.
+  enum class CompositeState : uint8_t {
+    kIdle,
+    kBusy,
+    kFlushDeferred,
+  };
+
+  LifecycleState lifecycle_{LifecycleState::kIdle};
+  ActiveSide activeSide_{ActiveSide::kOrdinary};
 
   /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
@@ -151,11 +169,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
   std::vector<int32_t> pidValues_;
   /// Bytes of heldRows_, as the batches' totalRowSize() counted them.
   int64_t heldRowBytes_{0};
-  /// A composite split or write is under way. A flush reached from inside
-  /// it - a reclaim its allocation set off - is deferred (flushDeferred_)
-  /// to its end rather than writing rows the split is still adding.
-  bool compositeInProgress_{false};
-  bool flushDeferred_{false};
+  CompositeState compositeState_{CompositeState::kIdle};
 
   /// Accumulated here, not in metrics_: the outputs assign their raw
   /// partition lengths and compression time when stopOrdinary() ends them,

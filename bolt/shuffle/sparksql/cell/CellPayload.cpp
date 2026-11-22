@@ -1802,7 +1802,10 @@ void writeCombinedRunHeader(
     std::span<const uint64_t> decodedSizes) {
   out[0] = static_cast<char>(layout);
   memory::storeUnaligned<uint64_t>(out + 1, stored);
-  ::memcpy(out + 9, decodedSizes.data(), decodedSizes.size_bytes());
+  ::memcpy(
+      out + kCombinedRunDecodedSizesOffset,
+      decodedSizes.data(),
+      decodedSizes.size_bytes());
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

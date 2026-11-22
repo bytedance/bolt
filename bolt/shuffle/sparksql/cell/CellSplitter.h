@@ -300,8 +300,10 @@ class CellSplitter {
   /// stages index bytes. The probe walks the entries in the line, one load
   /// per entry yielding the length byte and the characters together.
   struct DictState {
-    static constexpr uint8_t kModeDict = 0;
-    static constexpr uint8_t kModeFallback = 1;
+    enum class Mode : uint8_t {
+      kDict = 0,
+      kFallback = 1,
+    };
     /// Writer-side cap on entries per segment (the serialized budget would
     /// allow up to 63 one-byte entries; past the cap the segment just
     /// closes, which only costs a few framing bytes on degenerate
@@ -314,7 +316,7 @@ class CellSplitter {
     static constexpr uint8_t kUniformUnset = 0xFF;
     static constexpr uint8_t kUniformMixed = 0xFE;
     uint32_t matched{0}; // rows indexed by the open segment
-    uint8_t mode{kModeDict};
+    Mode mode{Mode::kDict};
     uint8_t entryCount{0};
     uint8_t uniformLen{kUniformUnset};
     uint8_t pad_{0};

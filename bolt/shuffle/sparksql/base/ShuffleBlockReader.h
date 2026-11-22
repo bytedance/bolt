@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -82,9 +83,14 @@ class StreamByteSource final : public ShuffleByteSource {
   bool atEnd() override;
 
  private:
+  enum class State : uint8_t {
+    kOpen,
+    kPeeked,
+    kEnded,
+  };
+
   std::shared_ptr<arrow::io::InputStream> in_;
-  bool peeked_{false};
-  bool ended_{false};
+  State state_{State::kOpen};
   uint8_t peekByte_{0};
 };
 
@@ -122,8 +128,8 @@ class ShuffleStreamCursor {
   }
 
   /// Opens streams until a non-empty stream yields a block kind byte.
-  /// Returns false when every stream is exhausted.
-  bool nextBlockKind(ShuffleBlockKind& kind);
+  /// Returns std::nullopt when every stream is exhausted.
+  std::optional<ShuffleBlockKind> nextBlockKind();
 
   /// Active byte source for the block whose kind byte was just consumed.
   ShuffleByteSource& source() {
