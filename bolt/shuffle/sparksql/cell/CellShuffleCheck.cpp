@@ -284,13 +284,7 @@ void CellShuffleCheck::observeInputColumn(
       }
     }
   };
-  if (decoded.isIdentityMapping()) {
-    observe.template operator()<InputMapping::kIdentity>();
-  } else if (decoded.isConstantMapping()) {
-    observe.template operator()<InputMapping::kConstant>();
-  } else {
-    observe.template operator()<InputMapping::kDictionary>();
-  }
+  dispatchInputMapping(decoded, observe);
 }
 
 template <typename T>

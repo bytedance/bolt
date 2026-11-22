@@ -101,7 +101,6 @@ class CellShuffleCheck {
   void finishStream();
 
  private:
-  enum class InputMapping { kIdentity, kDictionary, kConstant };
   using ObserveInput = void (*)(CellShuffleCheck&, uint32_t, const SplitBatch&);
   using StreamObserve =
       void (*)(CellShuffleCheck&, uint32_t, uint32_t, const char*, uint32_t);

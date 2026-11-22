@@ -28,6 +28,51 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 class CellShuffleCheck;
 
+/// DecodedVector index-mapping dispatch tag shared by splitter and check paths.
+enum class InputMapping : uint8_t {
+  kIdentity,
+  kConstant,
+  kDictionary,
+};
+
+template <typename Fn>
+inline void dispatchInputMapping(const DecodedVector& decoded, Fn&& fn) {
+  if (decoded.isIdentityMapping()) {
+    fn.template operator()<InputMapping::kIdentity>();
+  } else if (decoded.isConstantMapping()) {
+    fn.template operator()<InputMapping::kConstant>();
+  } else {
+    fn.template operator()<InputMapping::kDictionary>();
+  }
+}
+
+/// Null classification of the first `n` decoded rows so split kernels can skip
+/// per-row bit tests for uniform columns. When `inspectDictionaryNulls` is
+/// false, dictionary-mapped vectors with a null buffer stay conservatively
+/// kSomeNulls without materializing their merged null bitmap up front.
+inline NullClass classifyNulls(
+    DecodedVector& decoded,
+    vector_size_t n,
+    bool inspectDictionaryNulls = true) {
+  if (!decoded.mayHaveNulls()) {
+    return NullClass::kNoNulls;
+  }
+  if (decoded.isConstantMapping()) {
+    return decoded.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
+  }
+  if (!inspectDictionaryNulls && !decoded.isIdentityMapping()) {
+    return NullClass::kSomeNulls;
+  }
+  const uint64_t* nulls = decoded.nulls();
+  if (nulls == nullptr || bits::isAllSet(nulls, 0, n, true)) {
+    return NullClass::kNoNulls;
+  }
+  if (bits::isAllSet(nulls, 0, n, false)) {
+    return NullClass::kAllNull;
+  }
+  return NullClass::kSomeNulls;
+}
+
 /// One decoded input batch, pid column already excluded. Borrowed for the
 /// duration of a split call.
 struct SplitBatch {
@@ -196,11 +241,6 @@ class CellSplitter {
     return batch.positionBase != nullptr ? batch.positionBase
                                          : windowRowCounts_.data();
   }
-
-  enum class InputMapping { kIdentity, kConstant, kDictionary };
-
-  template <typename Split>
-  static void dispatchInputMapping(const DecodedVector& decoded, Split&& split);
 
   /// Boolean values as 0/1 bytes of a Raw Data stream.
   template <bool kHasNulls>

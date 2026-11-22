@@ -65,10 +65,11 @@ class CellShuffleReader final : public CompositeShuffleReader {
   /// nullptr at the end.
   RowVectorPtr nextPhysical();
 
-  /// Built before decoder_ and nestedAssembler_: its schema check covers both.
-  const CellShuffleTypeAdapter adapter_;
-  CellPayloadDecoder decoder_;
-  /// Set for a nested layout, which it reads in place of decoder_.
+  /// Set for flat/adapted layouts; null when nestedAssembler_ handles the
+  /// schema natively.
+  std::unique_ptr<CellShuffleTypeAdapter> adapter_;
+  std::unique_ptr<CellPayloadDecoder> decoder_;
+  /// Set for a nested layout, mutually exclusive with adapter_/decoder_.
   std::unique_ptr<CellNestedAssembler> nestedAssembler_;
 };
 

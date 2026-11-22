@@ -277,7 +277,7 @@ class CellLayout {
   }
 
   uint32_t wireColumn(uint32_t column) const {
-    BOLT_DCHECK(!isUnknownColumn(column));
+    BOLT_CHECK(!isUnknownColumn(column));
     return wireOfColumn_[column];
   }
 

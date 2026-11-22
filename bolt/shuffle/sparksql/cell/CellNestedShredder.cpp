@@ -32,25 +32,6 @@ namespace {
 
 using Kind = CellNestedLayout::Kind;
 
-/// The null shape of the first `n` decoded rows, exactly: kNoNulls and
-/// kAllNull are what the split kernels rely on.
-NullClass classifyNulls(DecodedVector& decoded, vector_size_t n) {
-  if (!decoded.mayHaveNulls()) {
-    return NullClass::kNoNulls;
-  }
-  if (decoded.isConstantMapping()) {
-    return decoded.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
-  }
-  const uint64_t* nulls = decoded.nulls();
-  if (nulls == nullptr || bits::isAllSet(nulls, 0, n, true)) {
-    return NullClass::kNoNulls;
-  }
-  if (bits::isAllSet(nulls, 0, n, false)) {
-    return NullClass::kAllNull;
-  }
-  return NullClass::kSomeNulls;
-}
-
 /// Whether every one of the `size` decoded entries is null, whichever a
 /// element batch takes: a constant null, or a flat vector all null.
 bool allNull(DecodedVector& decoded, vector_size_t size) {
@@ -246,7 +227,7 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + columnOffset);
   for (uint32_t i = 0; i < topNodes.size(); ++i) {
     auto child = rv.childAt(i + columnOffset);
-    BOLT_CHECK(
+    BOLT_DCHECK(
         child->type()->equivalent(*layout_.node(topNodes[i]).type),
         "Cell input schema changed");
     if (child->size() > numRows_) {

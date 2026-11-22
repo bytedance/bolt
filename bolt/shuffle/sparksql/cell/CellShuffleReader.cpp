@@ -40,20 +40,20 @@ CellShuffleReader::CellShuffleReader(
           arrowPool,
           pool,
           batchSize,
-          batchByteSize),
-      adapter_(outputType),
-      decoder_(
-          CellLayout::create(adapter_.physicalType()),
-          decompressor(),
-          pool),
-      nestedAssembler_(
-          nativeNestedTypes && CellNestedLayout::supports(outputType)
-              ? std::make_unique<CellNestedAssembler>(
-                    outputType,
-                    decompressor(),
-                    pool,
-                    CellDecodeLimits{})
-              : nullptr) {}
+          batchByteSize) {
+  BOLT_CHECK(
+      CellShuffleTypeAdapter::isSupported(outputType),
+      "Unsupported Cell logical schema: {}",
+      outputType->toString());
+  if (nativeNestedTypes && CellNestedLayout::supports(outputType)) {
+    nestedAssembler_ = std::make_unique<CellNestedAssembler>(
+        outputType, decompressor(), pool, CellDecodeLimits{});
+  } else {
+    adapter_ = std::make_unique<CellShuffleTypeAdapter>(outputType);
+    decoder_ = std::make_unique<CellPayloadDecoder>(
+        CellLayout::create(adapter_->physicalType()), decompressor(), pool);
+  }
+}
 
 CellShuffleReader::~CellShuffleReader() = default;
 
@@ -66,7 +66,7 @@ bool CellShuffleReader::nextPayload() {
     std::string error;
     const bool ok = nestedAssembler_ != nullptr
         ? nestedAssembler_->beginPayload(source, error)
-        : decoder_.beginPayload(source, error);
+        : decoder_->beginPayload(source, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
     incrementPayloadsRead();
   });
@@ -80,8 +80,8 @@ RowVectorPtr CellShuffleReader::nextNonComposite() {
         });
   }
   auto output = nextPhysical();
-  if (output != nullptr && adapter_.hasComplexColumns()) {
-    output = adapter_.unpack(output, pool());
+  if (output != nullptr && adapter_->hasComplexColumns()) {
+    output = adapter_->unpack(output, pool());
   }
   return output;
 }
@@ -92,10 +92,10 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
   // small ones fill the same batch until it is full. An empty batch always
   // takes one append, so a byte target at or below zero reads one append
   // per batch.
-  while (decoder_.batchRows() < capacity &&
-         (decoder_.batchRows() == 0 ||
-          static_cast<int64_t>(decoder_.batchBytes()) < batchByteSize())) {
-    const uint32_t left = decoder_.payloadRowsLeft();
+  while (decoder_->batchRows() < capacity &&
+         (decoder_->batchRows() == 0 ||
+          static_cast<int64_t>(decoder_->batchBytes()) < batchByteSize())) {
+    const uint32_t left = decoder_->payloadRowsLeft();
     if (left == 0) {
       if (!nextPayload()) {
         // End of input, or a composite block that next() emits on its own.
@@ -104,12 +104,12 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
       continue;
     }
     const auto rows = static_cast<uint32_t>(
-        std::min<int64_t>(left, capacity - decoder_.batchRows()));
+        std::min<int64_t>(left, capacity - decoder_->batchRows()));
     std::string error;
-    const bool ok = decoder_.appendRows(rows, capacity, error);
+    const bool ok = decoder_->appendRows(rows, capacity, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
   }
-  return decoder_.finishBatch();
+  return decoder_->finishBatch();
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

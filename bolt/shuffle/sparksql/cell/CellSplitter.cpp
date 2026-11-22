@@ -220,7 +220,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
   }
 }
 
-template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
+template <typename T, bool kHasNulls, InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
@@ -283,11 +283,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <
-    typename T,
-    bool kHasNulls,
-    CellSplitter::InputMapping kMapping,
-    bool kStreaming>
+template <typename T, bool kHasNulls, InputMapping kMapping, bool kStreaming>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
@@ -352,7 +348,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <bool kHasNulls, CellSplitter::InputMapping kMapping, bool kStreaming>
+template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
 void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -401,19 +397,6 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
     const uint32_t size = view.size();
     variableBytes_[pid] += size;
     appendStringData<kStreaming>(dataStream, pid, view.data(), size, dataCur);
-  }
-}
-
-template <typename Split>
-void CellSplitter::dispatchInputMapping(
-    const DecodedVector& decoded,
-    Split&& split) {
-  if (decoded.isIdentityMapping()) {
-    split.template operator()<InputMapping::kIdentity>();
-  } else if (decoded.isConstantMapping()) {
-    split.template operator()<InputMapping::kConstant>();
-  } else {
-    split.template operator()<InputMapping::kDictionary>();
   }
 }
 
@@ -473,7 +456,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   }
 }
 
-template <bool kHasNulls, CellSplitter::InputMapping kMapping>
+template <bool kHasNulls, InputMapping kMapping>
 void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
@@ -1216,7 +1199,7 @@ FOLLY_NOINLINE void CellSplitter::appendStringFallback(
   appendStringData<false>(dataStream, pid, view.data(), view.size(), dataCur);
 }
 
-template <bool kHasNulls, CellSplitter::InputMapping kMapping, bool kStreaming>
+template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
 void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
   // Only partitions present in this batch matter: an unused partition may
   // still have its initial dictionary state after every active one demoted.
@@ -1254,7 +1237,7 @@ void CellSplitter::dispatchStringDict(uint32_t col, const SplitBatch& batch) {
 
 template <
     bool kHasNulls,
-    CellSplitter::InputMapping kMapping,
+    InputMapping kMapping,
     bool kStreaming,
     bool kPrefetchInput>
 void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {

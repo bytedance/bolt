@@ -338,24 +338,8 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
         auto& column = decoded[col];
         column.decode(*rv->childAt(col + columnOffset));
         // Classify once so stale null buffers do not add a per-row bit test.
-        auto klass = NullClass::kNoNulls;
-        if (column.mayHaveNulls()) {
-          if (column.isConstantMapping()) {
-            klass =
-                column.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
-          } else if (column.isIdentityMapping()) {
-            const uint64_t* nulls = column.nulls();
-            if (nulls == nullptr || bits::isAllSet(nulls, 0, numRows, true)) {
-              klass = NullClass::kNoNulls;
-            } else if (bits::isAllSet(nulls, 0, numRows, false)) {
-              klass = NullClass::kAllNull;
-            } else {
-              klass = NullClass::kSomeNulls;
-            }
-          } else {
-            klass = NullClass::kSomeNulls;
-          }
-        }
+        const NullClass klass =
+            classifyNulls(column, numRows, /*inspectDictionaryNulls=*/false);
         nullClass[col] = klass;
         anyNullable = anyNullable || klass == NullClass::kSomeNulls;
       }
