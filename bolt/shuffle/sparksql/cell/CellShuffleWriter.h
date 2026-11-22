@@ -175,13 +175,24 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// Answers a reclaim by releasing the whole window (remote).
   arrow::Status reclaimWindow(int64_t size, int64_t* actual);
 
+  /// Lifecycle and reentrancy state of the ordinary (Cell) path.
+  enum class State {
+    kUninitialized,
+    kIdle,
+    kSplitting,
+    kSealing,
+  };
+
+  bool isInitialized() const {
+    return state_ != State::kUninitialized;
+  }
+
   /// Celeborn partition writer: windows are pushed whole, never spilled.
   const bool isRemote_;
 
-  bool initialized_{false};
-  bool inSplit_{false};
-  bool sealRequested_{false};
-  bool sealing_{false};
+  State state_{State::kUninitialized};
+  /// A window seal deferred to the next batch boundary (maybeSeal()).
+  bool sealDeferred_{false};
   bool dictProbed_{false};
   /// The run floor: a reclaim of a given size writes no run while the cells
   /// hold less data than this. CellShuffleOptions::reclaimRunFloorBytes, at

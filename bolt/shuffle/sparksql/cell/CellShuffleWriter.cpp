@@ -221,7 +221,10 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       boltPool_);
   splitter_->setStreamCheck(shuffleCheck_.get());
 
-  initialized_ = true;
+  BOLT_CHECK(
+      state_ == State::kUninitialized,
+      "CellShuffleWriter is already initialized");
+  state_ = State::kIdle;
   const std::string spillMemory = spillMemory_ == nullptr ? "0"
       : spillMemory_->capBytes() == kNoSpillMemoryCap
       ? "no cap"
@@ -247,7 +250,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 arrow::Status CellShuffleWriter::splitOrdinary(
     RowVectorPtr rv,
     int64_t /*memLimitIgnored: cell memory decisions never use it*/) {
-  if (!initialized_) {
+  if (!isInitialized()) {
     initOnFirstBatch(*rv);
   }
   if (adapter_ != nullptr) {
@@ -318,9 +321,11 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     return arrow::Status::OK();
   }
   {
-    inSplit_ = true;
+    BOLT_CHECK(
+        state_ == State::kIdle, "CellShuffleWriter cannot split while active");
+    state_ = State::kSplitting;
     SCOPE_EXIT {
-      inSplit_ = false;
+      state_ = State::kIdle;
     };
     RETURN_NOT_OK(computePartitions(*rv));
 
@@ -428,9 +433,11 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   }
 
   {
-    inSplit_ = true;
+    BOLT_CHECK(
+        state_ == State::kIdle, "CellShuffleWriter cannot split while active");
+    state_ = State::kSplitting;
     SCOPE_EXIT {
-      inSplit_ = false;
+      state_ = State::kIdle;
     };
     RETURN_NOT_OK(computePartitions(*rv));
     if (FOLLY_UNLIKELY(!dictProbed_)) {
@@ -589,7 +596,7 @@ CellShuffleWriter::SealSpillTimer::~SealSpillTimer() {
 void CellShuffleWriter::prepareChunkGrowth() {
   // While the output reads cells nothing may spill, so growth there
   // proceeds unreserved and the pool arbitrates.
-  if (!initialized_ || splitter_->isWritingOutput()) {
+  if (!isInitialized() || splitter_->isWritingOutput()) {
     return;
   }
   // Count both allocated chunks and retained spill bytes.
@@ -604,7 +611,7 @@ void CellShuffleWriter::prepareChunkGrowth() {
   if (isRemote_) {
     // Defer remote pushes until the batch is complete.
     if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
-      sealRequested_ = true;
+      sealDeferred_ = true;
     }
     return;
   }
@@ -632,13 +639,15 @@ void CellShuffleWriter::sealWindow(SealReason reason) {
   SealSpillTimer timer(*this);
   ++pressure_.seals[static_cast<size_t>(reason)];
   {
-    sealing_ = true;
+    BOLT_CHECK(
+        state_ == State::kIdle, "CellShuffleWriter cannot seal while active");
+    state_ = State::kSealing;
     SCOPE_EXIT {
-      sealing_ = false;
+      state_ = State::kIdle;
     };
     splitter_->sealWindow(columnPositionCounts());
   }
-  sealRequested_ = false;
+  sealDeferred_ = false;
   // A sealed window is a batch boundary: drop reservation slack.
   boltPool_->release();
 }
@@ -654,18 +663,18 @@ int64_t CellShuffleWriter::releaseWindow(SealReason reason) {
 }
 
 void CellShuffleWriter::maybeSeal() {
-  if (!initialized_ || !splitter_->hasWindowRows()) {
+  if (!isInitialized() || !splitter_->hasWindowRows()) {
     return;
   }
   pressure_.nullPeakBytes = std::max<uint64_t>(
       pressure_.nullPeakBytes, splitter_->nullFootprintBytes());
-  if (isRemote_ && sealRequested_) {
+  if (isRemote_ && sealDeferred_) {
     // Memory ran short mid-batch: push the window now that it is whole.
     releaseWindow(SealReason::kMemoryPressure);
     return;
   }
   const auto& cellOpts = options_.cellOptions;
-  if (sealRequested_) {
+  if (sealDeferred_) {
     sealWindow(SealReason::kMemoryPressure);
   } else if (splitter_->nullMovedBytes() > cellOpts.nullMemLimitBytes) {
     sealWindow(SealReason::kNullBitmapLimit);
@@ -674,9 +683,11 @@ void CellShuffleWriter::maybeSeal() {
       static_cast<uint64_t>(cellOpts.partitionSealBytes)) {
     // Close only oversized partitions; other payloads remain open.
     SealSpillTimer timer(*this);
-    sealing_ = true;
+    BOLT_CHECK(
+        state_ == State::kIdle, "CellShuffleWriter cannot seal while active");
+    state_ = State::kSealing;
     SCOPE_EXIT {
-      sealing_ = false;
+      state_ = State::kIdle;
     };
     const uint32_t sealed = splitter_->sealPartitionsOver(
         static_cast<uint64_t>(cellOpts.partitionSealBytes),
@@ -702,7 +713,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     int64_t size,
     int64_t* actual) {
   *actual = 0;
-  if (!initialized_) {
+  if (!isInitialized()) {
     // No ordinary batch yet: only the composite blocks may hold spill
     // memory.
     if (spillMemory_ != nullptr) {
@@ -752,12 +763,12 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return reclaimWindow(size, actual);
   }
   SealSpillTimer timer(*this);
-  const auto maybeRequestNullSeal = [&]() {
+  const auto maybeDeferNullSeal = [&]() {
     // Seal only when enough null state can be freed to justify closing
     // payloads.
     if (splitter_->nullMovedBytes() >
         options_.cellOptions.nullMemLimitBytes / 4) {
-      sealRequested_ = true;
+      sealDeferred_ = true;
     }
   };
   // Avoid a run when idle memory suffices or fewer than two chunks remain.
@@ -766,7 +777,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return arrow::Status::OK();
   }
   if (allocator_->allocatedBytes() < 2 * kChunkBytes) {
-    maybeRequestNullSeal();
+    maybeDeferNullSeal();
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
@@ -774,7 +785,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (size > 0 &&
       splitter_->cellDataBytes() <
           static_cast<uint64_t>(reclaimRunFloorBytes_)) {
-    maybeRequestNullSeal();
+    maybeDeferNullSeal();
     ++pressure_.belowFloorReclaims;
     return arrow::Status::OK();
   }
@@ -808,15 +819,15 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   }
   // Return reservation slack so the arbitrator can reuse the freed capacity.
   boltPool_->release();
-  maybeRequestNullSeal();
+  maybeDeferNullSeal();
   metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::reclaimWindow(int64_t size, int64_t* actual) {
   // Remote pushes must wait for a complete batch and an inactive seal.
-  if (inSplit_ || sealing_) {
-    sealRequested_ = true;
+  if (state_ != State::kIdle) {
+    sealDeferred_ = true;
     ++pressure_.deferredReclaims;
     return arrow::Status::OK();
   }
@@ -834,14 +845,14 @@ arrow::Status CellShuffleWriter::reclaimWindow(int64_t size, int64_t* actual) {
 
 arrow::Status CellShuffleWriter::flushOrdinary() {
   // Switching to composite input releases the ordinary window.
-  if (initialized_ && splitter_->hasWindowRows()) {
+  if (isInitialized() && splitter_->hasWindowRows()) {
     releaseWindow(SealReason::kComposite);
   }
   return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::stopOrdinary() {
-  if (initialized_) {
+  if (isInitialized()) {
     try {
       splitter_->finish(metrics_, columnPositionCounts());
     } catch (...) {
@@ -859,7 +870,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   metrics_.spillTime += static_cast<int64_t>(sealSpillNs_);
-  if (initialized_) {
+  if (isInitialized()) {
     logPressure();
   }
 
