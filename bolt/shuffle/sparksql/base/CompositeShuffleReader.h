@@ -125,10 +125,6 @@ class CompositeShuffleReader : public BlockShuffleReader {
     return batchByteSize_;
   }
 
-  void addDecodeTimeNs(uint64_t ns) {
-    decodeTimeNs_ += ns;
-  }
-
   void incrementPayloadsRead() {
     ++payloadsRead_;
   }

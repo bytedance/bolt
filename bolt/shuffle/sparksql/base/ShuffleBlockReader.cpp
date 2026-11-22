@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "bolt/common/base/CheckedArithmetic.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -75,15 +76,13 @@ bool StreamByteSource::atEnd() {
 bool CodecDecompressor::decompress(
     std::span<const uint8_t> in,
     std::span<uint8_t> out) {
-  const uint64_t start = currentTimeNs();
+  NanosecondTimer timer(&decompressTimeNs_);
   const auto decodedSize = static_cast<int64_t>(out.size());
-  const bool ok = codec_->decompress(
-                      in.data(),
-                      static_cast<int64_t>(in.size()),
-                      out.data(),
-                      decodedSize) == decodedSize;
-  decompressTimeNs_ += currentTimeNs() - start;
-  return ok;
+  return codec_->decompress(
+             in.data(),
+             static_cast<int64_t>(in.size()),
+             out.data(),
+             decodedSize) == decodedSize;
 }
 
 bool ShuffleStreamCursor::nextBlockKind(ShuffleBlockKind& kind) {

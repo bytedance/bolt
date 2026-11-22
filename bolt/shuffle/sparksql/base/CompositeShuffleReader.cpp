@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/time/Timer.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 
@@ -49,7 +50,6 @@ void CompositeShuffleReader::readCompositeBlock() {
 }
 
 RowVectorPtr CompositeShuffleReader::nextComposite() {
-  const uint64_t start = currentTimeNs();
   const size_t limit = std::min(
       compositeBlock_.rows.size(),
       nextCompositeRow_ + static_cast<size_t>(std::max(batchSize_, 1)));
@@ -78,12 +78,12 @@ RowVectorPtr CompositeShuffleReader::nextComposite() {
   nextCompositeRow_ = end;
   auto output = compositeConverter_.convertToComposite(
       slice, static_cast<int32_t>(total));
-  decodeTimeNs_ += currentTimeNs() - start;
   rowsRead_ += output->size();
   return output;
 }
 
 RowVectorPtr CompositeShuffleReader::next() {
+  NanosecondTimer timer(&decodeTimeNs_);
   // A composite block met while batching non-composite blocks goes out next.
   if (hasCompositeRows()) {
     return nextComposite();

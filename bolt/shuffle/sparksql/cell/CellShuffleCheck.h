@@ -17,7 +17,6 @@
 #pragma once
 
 #include <atomic>
-#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -27,16 +26,12 @@
 #include <folly/CPortability.h>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
-#if defined(__SSE4_2__)
-#include <nmmintrin.h>
-#endif
-
 namespace bytedance::bolt {
 class RowType;
-class RowVector;
 } // namespace bytedance::bolt
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -50,8 +45,8 @@ struct SplitBatch;
 /// Samples task attempts once per writer and checks their non-null cache values
 /// with per-partition ordered CRC32C and exact counts across all batches.
 /// CRC32C can miss collisions and is not cryptographic. Does not check null
-/// positions or encoded output, trigger flushes, or retain input values. The
-/// input is borrowed until endBatch(); cache addresses remain borrowed through
+/// positions or encoded output, trigger flushes, or retain input values. Cache
+/// base addresses registered via setColumnCache() remain borrowed through
 /// finishStream().
 class CellShuffleCheck {
  public:
@@ -66,9 +61,8 @@ class CellShuffleCheck {
 
   /// Selects by taskAttemptId % 100 < 100 * ratio, independently of partitions.
   /// Negative task IDs are selected whenever ratio is positive.
-  /// Selected writers check the first maxColumns supported columns in every
-  /// partition across all batches and seals.
-  CellShuffleCheck(
+  /// Returns null when disabled, unselected, or no supported columns exist.
+  static std::unique_ptr<CellShuffleCheck> create(
       const RowType& type,
       uint32_t numPartitions,
       double ratio,
@@ -76,58 +70,66 @@ class CellShuffleCheck {
       memory::MemoryPool* pool,
       int64_t taskAttemptId = -1);
 
-  /// Borrows validated, normalized original hash pids independently of the
-  /// producer's mapping. Does not change partitioning or allocate row buffers.
-  /// The input must remain alive until endBatch(), even if beginBatch fails.
-  void prepareInput(const RowVector& input, bool isHash);
-  /// Returns false for an empty batch or an unselected writer.
-  bool beginBatch(const SplitBatch& batch);
   bool checksColumn(uint32_t col) const;
-  bool checksBatchColumn(uint32_t col) const {
-    return batch_ != nullptr && checksColumn(col);
-  }
-  bool enabled() const {
-    return selectedColumns_ != 0;
-  }
-  void beginColumn(uint32_t col, const char* streamCacheBase);
+
+  /// Registers the staging cache base for a checked column (fixed for the
+  /// lifetime of the splitter).
+  void setColumnCache(uint32_t col, const char* streamCacheBase);
+
+  /// Validates the batch and accumulates expected digests and counts for every
+  /// checked column without retaining any references into `batch`.
+  void observeBatch(const SplitBatch& batch);
 
   /// Called after the store at an existing full-cache flush point. Validates
   /// the observer type selected independently from the producer's kernel.
   template <typename T>
-  FOLLY_ALWAYS_INLINE void
-  beforeFullFlush(uint32_t pid, const char* line, uint32_t usedBytes);
-  /// Observes natural partial flushes, including after endBatch().
+  FOLLY_ALWAYS_INLINE void beforeFullFlush(
+      uint32_t col,
+      uint32_t pid,
+      const char* line,
+      uint32_t usedBytes);
+
+  /// Observes natural partial flushes (e.g. during seal or final flush).
   void beforeStreamFlush(
       uint32_t col,
       uint32_t pid,
       const char* line,
       uint32_t usedBytes);
-  /// Safe during exception unwinding. Clears all borrowed input references.
-  void endBatch() noexcept;
+
   /// Compares after every final cache flush, before output finalization.
   void finishStream();
 
  private:
   enum class InputMapping { kIdentity, kDictionary, kConstant };
-  using Select = void (*)(CellShuffleCheck&);
+  using ObserveInput = void (*)(CellShuffleCheck&, uint32_t, const SplitBatch&);
   using StreamObserve =
       void (*)(CellShuffleCheck&, uint32_t, uint32_t, const char*, uint32_t);
   struct ColumnCheck {
-    Select select{nullptr};
-    uint32_t streamIndex{0};
+    ObserveInput observeInput{nullptr};
     StreamObserve streamObserve{nullptr};
+    uint32_t streamIndex{0};
     const char* streamCache{nullptr};
   };
 
   struct StreamState {
     uint32_t expectedCrc{0};
     uint32_t actualCrc{0};
-    // Input adds credits; each cache observation consumes them exactly once.
-    uint64_t remainingCount{0};
+    uint64_t expectedCount{0};
+    uint64_t actualCount{0};
   };
 
+  CellShuffleCheck(
+      uint32_t numPartitions,
+      std::vector<ColumnCheck> columns,
+      uint32_t selectedColumns,
+      memory::MemoryPool* pool);
+
   template <typename T>
-  static void prepareColumn(CellShuffleCheck& check);
+  static void observeInputColumn(
+      CellShuffleCheck& check,
+      uint32_t col,
+      const SplitBatch& batch);
+
   // Keep cache loads out of the producer so they cannot reuse its stored
   // values.
   template <typename T>
@@ -140,27 +142,21 @@ class CellShuffleCheck {
 
   const uint32_t numPartitions_;
   std::vector<ColumnCheck> columns_;
-  uint32_t selectedColumns_{0};
-
-  // Original validated pids, independent of the producer's copy when available.
-  const int32_t* sourcePids_{nullptr};
-  uint32_t preparedNumRows_{0};
-  const SplitBatch* batch_{nullptr};
-  uint32_t column_{0};
-  StreamObserve observe_{nullptr};
-  const char* cacheBase_{nullptr};
   std::vector<StreamState, memory::StlAllocator<StreamState>> streamStates_;
-  StreamState* streamColumn_{nullptr};
 };
 
 template <typename T>
 FOLLY_ALWAYS_INLINE void CellShuffleCheck::beforeFullFlush(
+    uint32_t col,
     uint32_t pid,
     const char* line,
     uint32_t usedBytes) {
-  BOLT_CHECK(observe_ == &observeStream<T>);
+  BOLT_CHECK_LT(col, columns_.size());
+  const auto& column = columns_[col];
+  BOLT_CHECK(column.streamObserve == &observeStream<T>);
   BOLT_CHECK_LT(pid, numPartitions_);
-  BOLT_CHECK(line == cacheBase_ + size_t{pid} * kCacheLineBytes);
+  BOLT_CHECK_NOT_NULL(column.streamCache);
+  BOLT_CHECK(line == column.streamCache + size_t{pid} * kCacheLineBytes);
   BOLT_CHECK_EQ(usedBytes, kCacheLineBytes);
 #if defined(__GNUC__) || defined(__clang__)
   // Force subsequent digest operands to come from the post-store cache bytes.
@@ -169,24 +165,28 @@ FOLLY_ALWAYS_INLINE void CellShuffleCheck::beforeFullFlush(
 #else
   std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
-#if defined(__x86_64__) && defined(__SSE4_2__)
-  if constexpr (
-      std::is_integral_v<T> && std::endian::native == std::endian::little) {
-    auto& state = streamColumn_[pid];
+  if constexpr (std::is_integral_v<T>) {
+    auto& state =
+        streamStates_[size_t{column.streamIndex} * numPartitions_ + pid];
     constexpr uint32_t kCount = kCacheLineBytes / sizeof(T);
-    BOLT_CHECK_LE(kCount, state.remainingCount);
-    uint64_t crc = state.actualCrc;
-    for (uint32_t at = 0; at < kCacheLineBytes; at += sizeof(uint64_t)) {
-      uint64_t word;
-      std::memcpy(&word, line + at, sizeof(word));
-      crc = _mm_crc32_u64(crc, word);
+    state.actualCount += kCount;
+    BOLT_CHECK_LE(
+        state.actualCount,
+        state.expectedCount,
+        "Cell streaming check extra non-null value: column={} partition={}",
+        col,
+        pid);
+    uint32_t crc = state.actualCrc;
+    using UInt = std::make_unsigned_t<T>;
+    for (uint32_t at = 0; at < kCacheLineBytes; at += sizeof(T)) {
+      UInt value;
+      std::memcpy(&value, line + at, sizeof(UInt));
+      crc = simd::crc32U64(crc, static_cast<uint64_t>(value));
     }
-    state.actualCrc = static_cast<uint32_t>(crc);
-    state.remainingCount -= kCount;
+    state.actualCrc = crc;
     return;
   }
-#endif
-  observeStream<T>(*this, column_, pid, line, usedBytes);
+  observeStream<T>(*this, col, pid, line, usedBytes);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

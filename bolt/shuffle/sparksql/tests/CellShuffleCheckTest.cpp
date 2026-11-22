@@ -84,12 +84,12 @@ struct SizedCache {
   }
 
   template <typename T>
-  void append(CellShuffleCheck& check, uint32_t pid, T value) {
+  void append(CellShuffleCheck& check, uint32_t col, uint32_t pid, T value) {
     auto* line = lines[pid].bytes.data();
     std::memcpy(line + cursors[pid], &value, sizeof(T));
     cursors[pid] += sizeof(T);
     if (cursors[pid] == kCacheLineBytes) {
-      check.beforeFullFlush<T>(pid, line, kCacheLineBytes);
+      check.beforeFullFlush<T>(col, pid, line, kCacheLineBytes);
       cursors[pid] = 0;
       lines[pid].bytes.fill(static_cast<char>(0xa5));
     }
@@ -172,16 +172,6 @@ class CellShuffleCheckTest : public testing::Test,
         makeFlatVector<double>(rows, value, isNull)};
   }
 
-  RowVectorPtr withPartitionColumn(VectorPtr pids = nullptr) {
-    if (!pids) {
-      pids = makeFlatVector<int32_t>(
-          partitions_.size(), [&](auto row) { return partitions_[row]; });
-    }
-    auto columns = input_->children();
-    columns.insert(columns.begin(), std::move(pids));
-    return makeRowVector(columns);
-  }
-
   RowVectorPtr input_;
   std::vector<DecodedVector> decoded_;
   std::vector<uint32_t> partitions_;
@@ -195,39 +185,38 @@ TEST_F(CellShuffleCheckTest, streamingAcrossBatchesDetectsCorruption) {
     for (const int failure : {0, 1, 2, 3}) {
       SCOPED_TRACE(fmt::format("width={} failure={}", sizeof(T), failure));
       auto batch = prepare({makeFlatVector<T>({T{1}})}, {0});
-      CellShuffleCheck check(
+      auto check = CellShuffleCheck::create(
           input_->type()->asRow(), kPartitions, 1, 1, pool(), 71);
+      ASSERT_NE(check, nullptr);
       SizedCache cache(kPartitions);
+      check->setColumnCache(0, cache.data());
       uint32_t ordinal = 0;
       for (const uint32_t rows : {3, 67, 5}) {
         auto values = makeFlatVector<T>(rows, [ordinal](auto row) {
           return static_cast<T>((ordinal + row) % 97);
         });
         batch = prepare({values}, std::vector<uint32_t>(rows, 0));
-        ASSERT_TRUE(check.beginBatch(batch));
-        check.beginColumn(0, cache.data());
+        check->observeBatch(batch);
         for (uint32_t row = 0; row < rows; ++row, ++ordinal) {
           T value = static_cast<T>(ordinal % 97);
           if ((failure == 1 && ordinal == 10) ||
               (failure == 2 && ordinal == 74)) {
             value = static_cast<T>(value + 1);
           }
-          cache.append<T>(check, 0, value);
+          cache.append<T>(*check, 0, 0, value);
         }
-
-        check.endBatch();
       }
 
       if (failure != 3) {
-        check.beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
+        check->beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
         cache.reset(); // Digest must survive actual cache overwrite.
       }
       if (failure == 0) {
-        EXPECT_NO_THROW(check.finishStream());
+        EXPECT_NO_THROW(check->finishStream());
       } else if (failure == 3) {
-        BOLT_ASSERT_THROW(check.finishStream(), "count mismatch");
+        BOLT_ASSERT_THROW(check->finishStream(), "count mismatch");
       } else {
-        BOLT_ASSERT_THROW(check.finishStream(), "CRC mismatch");
+        BOLT_ASSERT_THROW(check->finishStream(), "CRC mismatch");
       }
     }
   };
@@ -257,14 +246,15 @@ TEST_F(CellShuffleCheckTest, streamingSplitterSealsAndMappedNulls) {
   CountingOutput output;
   ChunkAllocator allocator(pool(), 1 << 20, 256);
   CellSplitter splitter(layout, kPartitions, allocator, output, *pool(), true);
-  CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 2, pool(), 72);
-  splitter.setStreamCheck(&check);
+  auto check = CellShuffleCheck::create(
+      *layout.rowType(), kPartitions, 1, 2, pool(), 72);
+  ASSERT_NE(check, nullptr);
+  splitter.setStreamCheck(check.get());
   for (uint32_t i = 0; i < 4; ++i) {
     batch = prepare({dictionary, constant}, pids);
     nullClasses_[1] = NullClass::kNoNulls;
-    ASSERT_TRUE(check.beginBatch(batch));
+    check->observeBatch(batch);
     splitter.split(batch);
-    check.endBatch();
     if (i == 0) {
       splitter.sealWindow({});
     } else if (i == 1) {
@@ -279,71 +269,25 @@ TEST_F(CellShuffleCheckTest, streamingSplitterSealsAndMappedNulls) {
   EXPECT_GT(output.calls, 0);
 }
 
-TEST_F(CellShuffleCheckTest, endBatchClearsBorrowedInputOnFailure) {
-  auto batch = prepare({makeFlatVector<int64_t>({11, 22})}, {0, 1});
-  const auto source = withPartitionColumn();
-  const auto layout = CellLayout::create(asRowType(input_->type()));
-  CountingOutput output;
-  ChunkAllocator allocator(pool(), 1 << 20, 256);
-  CellSplitter splitter(layout, kPartitions, allocator, output, *pool(), true);
-  CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 1, pool());
-  splitter.setStreamCheck(&check);
-  counts_[0] = 0;
-  check.prepareInput(*source, true);
-  BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition counts");
-  EXPECT_NO_THROW(check.endBatch());
-  EXPECT_FALSE(check.checksBatchColumn(0));
-  counts_[0] = 1;
-  check.prepareInput(*source, true);
-  ASSERT_TRUE(check.beginBatch(batch));
-  EXPECT_NO_THROW(splitter.split(batch));
-  check.endBatch();
-  ShuffleWriterMetrics metrics;
-  EXPECT_NO_THROW(splitter.finish(metrics, {}));
-}
-
-TEST_F(CellShuffleCheckTest, streamingOriginalPidsDetectProducerMutation) {
-  auto source = makeRowVector({
-      makeFlatVector<int32_t>({0, 1}),
-      makeFlatVector<int64_t>({11, 22}),
-  });
-  // Producer's mapping swaps partitions but retains every partition count.
-  auto batch = prepare({source->childAt(1)}, {1, 0});
-  CellShuffleCheck check(input_->type()->asRow(), kPartitions, 1, 1, pool(), 1);
-  check.prepareInput(*source, true);
-  Cache cache;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
-  cache.set<int64_t>(0, {22});
-  cache.set<int64_t>(1, {11});
-
-  check.endBatch();
-  check.beforeStreamFlush(0, 0, cache.line(0), cache.cursors[0]);
-  check.beforeStreamFlush(0, 1, cache.line(1), cache.cursors[1]);
-  BOLT_ASSERT_THROW(check.finishStream(), "CRC mismatch");
-}
-
 TEST_F(CellShuffleCheckTest, streamingFloatingSemanticsAndMissingAllNull) {
   const auto nan = std::numeric_limits<double>::quiet_NaN();
   auto batch = prepare({makeFlatVector<double>({nan, 0.0, -0.0})}, {0, 0, 0});
-  CellShuffleCheck check(input_->type()->asRow(), kPartitions, 1, 1, pool(), 1);
+  auto check = CellShuffleCheck::create(
+      input_->type()->asRow(), kPartitions, 1, 1, pool(), 1);
+  ASSERT_NE(check, nullptr);
   Cache cache;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
+  check->setColumnCache(0, cache.bytes.data());
+  check->observeBatch(batch);
   cache.set<double>(0, {-nan, -0.0, 0.0});
-
-  check.endBatch();
-  check.beforeStreamFlush(0, 0, cache.line(0), cache.cursors[0]);
-  EXPECT_NO_THROW(check.finishStream());
+  check->beforeStreamFlush(0, 0, cache.line(0), cache.cursors[0]);
+  EXPECT_NO_THROW(check->finishStream());
 
   batch = prepare({makeFlatVector<double>({7.0})}, {0});
   nullClasses_[0] = NullClass::kAllNull;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
-
-  check.endBatch();
-  BOLT_ASSERT_THROW(check.finishStream(), "count mismatch");
+  check->observeBatch(batch);
+  BOLT_ASSERT_THROW(check->finishStream(), "(3 vs. 4)");
 }
+
 TEST_F(CellShuffleCheckTest, nullHiddenIndicesAcrossMaskBoundaries) {
   const auto base = makeFlatVector<int64_t>({11, -23, 47, -91});
   constexpr std::array<int64_t, 4> kExpected{-91, 11, -23, 47};
@@ -378,11 +322,12 @@ TEST_F(CellShuffleCheckTest, nullHiddenIndicesAcrossMaskBoundaries) {
         pids[row] = row % kPartitions;
       }
       auto batch = prepare({dictionary}, pids);
-      CellShuffleCheck check(
+      auto check = CellShuffleCheck::create(
           input_->type()->asRow(), kPartitions, 1, 1, pool());
+      ASSERT_NE(check, nullptr);
       Cache cache;
-      ASSERT_TRUE(check.beginBatch(batch));
-      check.beginColumn(0, cache.bytes.data());
+      check->setColumnCache(0, cache.bytes.data());
+      check->observeBatch(batch);
 
       for (vector_size_t row = 0; row < rows; ++row) {
         if (!nonNull(row)) {
@@ -395,15 +340,15 @@ TEST_F(CellShuffleCheckTest, nullHiddenIndicesAcrossMaskBoundaries) {
         cache.cursors[pid] += sizeof(value);
 
         if (cache.cursors[pid] == kCacheLineBytes) {
-          check.beforeFullFlush<int64_t>(pid, cache.line(pid), kCacheLineBytes);
+          check->beforeFullFlush<int64_t>(
+              0, pid, cache.line(pid), kCacheLineBytes);
           cache.cursors[pid] = 0;
           std::memset(cache.line(pid), 0xda, kCacheLineBytes);
         }
       }
 
-      check.endBatch();
-      finishCaches(check, cache);
-      EXPECT_NO_THROW(check.finishStream());
+      finishCaches(*check, cache);
+      EXPECT_NO_THROW(check->finishStream());
     }
   }
 }
@@ -466,46 +411,38 @@ TEST_F(CellShuffleCheckTest, flatNullWordsRespectSliceBoundsAndDirtyPadding) {
           auto batch = prepare({slice}, pids);
           ASSERT_TRUE(decoded_[0].isIdentityMapping());
           ASSERT_TRUE(decoded_[0].mayHaveNulls());
-          const auto source = withPartitionColumn();
-          for (const bool prepared : {false, true}) {
-            SCOPED_TRACE(prepared);
-            CellShuffleCheck check(
-                input_->type()->asRow(), kPartitions, 1, 1, pool());
-            if (prepared) {
-              check.prepareInput(*source, true);
+          auto check = CellShuffleCheck::create(
+              input_->type()->asRow(), kPartitions, 1, 1, pool());
+          ASSERT_NE(check, nullptr);
+          Cache cache;
+          check->setColumnCache(0, cache.bytes.data());
+          check->observeBatch(batch);
+
+          for (vector_size_t row = 0; row < rows; ++row) {
+            if (!nonNull(row)) {
+              continue;
             }
-            Cache cache;
-            ASSERT_TRUE(check.beginBatch(batch));
-            check.beginColumn(0, cache.bytes.data());
+            const auto pid = pids[row];
+            const T actual = value(offset + row);
+            std::memcpy(
+                cache.line(pid) + cache.cursors[pid], &actual, sizeof(T));
+            cache.cursors[pid] += sizeof(T);
 
-            for (vector_size_t row = 0; row < rows; ++row) {
-              if (!nonNull(row)) {
-                continue;
-              }
-              const auto pid = pids[row];
-              const T actual = value(offset + row);
-              std::memcpy(
-                  cache.line(pid) + cache.cursors[pid], &actual, sizeof(T));
-              cache.cursors[pid] += sizeof(T);
-
-              if (cache.cursors[pid] == kCacheLineBytes) {
-                check.beforeFullFlush<T>(pid, cache.line(pid), kCacheLineBytes);
-                cache.cursors[pid] = 0;
-                std::memset(cache.line(pid), 0xda, kCacheLineBytes);
-              }
+            if (cache.cursors[pid] == kCacheLineBytes) {
+              check->beforeFullFlush<T>(
+                  0, pid, cache.line(pid), kCacheLineBytes);
+              cache.cursors[pid] = 0;
+              std::memset(cache.line(pid), 0xda, kCacheLineBytes);
             }
-            const auto cursors = cache.cursors;
-
-            check.endBatch();
-
-            EXPECT_EQ(cache.cursors, cursors);
-            finishCaches(check, cache);
-            EXPECT_NO_THROW(check.finishStream());
-            EXPECT_EQ(
-                std::vector<uint64_t>(
-                    slice->rawNulls(), slice->rawNulls() + words),
-                originalNulls);
           }
+          const auto cursors = cache.cursors;
+          EXPECT_EQ(cache.cursors, cursors);
+          finishCaches(*check, cache);
+          EXPECT_NO_THROW(check->finishStream());
+          EXPECT_EQ(
+              std::vector<uint64_t>(
+                  slice->rawNulls(), slice->rawNulls() + words),
+              originalNulls);
         }
       }
     }
@@ -540,12 +477,14 @@ TEST_F(CellShuffleCheckTest, selectsSupportedLogicalColumnsInSchemaOrder) {
            DOUBLE(),
            DATE(),
            TIMESTAMP()});
-  CellShuffleCheck limited(*type, kPartitions, 1, 2, pool());
-  CellShuffleCheck all(*type, kPartitions, 1, 100, pool());
+  auto limited = CellShuffleCheck::create(*type, kPartitions, 1, 2, pool());
+  auto all = CellShuffleCheck::create(*type, kPartitions, 1, 100, pool());
+  ASSERT_NE(limited, nullptr);
+  ASSERT_NE(all, nullptr);
   for (uint32_t col = 0; col < type->size(); ++col) {
     SCOPED_TRACE(col);
-    EXPECT_EQ(limited.checksColumn(col), col == 4 || col == 5);
-    EXPECT_EQ(all.checksColumn(col), col >= 4 && col <= 10);
+    EXPECT_EQ(limited->checksColumn(col), col == 4 || col == 5);
+    EXPECT_EQ(all->checksColumn(col), col >= 4 && col <= 10);
   }
 }
 
@@ -565,19 +504,15 @@ TEST_F(CellShuffleCheckTest, taskSamplingIsStableAndIndependentOfPartitions) {
       {std::numeric_limits<int64_t>::max(), true}};
   for (const auto& [taskId, expected] : cases) {
     for (const uint32_t partitions : {1, 16, 1024}) {
-      CellShuffleCheck check(*type, partitions, 0.25, 2, pool(), taskId);
-      CellShuffleCheck same(*type, partitions, 0.25, 2, pool(), taskId);
-      EXPECT_EQ(check.enabled(), expected);
-      EXPECT_EQ(same.enabled(), expected);
-      EXPECT_EQ(check.checksColumn(0), expected);
-      EXPECT_EQ(check.checksColumn(1), expected);
-      auto batch = prepare(
-          {makeFlatVector<int32_t>({1}), makeFlatVector<double>({2})},
-          {0},
-          partitions);
-      for (uint32_t i = 0; i < 3; ++i) {
-        EXPECT_EQ(check.beginBatch(batch), expected);
-        check.endBatch();
+      auto check =
+          CellShuffleCheck::create(*type, partitions, 0.25, 2, pool(), taskId);
+      auto same =
+          CellShuffleCheck::create(*type, partitions, 0.25, 2, pool(), taskId);
+      EXPECT_EQ(check != nullptr, expected);
+      EXPECT_EQ(same != nullptr, expected);
+      if (expected) {
+        EXPECT_TRUE(check->checksColumn(0));
+        EXPECT_TRUE(check->checksColumn(1));
       }
     }
   }
@@ -586,10 +521,10 @@ TEST_F(CellShuffleCheckTest, taskSamplingIsStableAndIndependentOfPartitions) {
 TEST_F(CellShuffleCheckTest, taskSamplingIncreasingRatios) {
   const auto type = ROW({"a"}, {INTEGER()});
   for (const int64_t taskId : {0, 24, 25, 74, 75, 99}) {
-    CellShuffleCheck task(*type, 32, 0.25, 1, pool(), taskId);
-    CellShuffleCheck more(*type, 32, 0.75, 1, pool(), taskId);
-    if (task.enabled()) {
-      EXPECT_TRUE(more.enabled());
+    auto task = CellShuffleCheck::create(*type, 32, 0.25, 1, pool(), taskId);
+    auto more = CellShuffleCheck::create(*type, 32, 0.75, 1, pool(), taskId);
+    if (task != nullptr) {
+      EXPECT_NE(more, nullptr);
     }
   }
 }
@@ -600,8 +535,8 @@ TEST_F(CellShuffleCheckTest, fractionalPercentUsesWholeRemainderBuckets) {
        std::vector<std::pair<double, uint32_t>>{{0.005, 1}, {0.255, 26}}) {
     uint32_t selected = 0;
     for (int64_t taskId = 0; taskId < 100; ++taskId) {
-      CellShuffleCheck check(*type, 1, ratio, 1, pool(), taskId);
-      selected += check.enabled();
+      selected += CellShuffleCheck::create(
+                      *type, 1, ratio, 1, pool(), taskId) != nullptr;
     }
     EXPECT_EQ(selected, expected);
   }
@@ -636,60 +571,58 @@ TEST_F(CellShuffleCheckTest, singlePartitionCanBeSelectedOrSkipped) {
   auto batch = prepare({makeFlatVector<int64_t>({42})}, {0}, 1);
   uint32_t selected = 0;
   for (int64_t taskId = 0; taskId < 10000; ++taskId) {
-    CellShuffleCheck check(input_->type()->asRow(), 1, 0.1, 1, pool(), taskId);
-    selected += check.enabled();
+    selected +=
+        CellShuffleCheck::create(
+            input_->type()->asRow(), 1, 0.1, 1, pool(), taskId) != nullptr;
   }
   EXPECT_EQ(selected, 1000);
-  CellShuffleCheck skip(input_->type()->asRow(), 1, 0.1, 1, pool(), 10);
-  EXPECT_FALSE(skip.enabled());
   const auto before = pool()->usedBytes();
-  EXPECT_FALSE(skip.beginBatch(batch));
+  EXPECT_EQ(
+      CellShuffleCheck::create(input_->type()->asRow(), 1, 0.1, 1, pool(), 10),
+      nullptr);
   EXPECT_EQ(pool()->usedBytes(), before); // No digest-state allocation.
-  EXPECT_NO_THROW(skip.finishStream());
-  CellShuffleCheck check(input_->type()->asRow(), 1, 0.1, 1, pool(), 3);
-  ASSERT_TRUE(check.enabled());
+  auto check =
+      CellShuffleCheck::create(input_->type()->asRow(), 1, 0.1, 1, pool(), 3);
+  ASSERT_NE(check, nullptr);
   Cache cache;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
+  check->setColumnCache(0, cache.bytes.data());
+  check->observeBatch(batch);
   cache.set<int64_t>(0, {42});
-
-  check.endBatch();
-  check.beforeStreamFlush(0, 0, cache.line(0), 8);
-  EXPECT_NO_THROW(check.finishStream());
+  check->beforeStreamFlush(0, 0, cache.line(0), 8);
+  EXPECT_NO_THROW(check->finishStream());
 }
 
 TEST_F(CellShuffleCheckTest, oneColumnAndDisabledSampling) {
   auto batch = prepare({makeFlatVector<int64_t>({42})}, {0});
   for (const double ratio :
        {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
-    CellShuffleCheck check(
-        input_->type()->asRow(), kPartitions, ratio, 1, pool());
-    EXPECT_FALSE(check.beginBatch(batch));
-    EXPECT_FALSE(check.checksColumn(0));
-    EXPECT_NO_THROW(check.finishStream());
+    EXPECT_EQ(
+        CellShuffleCheck::create(
+            input_->type()->asRow(), kPartitions, ratio, 1, pool()),
+        nullptr);
   }
   for (const int32_t cap : {0, -1}) {
-    CellShuffleCheck check(
-        input_->type()->asRow(), kPartitions, 1, cap, pool());
-    EXPECT_FALSE(check.beginBatch(batch));
+    EXPECT_EQ(
+        CellShuffleCheck::create(
+            input_->type()->asRow(), kPartitions, 1, cap, pool()),
+        nullptr);
   }
   for (const double ratio : {1.0, 2.0}) {
-    CellShuffleCheck check(
+    auto check = CellShuffleCheck::create(
         input_->type()->asRow(), kPartitions, ratio, 1, pool(), 7);
-    EXPECT_TRUE(check.checksColumn(0));
+    ASSERT_NE(check, nullptr);
+    EXPECT_TRUE(check->checksColumn(0));
     Cache cache;
-    ASSERT_TRUE(check.beginBatch(batch));
-    check.beginColumn(0, cache.bytes.data());
+    check->setColumnCache(0, cache.bytes.data());
+    check->observeBatch(batch);
     cache.set<int64_t>(0, {42});
-
-    check.endBatch();
-    finishCaches(check, cache);
-    EXPECT_NO_THROW(check.finishStream());
+    finishCaches(*check, cache);
+    EXPECT_NO_THROW(check->finishStream());
   }
   const auto unsupported = ROW({"string"}, {VARCHAR()});
-  CellShuffleCheck none(*unsupported, kPartitions, 0.1, 4, pool(), 1);
-  EXPECT_FALSE(none.checksColumn(0));
-  EXPECT_FALSE(none.beginBatch(batch));
+  EXPECT_EQ(
+      CellShuffleCheck::create(*unsupported, kPartitions, 0.1, 4, pool(), 1),
+      nullptr);
 }
 
 TEST_F(CellShuffleCheckTest, sampledTaskDetectsCorruptionInEveryPartition) {
@@ -700,16 +633,16 @@ TEST_F(CellShuffleCheckTest, sampledTaskDetectsCorruptionInEveryPartition) {
          makeFlatVector<int64_t>({55, 66}),
          makeFlatVector<int64_t>({77, 88})},
         {0, 1});
-    CellShuffleCheck check(
+    auto check = CellShuffleCheck::create(
         input_->type()->asRow(), kPartitions, 0.5, 4, pool(), 3);
-    ASSERT_TRUE(check.enabled());
+    ASSERT_NE(check, nullptr);
     std::array<Cache, 4> caches;
+    for (uint32_t col = 0; col < 4; ++col) {
+      check->setColumnCache(col, caches[col].bytes.data());
+    }
     for (uint32_t b = 0; b < 3; ++b) {
-      ASSERT_TRUE(check.beginBatch(batch));
+      check->observeBatch(batch);
       for (uint32_t col = 0; col < 4; ++col) {
-        if (check.checksColumn(col)) {
-          check.beginColumn(col, caches[col].bytes.data());
-        }
         for (uint32_t pid = 0; pid < 2; ++pid) {
           const int64_t value = (col * 2 + pid + 1) * 11 +
               ((static_cast<int>(pid) == corruptPid && b == 1) ? 1 : 0);
@@ -720,18 +653,15 @@ TEST_F(CellShuffleCheckTest, sampledTaskDetectsCorruptionInEveryPartition) {
           caches[col].cursors[pid] += sizeof(value);
         }
       }
-      check.endBatch();
     }
     for (uint32_t col = 0; col < 4; ++col) {
-      if (check.checksColumn(col)) {
-        finishCaches(check, caches[col], col);
-      }
+      finishCaches(*check, caches[col], col);
     }
 
     if (corruptPid >= 0) {
-      BOLT_ASSERT_THROW(check.finishStream(), "CRC mismatch");
+      BOLT_ASSERT_THROW(check->finishStream(), "CRC mismatch");
     } else {
-      EXPECT_NO_THROW(check.finishStream());
+      EXPECT_NO_THROW(check->finishStream());
     }
   }
 }
@@ -744,9 +674,11 @@ TEST_F(CellShuffleCheckTest, everyTailLengthAcrossBatchesAndFlushes) {
         SCOPED_TRACE(fmt::format(
             "width={} tail={} corrupt={}", sizeof(T), tail, corrupt));
         auto batch = prepare({makeFlatVector<T>({T{1}})}, {0});
-        CellShuffleCheck check(
+        auto check = CellShuffleCheck::create(
             input_->type()->asRow(), kPartitions, 1, 1, pool(), 1);
+        ASSERT_NE(check, nullptr);
         SizedCache cache(kPartitions);
+        check->setColumnCache(0, cache.data());
         uint32_t ordinal = 0;
         for (const uint32_t rows : {capacity + 1, capacity - 1 + tail}) {
           batch = prepare(
@@ -756,25 +688,22 @@ TEST_F(CellShuffleCheckTest, everyTailLengthAcrossBatchesAndFlushes) {
                     return static_cast<T>((ordinal + row) % 79 + 1);
                   })},
               std::vector<uint32_t>(rows, 0));
-          ASSERT_TRUE(check.beginBatch(batch));
-          check.beginColumn(0, cache.data());
+          check->observeBatch(batch);
           for (uint32_t row = 0; row < rows; ++row, ++ordinal) {
             T value = static_cast<T>(ordinal % 79 + 1);
             if (corrupt && ordinal == 2 * capacity + tail - 1) {
               value = static_cast<T>(value + 1);
             }
-            cache.append<T>(check, 0, value);
+            cache.append<T>(*check, 0, 0, value);
           }
-
-          check.endBatch();
         }
         if (cache.cursors[0] != 0) {
-          check.beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
+          check->beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
         }
         if (corrupt) {
-          BOLT_ASSERT_THROW(check.finishStream(), "CRC mismatch");
+          BOLT_ASSERT_THROW(check->finishStream(), "CRC mismatch");
         } else {
-          EXPECT_NO_THROW(check.finishStream());
+          EXPECT_NO_THROW(check->finishStream());
         }
       }
     }
@@ -791,10 +720,12 @@ TEST_F(CellShuffleCheckTest, rejectsMissingExtraReorderedAndWrongPartition) {
   for (const int failure : {0, 1, 2, 3}) {
     auto batch =
         prepare({makeFlatVector<int32_t>({11, 22, 33, 44})}, {0, 0, 1, 1});
-    CellShuffleCheck check(input_->type()->asRow(), kPartitions, 1, 1, pool());
+    auto check = CellShuffleCheck::create(
+        input_->type()->asRow(), kPartitions, 1, 1, pool());
+    ASSERT_NE(check, nullptr);
     Cache cache;
-    ASSERT_TRUE(check.beginBatch(batch));
-    check.beginColumn(0, cache.bytes.data());
+    check->setColumnCache(0, cache.bytes.data());
+    check->observeBatch(batch);
     cache.set<int32_t>(0, {11, 22});
     cache.set<int32_t>(1, {33, 44});
     if (failure == 0) {
@@ -808,69 +739,43 @@ TEST_F(CellShuffleCheckTest, rejectsMissingExtraReorderedAndWrongPartition) {
       cache.set<int32_t>(1, {11, 22});
     }
 
-    check.endBatch();
     if (failure == 1) {
-      BOLT_ASSERT_THROW(finishCaches(check, cache), "extra non-null value");
+      BOLT_ASSERT_THROW(finishCaches(*check, cache), "(3 vs. 2)");
     } else {
-      finishCaches(check, cache);
+      finishCaches(*check, cache);
       BOLT_ASSERT_THROW(
-          check.finishStream(),
-          failure == 0 ? "count mismatch" : "CRC mismatch");
+          check->finishStream(), failure == 0 ? "(1 vs. 2)" : "CRC mismatch");
     }
   }
 }
 
 TEST_F(CellShuffleCheckTest, validatesMappingCacheAndObserver) {
   auto batch = prepare({makeFlatVector<int64_t>({11, 22})}, {0, 1});
-  CellShuffleCheck check(input_->type()->asRow(), kPartitions, 1, 1, pool());
+  auto check = CellShuffleCheck::create(
+      input_->type()->asRow(), kPartitions, 1, 1, pool());
+  ASSERT_NE(check, nullptr);
   counts_[0] = 0;
-  BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition counts");
-  check.endBatch();
+  BOLT_ASSERT_THROW(check->observeBatch(batch), "invalid partition counts");
   counts_[0] = 1;
   partitions_[0] = kPartitions;
-  BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition");
-  check.endBatch();
+  BOLT_ASSERT_THROW(check->observeBatch(batch), "invalid partition");
   partitions_[0] = 0;
   Cache cache;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
+  check->setColumnCache(0, cache.bytes.data());
+  check->observeBatch(batch);
   EXPECT_THROW(
-      check.beforeFullFlush<int32_t>(0, cache.line(0), kCacheLineBytes),
+      check->beforeFullFlush<int32_t>(0, 0, cache.line(0), kCacheLineBytes),
       BoltException);
-  EXPECT_THROW(check.beforeStreamFlush(0, 0, cache.line(1), 8), BoltException);
-  EXPECT_THROW(check.beforeStreamFlush(0, 0, cache.line(0), 7), BoltException);
+  EXPECT_THROW(check->beforeStreamFlush(0, 0, cache.line(1), 8), BoltException);
+  EXPECT_THROW(check->beforeStreamFlush(0, 0, cache.line(0), 7), BoltException);
   EXPECT_THROW(
-      check.beforeStreamFlush(0, kPartitions, cache.line(0), 8), BoltException);
+      check->beforeStreamFlush(0, kPartitions, cache.line(0), 8),
+      BoltException);
   cache.set<int64_t>(0, {11});
   cache.set<int64_t>(1, {22});
 
-  check.endBatch();
-  finishCaches(check, cache);
-  EXPECT_NO_THROW(check.finishStream());
-}
-
-TEST_F(CellShuffleCheckTest, originalPidBorrowClearedOnFallbackAndException) {
-  auto batch = prepare({makeFlatVector<int64_t>({11, 22})}, {0, 1});
-  CellShuffleCheck check(input_->type()->asRow(), kPartitions, 1, 1, pool());
-  const auto source = withPartitionColumn();
-  check.prepareInput(*source, true);
-  counts_[0] = 0;
-  BOLT_ASSERT_THROW(check.beginBatch(batch), "invalid partition counts");
-  check.endBatch();
-  const auto fallback =
-      makeRowVector({makeFlatVector<int32_t>({-1, 99}), source->childAt(1)});
-  check.prepareInput(*fallback, true);
-  batch = prepare({makeFlatVector<int64_t>({33, 44, 55})}, {2, 1, 0});
-  Cache cache;
-  ASSERT_TRUE(check.beginBatch(batch));
-  check.beginColumn(0, cache.bytes.data());
-  cache.set<int64_t>(0, {55});
-  cache.set<int64_t>(1, {44});
-  cache.set<int64_t>(2, {33});
-
-  check.endBatch();
-  finishCaches(check, cache);
-  EXPECT_NO_THROW(check.finishStream());
+  finishCaches(*check, cache);
+  EXPECT_NO_THROW(check->finishStream());
 }
 
 TEST_F(CellShuffleCheckTest, floatingSpecialValuesAcrossFullCachesAndTails) {
@@ -881,11 +786,12 @@ TEST_F(CellShuffleCheckTest, floatingSpecialValuesAcrossFullCachesAndTails) {
     });
     for (const bool corrupt : {false, true}) {
       auto batch = prepare({input}, std::vector<uint32_t>(kRows, 0));
-      CellShuffleCheck check(
+      auto check = CellShuffleCheck::create(
           input_->type()->asRow(), kPartitions, 1, 1, pool());
+      ASSERT_NE(check, nullptr);
       SizedCache cache(kPartitions);
-      ASSERT_TRUE(check.beginBatch(batch));
-      check.beginColumn(0, cache.data());
+      check->setColumnCache(0, cache.data());
+      check->observeBatch(batch);
       for (uint32_t row = 0; row < kRows; ++row) {
         const U raw = bits[row % bits.size()];
         T actual = std::bit_cast<T>(raw);
@@ -897,15 +803,14 @@ TEST_F(CellShuffleCheckTest, floatingSpecialValuesAcrossFullCachesAndTails) {
         if (corrupt && row == kRows - 1) {
           actual = T{123};
         }
-        cache.append<T>(check, 0, actual);
+        cache.append<T>(*check, 0, 0, actual);
       }
 
-      check.endBatch();
-      check.beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
+      check->beforeStreamFlush(0, 0, cache.data(), cache.cursors[0]);
       if (corrupt) {
-        BOLT_ASSERT_THROW(check.finishStream(), "CRC mismatch");
+        BOLT_ASSERT_THROW(check->finishStream(), "CRC mismatch");
       } else {
-        EXPECT_NO_THROW(check.finishStream());
+        EXPECT_NO_THROW(check->finishStream());
       }
     }
   };
@@ -938,27 +843,25 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   CountingOutput output;
   ChunkAllocator allocator(pool(), 1 << 20, 256);
   CellSplitter splitter(layout, kPartitions, allocator, output, *pool(), true);
-  CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 6, pool());
-  splitter.setStreamCheck(&check);
-  ASSERT_TRUE(check.beginBatch(batch));
+  auto check =
+      CellShuffleCheck::create(*layout.rowType(), kPartitions, 1, 6, pool());
+  ASSERT_NE(check, nullptr);
+  splitter.setStreamCheck(check.get());
+  check->observeBatch(batch);
   splitter.split(batch);
-  check.endBatch();
   EXPECT_EQ(splitter.cellDataBytes(), 0);
 
   batch = prepare(fixedColumns(0, false), {});
-  EXPECT_FALSE(check.beginBatch(batch));
-  EXPECT_FALSE(check.checksBatchColumn(0));
+  check->observeBatch(batch);
   EXPECT_NO_THROW(splitter.split(batch));
-  check.endBatch();
 
   std::vector<uint32_t> pids(257);
   for (uint32_t row = 0; row < pids.size(); ++row) {
     pids[row] = row % kPartitions;
   }
   batch = prepare(fixedColumns(pids.size(), true), pids);
-  ASSERT_TRUE(check.beginBatch(batch));
+  check->observeBatch(batch);
   splitter.split(batch);
-  check.endBatch();
 
   EXPECT_GT(splitter.cellDataBytes(), 0); // Both kinds of kernel flushed.
 
@@ -968,16 +871,14 @@ TEST_F(CellShuffleCheckTest, splitterChecksEncodedAndRawCaches) {
   }
   batch = prepare(nulls, {0, 1, 2});
   nullClasses_.assign(6, NullClass::kAllNull);
-  ASSERT_TRUE(check.beginBatch(batch));
+  check->observeBatch(batch);
   splitter.split(batch);
-  check.endBatch();
 
   const auto bytesBefore = splitter.cellDataBytes();
   batch = prepare(fixedColumns(1, false), {1});
   nullClasses_.assign(6, NullClass::kNoNulls);
-  ASSERT_TRUE(check.beginBatch(batch));
+  check->observeBatch(batch);
   splitter.split(batch);
-  check.endBatch();
 
   EXPECT_EQ(splitter.cellDataBytes(), bytesBefore); // Tail-only checks.
   EXPECT_EQ(output.calls, 0);
@@ -1004,18 +905,18 @@ TEST_F(CellShuffleCheckTest, splitterChecksMappedInputsAndAllNullBranch) {
   CountingOutput output;
   ChunkAllocator allocator(pool(), 1 << 20, 256);
   CellSplitter splitter(layout, kPartitions, allocator, output, *pool(), true);
-  CellShuffleCheck check(*layout.rowType(), kPartitions, 1, 2, pool());
-  splitter.setStreamCheck(&check);
-  ASSERT_TRUE(check.beginBatch(batch));
+  auto check =
+      CellShuffleCheck::create(*layout.rowType(), kPartitions, 1, 2, pool());
+  ASSERT_NE(check, nullptr);
+  splitter.setStreamCheck(check.get());
+  check->observeBatch(batch);
   splitter.split(batch);
-  check.endBatch();
 
   batch = prepare(
       {makeFlatVector<int64_t>({1}), makeFlatVector<double>({2.0})}, {0});
   nullClasses_.assign(2, NullClass::kAllNull);
-  ASSERT_TRUE(check.beginBatch(batch));
+  check->observeBatch(batch);
   EXPECT_NO_THROW(splitter.split(batch));
-  check.endBatch();
   EXPECT_EQ(output.calls, 0);
   ShuffleWriterMetrics metrics;
   BOLT_ASSERT_THROW(splitter.finish(metrics, {}), "count mismatch");
@@ -1036,10 +937,10 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
       ChunkAllocator allocator(pool(), 1 << 20, 256);
       CellSplitter splitter(
           layout, kPartitions, allocator, output, *pool(), streaming);
-      CellShuffleCheck check(
+      auto check = CellShuffleCheck::create(
           *layout.rowType(), kPartitions, 0.5, 6, pool(), taskId);
-      splitter.setStreamCheck(check.enabled() ? &check : nullptr);
-      ASSERT_EQ(check.enabled(), taskId != 50);
+      ASSERT_EQ(check != nullptr, taskId != 50);
+      splitter.setStreamCheck(check.get());
       for (uint32_t b = 0; b < 5; ++b) {
         auto columns = fixedColumns(kRows, b % 2 != 0);
         for (auto& column : columns) {
@@ -1061,14 +962,10 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
         if (b == 4) {
           nullClasses_.assign(6, NullClass::kAllNull);
         }
-        const auto source = withPartitionColumn();
-        check.prepareInput(*source, true);
-        const bool selected = check.beginBatch(batch);
-        ASSERT_EQ(selected, taskId != 50);
-        EXPECT_EQ(check.checksBatchColumn(0), selected);
+        if (check != nullptr) {
+          check->observeBatch(batch);
+        }
         EXPECT_NO_THROW(splitter.split(batch));
-        check.endBatch();
-        EXPECT_FALSE(check.checksBatchColumn(0));
         if (b == 0) {
           splitter.sealWindow({});
         } else if (b == 1) {

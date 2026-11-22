@@ -74,25 +74,19 @@ bool CellShuffleReader::nextPayload() {
 
 RowVectorPtr CellShuffleReader::nextNonComposite() {
   if (nestedAssembler_ != nullptr) {
-    const uint64_t start = currentTimeNs();
-    auto output = nestedAssembler_->nextBatch(
+    return nestedAssembler_->nextBatch(
         std::max(batchSize(), 1), batchByteSize(), [&] {
           return nextPayload();
         });
-    addDecodeTimeNs(currentTimeNs() - start);
-    return output;
   }
   auto output = nextPhysical();
   if (output != nullptr && adapter_.hasComplexColumns()) {
-    const uint64_t start = currentTimeNs();
     output = adapter_.unpack(output, pool());
-    addDecodeTimeNs(currentTimeNs() - start);
   }
   return output;
 }
 
 RowVectorPtr CellShuffleReader::nextPhysical() {
-  const uint64_t start = currentTimeNs();
   const vector_size_t capacity = std::max(batchSize(), 1);
   // One batch at a time: a large payload comes out over several calls,
   // small ones fill the same batch until it is full. An empty batch always
@@ -115,9 +109,7 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
     const bool ok = decoder_.appendRows(rows, capacity, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
   }
-  auto output = decoder_.finishBatch();
-  addDecodeTimeNs(currentTimeNs() - start);
-  return output;
+  return decoder_.finishBatch();
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -103,6 +103,18 @@ CellSplitter::CellSplitter(
   ::memset(cursors_, 0, cursorBytes);
 }
 
+void CellSplitter::setStreamCheck(CellShuffleCheck* check) {
+  streamCheck_ = check;
+  if (streamCheck_ != nullptr) {
+    for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+      if (streamCheck_->checksColumn(col)) {
+        streamCheck_->setColumnCache(
+            col, cacheLine(layout_.firstStream(col), 0));
+      }
+    }
+  }
+}
+
 template <typename T>
 void CellSplitter::flushEncoded(
     uint32_t stream,
@@ -210,7 +222,7 @@ FOLLY_ALWAYS_INLINE void CellSplitter::appendStringData(
 
 template <typename T, bool kHasNulls, CellSplitter::InputMapping kMapping>
 void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
-  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
       : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
@@ -260,7 +272,10 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
       if (check != nullptr) {
         check->beforeFullFlush<T>(
-            pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+            col,
+            pid,
+            base + (static_cast<size_t>(pid) << kLineShift),
+            cur[pid]);
       }
       flushEncoded<T>(
           stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
@@ -274,7 +289,7 @@ template <
     CellSplitter::InputMapping kMapping,
     bool kStreaming>
 void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
-  auto* check = streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col)
+  auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
       : nullptr;
   const auto nullColumn = layout_.wireColumn(col);
@@ -325,7 +340,10 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
       if constexpr (sizeof(T) != 16) { // HUGEINT is outside the check scope.
         if (check != nullptr) {
           check->beforeFullFlush<T>(
-              pid, base + (static_cast<size_t>(pid) << kLineShift), cur[pid]);
+              col,
+              pid,
+              base + (static_cast<size_t>(pid) << kLineShift),
+              cur[pid]);
         }
       }
       flushRawFull<kStreaming>(
@@ -523,12 +541,6 @@ void CellSplitter::split(const SplitBatch& batch) {
     }
     const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
-    const bool checked =
-        streamCheck_ != nullptr && streamCheck_->checksBatchColumn(col);
-    if (checked) {
-      const auto stream = layout_.firstStream(col);
-      streamCheck_->beginColumn(col, cacheLine(stream, 0));
-    }
     const bool recordNulls = nulls_.observeBatch(nullColumn, klass, positions);
     if (klass == NullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat

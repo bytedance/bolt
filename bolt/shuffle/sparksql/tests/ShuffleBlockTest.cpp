@@ -496,7 +496,6 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
    private:
     RowVectorPtr nextNonComposite() override {
       RowBlock batch;
-      const uint64_t start = currentTimeNs();
       while (static_cast<int32_t>(batch.size()) < batchSize()) {
         if (!readNextBlock([&](ShuffleBlockKind kind, ShuffleByteSource& src) {
               BOLT_CHECK_EQ(kind, ShuffleBlockKind::kRows);
@@ -507,7 +506,6 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
         }
       }
       if (batch.empty()) {
-        addDecodeTimeNs(currentTimeNs() - start);
         return nullptr;
       }
       auto col = BaseVector::create<FlatVector<StringView>>(
@@ -515,14 +513,12 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
       for (size_t i = 0; i < batch.size(); ++i) {
         col->set(i, StringView(batch.rows[i]));
       }
-      auto rv = std::make_shared<RowVector>(
+      return std::make_shared<RowVector>(
           pool(),
           outputType_,
           nullptr,
           batch.size(),
           std::vector<VectorPtr>{col});
-      addDecodeTimeNs(currentTimeNs() - start);
-      return rv;
     }
 
     RowTypePtr outputType_;

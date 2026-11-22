@@ -86,9 +86,7 @@ class CellSplitter {
   BOLT_CELL_KERNEL void split(const SplitBatch& batch);
 
   /// Borrowed through finish; selected tasks check all partitions and batches.
-  void setStreamCheck(CellShuffleCheck* check) {
-    streamCheck_ = check;
-  }
+  void setStreamCheck(CellShuffleCheck* check);
 
   /// Writes and recycles the linked cells, retaining caches and window state.
   /// Safe during a split or cache flush; nested output calls are suppressed.
