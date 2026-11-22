@@ -86,7 +86,7 @@ bool CodecDecompressor::decompress(
   return ok;
 }
 
-bool ShuffleStreamCursor::nextBlockKind(uint8_t& kind) {
+bool ShuffleStreamCursor::nextBlockKind(ShuffleBlockKind& kind) {
   while (!exhausted_) {
     if (source_ == nullptr) {
       auto in = streams_->nextStream(arrowPool_);
@@ -101,7 +101,9 @@ bool ShuffleStreamCursor::nextBlockKind(uint8_t& kind) {
       source_.reset();
       continue;
     }
-    BOLT_CHECK(source_->read(&kind, 1), "truncated shuffle block");
+    uint8_t rawKind = 0;
+    BOLT_CHECK(source_->read(&rawKind, 1), "truncated shuffle block");
+    kind = static_cast<ShuffleBlockKind>(rawKind);
     return true;
   }
   return false;

@@ -48,6 +48,10 @@ enum class ShuffleBlockKind : uint8_t {
   kRows = 0x82,
 };
 
+inline constexpr uint32_t format_as(ShuffleBlockKind kind) {
+  return static_cast<uint32_t>(kind);
+}
+
 /// Human-readable label for a block kind (used in error diagnostics).
 inline constexpr std::string_view shuffleBlockKindName(ShuffleBlockKind kind) {
   switch (kind) {

@@ -123,7 +123,7 @@ class ShuffleStreamCursor {
 
   /// Opens streams until a non-empty stream yields a block kind byte.
   /// Returns false when every stream is exhausted.
-  bool nextBlockKind(uint8_t& kind);
+  bool nextBlockKind(ShuffleBlockKind& kind);
 
   /// Active byte source for the block whose kind byte was just consumed.
   ShuffleByteSource& source() {

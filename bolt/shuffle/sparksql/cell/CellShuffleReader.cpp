@@ -58,10 +58,10 @@ CellShuffleReader::CellShuffleReader(
 CellShuffleReader::~CellShuffleReader() = default;
 
 bool CellShuffleReader::nextPayload() {
-  return readNextBlock([&](uint8_t kind, ShuffleByteSource& source) {
+  return readNextBlock([&](ShuffleBlockKind kind, ShuffleByteSource& source) {
     BOLT_CHECK_EQ(
         kind,
-        static_cast<uint8_t>(ShuffleBlockKind::kCellPayload),
+        ShuffleBlockKind::kCellPayload,
         "unknown cell shuffle block kind");
     std::string error;
     const bool ok = nestedAssembler_ != nullptr

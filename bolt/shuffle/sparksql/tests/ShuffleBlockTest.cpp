@@ -204,13 +204,13 @@ TEST_F(ShuffleBlockTest, rowBlockAppendCombinesBlocksAcrossStreams) {
   RowBlockReader reader(&decompressor, pool_.get());
 
   RowBlock combined;
-  uint8_t kind = 0;
+  ShuffleBlockKind kind{};
   while (true) {
     auto timer = cursor.timeRead();
     if (!cursor.nextBlockKind(kind)) {
       break;
     }
-    ASSERT_EQ(kind, static_cast<uint8_t>(ShuffleBlockKind::kRows));
+    ASSERT_EQ(kind, ShuffleBlockKind::kRows);
     reader.append(cursor.source(), combined, ShuffleBlockKind::kRows);
   }
 
@@ -498,9 +498,8 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
       RowBlock batch;
       const uint64_t start = currentTimeNs();
       while (static_cast<int32_t>(batch.size()) < batchSize()) {
-        if (!readNextBlock([&](uint8_t kind, ShuffleByteSource& src) {
-              BOLT_CHECK_EQ(
-                  kind, static_cast<uint8_t>(ShuffleBlockKind::kRows));
+        if (!readNextBlock([&](ShuffleBlockKind kind, ShuffleByteSource& src) {
+              BOLT_CHECK_EQ(kind, ShuffleBlockKind::kRows);
               rowBlockReader().append(src, batch, ShuffleBlockKind::kRows);
               incrementPayloadsRead();
             })) {

@@ -93,11 +93,11 @@ class CompositeShuffleReader : public BlockShuffleReader {
     // Opening streams and reading blocks is the input's share of the decode
     // time, decompression aside. Timed per block, not per read.
     auto timer = cursor_.timeRead();
-    uint8_t kind = 0;
+    ShuffleBlockKind kind{};
     if (!cursor_.nextBlockKind(kind)) {
       return false;
     }
-    if (kind == static_cast<uint8_t>(ShuffleBlockKind::kCompositeRows)) {
+    if (kind == ShuffleBlockKind::kCompositeRows) {
       readCompositeBlock();
       return false;
     }
