@@ -26,6 +26,7 @@
 #include <folly/CPortability.h>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
@@ -179,9 +180,8 @@ FOLLY_ALWAYS_INLINE void CellShuffleCheck::beforeFullFlush(
     uint32_t crc = state.actualCrc;
     using UInt = std::make_unsigned_t<T>;
     for (uint32_t at = 0; at < kCacheLineBytes; at += sizeof(T)) {
-      UInt value;
-      std::memcpy(&value, line + at, sizeof(UInt));
-      crc = simd::crc32U64(crc, static_cast<uint64_t>(value));
+      crc = simd::crc32U64(
+          crc, static_cast<uint64_t>(memory::loadUnaligned<UInt>(line + at)));
     }
     state.actualCrc = crc;
     return;

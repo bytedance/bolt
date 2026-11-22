@@ -138,7 +138,7 @@ void buildRowBlock(
     }
   }
 
-  ::memcpy(block->asMutable<char>(), &header, sizeof(header));
+  memory::storeUnaligned(block->asMutable<char>(), header);
   block->setSize(kRowBlockHeaderBytes + header.storedBytes);
 }
 

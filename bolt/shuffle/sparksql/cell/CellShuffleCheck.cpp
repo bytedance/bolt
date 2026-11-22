@@ -75,9 +75,7 @@ template <typename T>
 FOLLY_ALWAYS_INLINE uint32_t
 crc32cValues(uint32_t crc, const char* data, uint32_t bytes) {
   for (uint32_t at = 0; at < bytes; at += sizeof(T)) {
-    T actual;
-    std::memcpy(&actual, data + at, sizeof(T));
-    crc = crc32cValue(crc, actual);
+    crc = crc32cValue(crc, memory::loadUnaligned<T>(data + at));
   }
   return crc;
 }

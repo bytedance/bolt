@@ -390,7 +390,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
     {
       char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
       const int64_t length = view.size();
-      folly::storeUnaligned<int64_t>(slot, length);
+      memory::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
       if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
         flushEncoded<int64_t>(
@@ -994,7 +994,7 @@ void CellSplitter::closeDictSegment(
   uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
   ::memcpy(buf, cacheLine(dataStream, pid), serialized);
   buf[serialized] = last ? kDictLastMarker : kDictMoreMarker;
-  folly::storeUnaligned<uint32_t>(buf + serialized + 1, st.matched);
+  memory::storeUnaligned<uint32_t>(buf + serialized + 1, st.matched);
   const uint32_t bytes = serialized + 5;
   cells_.append(pid, dataStream, buf, bytes);
   bumpPartitionBytes(pid, bytes);
@@ -1206,7 +1206,7 @@ FOLLY_NOINLINE void CellSplitter::appendStringFallback(
   {
     char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
     const int64_t length = view.size();
-    folly::storeUnaligned<int64_t>(slot, length);
+    memory::storeUnaligned<int64_t>(slot, length);
     lengthCur[pid] += sizeof(int64_t);
     if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
       flushEncoded<int64_t>(

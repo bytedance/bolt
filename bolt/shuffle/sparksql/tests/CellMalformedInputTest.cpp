@@ -60,7 +60,7 @@ void put(std::string& out, T value) {
 /// `bytes` with `value` written at `at`.
 template <typename T>
 std::string with(std::string bytes, size_t at, T value) {
-  folly::storeUnaligned<T>(bytes.data() + at, value);
+  memory::storeUnaligned<T>(bytes.data() + at, value);
   return bytes;
 }
 
@@ -401,7 +401,7 @@ TEST(CellEncodingTest, narrowBigintBlocksMatchScalar) {
         auto* input = storage.data() + rotation;
         input[0] = makeEncodingByte(kind, bits);
         if (isFor) {
-          folly::storeUnaligned<int64_t>(input + 1, base);
+          memory::storeUnaligned<int64_t>(input + 1, base);
         }
         std::fill_n(input + headerBytes, bits, 0);
         std::array<int64_t, kCount> expected;

@@ -198,7 +198,7 @@ class BitAppender {
 
  private:
   void store(uint64_t word) {
-    folly::storeUnaligned<uint64_t>(out_, word);
+    memory::storeUnaligned<uint64_t>(out_, word);
     out_ += sizeof(word);
   }
 
@@ -1779,9 +1779,9 @@ uint64_t appendPayloadPrefix(
       std::numeric_limits<uint32_t>::max(),
       "null body exceeds u32 size limit");
   const auto nullStoredSize = static_cast<uint32_t>(nullStoredBytes);
-  folly::storeUnaligned<uint32_t>(
+  memory::storeUnaligned<uint32_t>(
       out->asMutable<char>() + nullSizesAt, nullStoredSize);
-  folly::storeUnaligned<uint32_t>(
+  memory::storeUnaligned<uint32_t>(
       out->asMutable<char>() + nullSizesAt + 4, nullDecodedSize);
   appendBytes(out, in.encodingTags.data(), in.encodingTags.size(), pool);
   return nullDecodedSize == 0 ? 0 : nullDecodedSize - nullStoredSize;
@@ -1801,7 +1801,7 @@ void writeCombinedRunHeader(
     uint64_t stored,
     std::span<const uint64_t> decodedSizes) {
   out[0] = static_cast<char>(layout);
-  folly::storeUnaligned<uint64_t>(out + 1, stored);
+  memory::storeUnaligned<uint64_t>(out + 1, stored);
   ::memcpy(out + 9, decodedSizes.data(), decodedSizes.size_bytes());
 }
 

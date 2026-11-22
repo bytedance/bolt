@@ -151,8 +151,7 @@ void RowBlockReader::decodeBlock(
         blockLabel,
         blockLabel);
   }
-  RowBlockHeader header;
-  ::memcpy(&header, rawHeader, sizeof(header));
+  const auto header = memory::loadUnaligned<RowBlockHeader>(rawHeader);
   const uint32_t rowCount = header.rowCount;
   const uint64_t decodedBytes = header.decodedBytes;
   const uint64_t stored = header.storedBytes;

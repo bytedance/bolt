@@ -41,6 +41,25 @@ FOLLY_ALWAYS_INLINE T loadUnaligned(const void* source) {
   return value;
 }
 
+/// Writes exactly sizeof(T) bytes in native byte order, without requiring
+/// destination alignment.
+template <typename T>
+FOLLY_ALWAYS_INLINE void storeUnaligned(void* destination, T value) {
+  static_assert(std::is_trivial_v<T> && std::is_standard_layout_v<T>);
+  ::memcpy(destination, &value, sizeof(T));
+}
+
+/// Reads `bytes` (0..8) into the low bytes of a uint64_t (little-endian host
+/// assumed) without reading past `source + bytes`.
+FOLLY_ALWAYS_INLINE uint64_t loadLowBytes(const void* source, size_t bytes) {
+  BOLT_DCHECK_LE(bytes, sizeof(uint64_t));
+  uint64_t value = 0;
+  if (bytes != 0) {
+    ::memcpy(&value, source, bytes);
+  }
+  return value;
+}
+
 namespace detail {
 
 template <size_t kWidth>

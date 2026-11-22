@@ -771,7 +771,7 @@ void NullCells::emitRecords(
     BOLT_CHECK(column.cells != nullptr, "records of a column without nulls");
     const Progress& progress = column.progress[pid];
     const uint32_t records = progress.moved + 1;
-    folly::storeUnaligned<uint32_t>(out, records);
+    memory::storeUnaligned<uint32_t>(out, records);
     out += sizeof(records);
     // The current cell's record goes last.
     walks[numWalks++] = {

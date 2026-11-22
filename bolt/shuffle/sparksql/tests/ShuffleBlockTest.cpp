@@ -265,9 +265,9 @@ TEST_F(ShuffleBlockTest, rowBlockReaderRejectsMalformedInput) {
   // Compressed layout without decompressor.
   {
     std::string bytes(kRowBlockHeaderBytes - 1 + 4, '\0');
-    folly::storeUnaligned<uint32_t>(bytes.data(), 1);
-    folly::storeUnaligned<uint64_t>(bytes.data() + 4, 4);
-    folly::storeUnaligned<uint64_t>(bytes.data() + 12, 4);
+    memory::storeUnaligned<uint32_t>(bytes.data(), 1);
+    memory::storeUnaligned<uint64_t>(bytes.data() + 4, 4);
+    memory::storeUnaligned<uint64_t>(bytes.data() + 12, 4);
     bytes[20] = static_cast<char>(RunLayout::kCombined);
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
@@ -279,9 +279,9 @@ TEST_F(ShuffleBlockTest, rowBlockReaderRejectsMalformedInput) {
   // Stored size mismatch for uncompressed block.
   {
     std::string bytes(kRowBlockHeaderBytes - 1 + 8, '\0');
-    folly::storeUnaligned<uint32_t>(bytes.data(), 1);
-    folly::storeUnaligned<uint64_t>(bytes.data() + 4, 4);
-    folly::storeUnaligned<uint64_t>(bytes.data() + 12, 5);
+    memory::storeUnaligned<uint32_t>(bytes.data(), 1);
+    memory::storeUnaligned<uint64_t>(bytes.data() + 4, 4);
+    memory::storeUnaligned<uint64_t>(bytes.data() + 12, 5);
     bytes[20] = static_cast<char>(RunLayout::kCombinedUncompressed);
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
@@ -299,9 +299,9 @@ TEST_F(ShuffleBlockTest, rowBlockReaderRejectsMalformedInput) {
     CodecDecompressor decompressor(lz4.get());
     RowBlockReader compressedReader(&decompressor, pool_.get());
     std::string header(kRowBlockHeaderBytes - 1, '\0');
-    folly::storeUnaligned<uint32_t>(header.data(), 1);
-    folly::storeUnaligned<uint64_t>(header.data() + 4, uint64_t{1} << 40);
-    folly::storeUnaligned<uint64_t>(header.data() + 12, 0);
+    memory::storeUnaligned<uint32_t>(header.data(), 1);
+    memory::storeUnaligned<uint64_t>(header.data() + 4, uint64_t{1} << 40);
+    memory::storeUnaligned<uint64_t>(header.data() + 12, 0);
     header[20] = static_cast<char>(RunLayout::kCombined);
     MemoryByteSource src(
         {reinterpret_cast<const uint8_t*>(header.data()), header.size()});

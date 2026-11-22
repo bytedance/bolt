@@ -107,6 +107,22 @@ TEST(MemoryCopyTest, loadUnalignedValuesAndAlignments) {
   }
 }
 
+TEST(MemoryCopyTest, storeUnalignedAndLoadLowBytes) {
+  alignas(64) std::array<char, 64 + sizeof(uint64_t)> buffer;
+  constexpr uint64_t kValue = 0x0123456789abcdefULL;
+  for (size_t offset = 0; offset < 64; ++offset) {
+    buffer.fill('\x5a');
+    storeUnaligned<uint64_t>(buffer.data() + offset, kValue);
+    EXPECT_EQ(loadUnaligned<uint64_t>(buffer.data() + offset), kValue);
+    for (size_t bytes = 0; bytes <= sizeof(uint64_t); ++bytes) {
+      const uint64_t mask = bytes == sizeof(uint64_t)
+          ? ~uint64_t{0}
+          : (uint64_t{1} << (bytes * 8)) - 1;
+      EXPECT_EQ(loadLowBytes(buffer.data() + offset, bytes), kValue & mask);
+    }
+  }
+}
+
 TEST(MemoryCopyTest, under64AllLengthsAndAlignments) {
   alignas(64) const auto source = sourceBytes();
   alignas(64) std::array<char, 512> actual;

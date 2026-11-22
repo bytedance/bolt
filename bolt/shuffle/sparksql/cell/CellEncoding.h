@@ -86,13 +86,13 @@ packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
     acc |= v << accBits;
     accBits += bits;
     if (accBits >= 64) {
-      folly::storeUnaligned<uint64_t>(out, acc);
+      memory::storeUnaligned<uint64_t>(out, acc);
       out += 8;
       accBits -= 64;
       acc = accBits == 0 ? 0 : v >> (bits - accBits);
     }
   }
-  folly::storeUnaligned<uint64_t>(out, acc);
+  memory::storeUnaligned<uint64_t>(out, acc);
   return out + (accBits + 7) / 8;
 }
 
@@ -161,16 +161,21 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   if (minValue == maxValue) {
     const uint32_t bytes =
         narrowBytesFor(static_cast<int64_t>(minValue), kWidth);
-    if (bytes < sourceBytes) {
-      out[0] = makeEncodingByte(EncodingKind::kConstNarrow, bytes);
-      folly::storeUnaligned<uint64_t>(
-          out + 1, static_cast<uint64_t>(static_cast<int64_t>(minValue)));
-      return 1 + bytes;
+    // Every constant block with count > 1 has bytes <= kWidth < count * kWidth;
+    // only a single full-width tail value ties kPlain.
+    if constexpr (std::is_integral_v<Count>) {
+      if (count == 1 && bytes == kWidth) {
+        out[0] = makeEncodingByte(EncodingKind::kPlain, 0);
+        memory::storeUnaligned<T>(out + 1, minValue);
+        return 1 + kWidth;
+      }
+    } else {
+      static_assert(Count::value > 1);
     }
-    // A single full-width tail value ties kPlain; retain the original choice.
-    out[0] = makeEncodingByte(EncodingKind::kPlain, 0);
-    ::memcpy(out + 1, values, sourceBytes);
-    return 1 + sourceBytes;
+    out[0] = makeEncodingByte(EncodingKind::kConstNarrow, bytes);
+    memory::storeUnaligned<uint64_t>(
+        out + 1, static_cast<uint64_t>(static_cast<int64_t>(minValue)));
+    return 1 + bytes;
   }
 
   // The kinds' parameters and body sizes, from the minimum and maximum
@@ -209,7 +214,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   uint8_t* pos = out;
   if (deltaBits <= 63 && forWins) {
     *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
-    folly::storeUnaligned<T>(pos, minValue);
+    memory::storeUnaligned<T>(pos, minValue);
     pos += kWidth;
     // Constant blocks returned above, so deltaBits is nonzero.
     const uint64_t base = static_cast<uint64_t>(minValue);
@@ -262,13 +267,6 @@ inline int64_t signExtend(uint64_t raw, uint32_t bits) {
   return static_cast<int64_t>(raw << shift) >> shift;
 }
 
-/// `bytes` bytes as the low bytes of a u64, little-endian host assumed.
-inline uint64_t loadLowBytes(const uint8_t* in, uint32_t bytes) {
-  uint64_t value = 0;
-  ::memcpy(&value, in, bytes);
-  return value;
-}
-
 /// Sign-extends a validated 1..8-byte value without reading past its body.
 /// Fixed-width loads avoid a partial stack store followed by a wider reload
 /// for the common widths.
@@ -283,7 +281,7 @@ FOLLY_ALWAYS_INLINE int64_t loadSignedBytes(const uint8_t* in, uint32_t bytes) {
     case 8:
       return memory::loadUnaligned<int64_t>(in);
     default:
-      return signExtend(loadLowBytes(in, bytes), bytes * 8);
+      return signExtend(memory::loadLowBytes(in, bytes), bytes * 8);
   }
 }
 
