@@ -107,6 +107,10 @@ class CodecDecompressor final : public ShuffleDecompressor {
     return decompressTimeNs_;
   }
 
+  const uint64_t* decompressTimeNsPtr() const {
+    return &decompressTimeNs_;
+  }
+
  private:
   Codec* const codec_;
   uint64_t decompressTimeNs_{0};
@@ -139,32 +143,13 @@ class ShuffleStreamCursor {
 
   /// Scoped timer that charges wall time minus decompression time to
   /// readTimeNs(). Timed per block rather than per small read.
-  class ReadTimer {
-   public:
-    explicit ReadTimer(ShuffleStreamCursor& cursor)
-        : cursor_(cursor),
-          start_(currentTimeNs()),
-          decompressStart_(cursor.decompressTimeNs()) {}
-
-    ~ReadTimer() {
-      const uint64_t elapsed = currentTimeNs() - start_;
-      const uint64_t decompress = cursor_.decompressTimeNs() - decompressStart_;
-      if (elapsed > decompress) {
-        cursor_.readTimeNs_ += elapsed - decompress;
-      }
-    }
-
-    ReadTimer(const ReadTimer&) = delete;
-    ReadTimer& operator=(const ReadTimer&) = delete;
-
-   private:
-    ShuffleStreamCursor& cursor_;
-    const uint64_t start_;
-    const uint64_t decompressStart_;
-  };
+  using ReadTimer = ExclusiveNanosecondTimer<uint64_t>;
 
   ReadTimer timeRead() {
-    return ReadTimer(*this);
+    return ReadTimer(
+        &readTimeNs_,
+        decompressor_ == nullptr ? nullptr
+                                 : decompressor_->decompressTimeNsPtr());
   }
 
   uint64_t readTimeNs() const {
@@ -176,10 +161,6 @@ class ShuffleStreamCursor {
   }
 
  private:
-  uint64_t decompressTimeNs() const {
-    return decompressor_ == nullptr ? 0 : decompressor_->decompressTimeNs();
-  }
-
   std::shared_ptr<ReaderStreamIterator> streams_;
   arrow::MemoryPool* const arrowPool_;
   const CodecDecompressor* const decompressor_;

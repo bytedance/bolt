@@ -153,10 +153,6 @@ void releaseOver(BufferPtr& buffer, size_t bytes) {
   }
 }
 
-uint64_t saturatingSub(uint64_t a, uint64_t b) {
-  return a > b ? a - b : 0;
-}
-
 } // namespace
 
 CellNestedShredder::CellNestedShredder(
@@ -239,8 +235,7 @@ void CellNestedShredder::followSeals() {
 }
 
 void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
-  const uint64_t start = currentTimeNs();
-  const uint64_t excluded = excludedNow();
+  ExclusiveNanosecondTimer timer(&shredNs_, excludedNs_);
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
@@ -280,7 +275,6 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   for (const uint32_t container : layout_.space(0).containers) {
     countRange(container, 0, numRows_);
   }
-  shredNs_ += saturatingSub(currentTimeNs() - start, excludedNow() - excluded);
 }
 
 NullClass CellNestedShredder::viewRows(uint32_t col) {
@@ -526,13 +520,14 @@ void CellNestedShredder::split(
     std::span<const uint32_t> partition2RowCount) {
   BOLT_CHECK_EQ(row2Partition.size(), static_cast<size_t>(numRows_));
   BOLT_CHECK_EQ(partition2RowCount.size(), numPartitions_);
-  const uint64_t start = currentTimeNs();
-  const uint64_t excluded = excludedNow();
+  splitNs_ = 0;
+  // splitNs_ leaves out the excluded time inside the splitter's calls: all
+  // of the excluded time comes off here.
+  ExclusiveNanosecondTimer timer(&shredNs_, &splitNs_, excludedNs_);
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
   };
-  splitNs_ = 0;
   // A seal since prepare() - a remote push before the split began - empties
   // its partitions here. None comes before the batch ends.
   followSeals();
@@ -591,10 +586,6 @@ void CellNestedShredder::split(
   }
   releaseOver(ones_, keep * sizeof(int16_t));
   releaseOver(identity_, keep * sizeof(vector_size_t));
-  // splitNs_ leaves out the excluded time inside the splitter's calls: all
-  // of the excluded time comes off here.
-  shredNs_ += saturatingSub(
-      currentTimeNs() - start, splitNs_ + (excludedNow() - excluded));
 }
 
 int64_t CellNestedShredder::releaseScratch() {
@@ -810,10 +801,8 @@ NullClass CellNestedShredder::view(uint32_t col, const ElementBatch& elements) {
 }
 
 void CellNestedShredder::wireColumns(const SplitBatch& batch) {
-  const uint64_t start = currentTimeNs();
-  const uint64_t excluded = excludedNow();
+  ExclusiveNanosecondTimer timer(&splitNs_, excludedNs_);
   splitter_.split(batch);
-  splitNs_ += saturatingSub(currentTimeNs() - start, excludedNow() - excluded);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

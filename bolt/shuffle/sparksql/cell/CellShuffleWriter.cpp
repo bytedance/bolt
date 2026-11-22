@@ -254,13 +254,9 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     initOnFirstBatch(*rv);
   }
   if (adapter_ != nullptr) {
-    const uint64_t start = currentTimeNs();
-    const uint64_t sealSpillStart = sealSpillNs_;
-    rv = adapter_->pack(rv, boltPool_);
     // Less the spills of a reclaim that the pack's allocations set off.
-    const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
-    const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
-    metrics_.convertTime += std::max<int64_t>(0, elapsed - sealSpill);
+    ExclusiveNanosecondTimer timer(&metrics_.convertTime, &sealSpillNs_);
+    rv = adapter_->pack(rv, boltPool_);
   }
   // Load lazy columns before sizing slices; unloaded columns estimate as zero.
   if (isLazyNotLoaded(*rv)) {
@@ -306,8 +302,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   if (shredder_ != nullptr) {
     return splitNested(std::move(rv));
   }
-  const uint64_t start = currentTimeNs();
-  const uint64_t sealSpillStart = sealSpillNs_;
+  ExclusiveNanosecondTimer splitTimer(&metrics_.splitTime, &sealSpillNs_);
   // Payload row counts are u32, independent of the reader's batch size.
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
@@ -329,41 +324,42 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     };
     RETURN_NOT_OK(computePartitions(*rv));
 
-    const uint64_t classifyStart = currentTimeNs();
     const uint32_t columnOffset = partitioner_->hasPid() ? 1 : 0;
     std::vector<DecodedVector> decoded(layout_.numColumns());
     std::vector<NullClass> nullClass(layout_.numColumns());
     bool anyNullable = false;
-    for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-      if (layout_.isUnknownColumn(col)) {
-        nullClass[col] = NullClass::kAllNull;
-        continue;
-      }
-      auto& column = decoded[col];
-      column.decode(*rv->childAt(col + columnOffset));
-      // Classify once so stale null buffers do not add a per-row bit test.
-      auto klass = NullClass::kNoNulls;
-      if (column.mayHaveNulls()) {
-        if (column.isConstantMapping()) {
-          klass =
-              column.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
-        } else if (column.isIdentityMapping()) {
-          const uint64_t* nulls = column.nulls();
-          if (nulls == nullptr || bits::isAllSet(nulls, 0, numRows, true)) {
-            klass = NullClass::kNoNulls;
-          } else if (bits::isAllSet(nulls, 0, numRows, false)) {
-            klass = NullClass::kAllNull;
+    {
+      NanosecondTimer classifyTimer(&nullClassifyNs_);
+      for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+        if (layout_.isUnknownColumn(col)) {
+          nullClass[col] = NullClass::kAllNull;
+          continue;
+        }
+        auto& column = decoded[col];
+        column.decode(*rv->childAt(col + columnOffset));
+        // Classify once so stale null buffers do not add a per-row bit test.
+        auto klass = NullClass::kNoNulls;
+        if (column.mayHaveNulls()) {
+          if (column.isConstantMapping()) {
+            klass =
+                column.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
+          } else if (column.isIdentityMapping()) {
+            const uint64_t* nulls = column.nulls();
+            if (nulls == nullptr || bits::isAllSet(nulls, 0, numRows, true)) {
+              klass = NullClass::kNoNulls;
+            } else if (bits::isAllSet(nulls, 0, numRows, false)) {
+              klass = NullClass::kAllNull;
+            } else {
+              klass = NullClass::kSomeNulls;
+            }
           } else {
             klass = NullClass::kSomeNulls;
           }
-        } else {
-          klass = NullClass::kSomeNulls;
         }
+        nullClass[col] = klass;
+        anyNullable = anyNullable || klass == NullClass::kSomeNulls;
       }
-      nullClass[col] = klass;
-      anyNullable = anyNullable || klass == NullClass::kSomeNulls;
     }
-    nullClassifyNs_ += currentTimeNs() - classifyStart;
     if (anyNullable) {
       // All nullable columns share this per-partition row index.
       rowIndexInPid_.resize(numRows);
@@ -396,15 +392,14 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   }
 
   maybeSeal();
-  const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
-  const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
-  metrics_.splitTime += std::max<int64_t>(0, elapsed - sealSpill);
   return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
-  const uint64_t start = currentTimeNs();
-  const uint64_t sealSpillStart = sealSpillNs_;
+  // Shredding and sealing are disjoint metrics, both excluded from splitTime.
+  uint64_t shredNs = 0;
+  ExclusiveNanosecondTimer splitTimer(
+      &metrics_.splitTime, &sealSpillNs_, &shredNs);
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
     sealWindow(SealReason::kPositionLimit);
@@ -442,12 +437,8 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   }
 
   maybeSeal();
-  // Shredding and sealing are disjoint metrics, both excluded from splitTime.
-  const int64_t shred = shredder_->takeShredTimeNs();
-  metrics_.flattenTime += shred;
-  const auto elapsed = static_cast<int64_t>(currentTimeNs() - start);
-  const auto sealSpill = static_cast<int64_t>(sealSpillNs_ - sealSpillStart);
-  metrics_.splitTime += std::max<int64_t>(0, elapsed - shred - sealSpill);
+  shredNs = static_cast<uint64_t>(shredder_->takeShredTimeNs());
+  metrics_.flattenTime += static_cast<int64_t>(shredNs);
   return arrow::Status::OK();
 }
 
@@ -570,16 +561,17 @@ void CellShuffleWriter::probeDictionary(
 
 CellShuffleWriter::SealSpillTimer::SealSpillTimer(CellShuffleWriter& writer)
     : writer_(
-          writer.inSplitCall() && !writer.timingSealSpill_ ? &writer : nullptr),
-      start_(writer_ != nullptr ? currentTimeNs() : 0) {
+          writer.inSplitCall() && !writer.timingSealSpill_ ? &writer
+                                                           : nullptr) {
   if (writer_ != nullptr) {
     writer_->timingSealSpill_ = true;
+    timer_.emplace(&writer_->sealSpillNs_);
   }
 }
 
 CellShuffleWriter::SealSpillTimer::~SealSpillTimer() {
   if (writer_ != nullptr) {
-    writer_->sealSpillNs_ += currentTimeNs() - start_;
+    timer_.reset();
     writer_->timingSealSpill_ = false;
   }
 }

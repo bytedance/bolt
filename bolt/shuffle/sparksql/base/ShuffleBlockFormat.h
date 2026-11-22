@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -111,7 +112,54 @@ inline uint64_t framedRowBytes(const void* row) {
   return sizeof(int32_t) + static_cast<uint64_t>(framedRowSize(row));
 }
 
-uint64_t currentTimeNs();
+/// Measures steady_clock wall time and adds the elapsed nanoseconds, minus the
+/// delta of up to two excluded nanosecond counters (e.g. nested spill,
+/// decompression, or shred timers), to `*target` on destruction.
+template <typename Target>
+class ExclusiveNanosecondTimer {
+ public:
+  explicit ExclusiveNanosecondTimer(
+      Target* target,
+      const uint64_t* excluded1 = nullptr,
+      const uint64_t* excluded2 = nullptr)
+      : target_(target),
+        excluded1_(excluded1),
+        excluded2_(excluded2),
+        excluded1Start_(excluded1 != nullptr ? *excluded1 : 0),
+        excluded2Start_(excluded2 != nullptr ? *excluded2 : 0),
+        start_(std::chrono::steady_clock::now()) {}
+
+  ~ExclusiveNanosecondTimer() {
+    if (target_ == nullptr) {
+      return;
+    }
+    const auto elapsed = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start_)
+            .count());
+    uint64_t excluded = 0;
+    if (excluded1_ != nullptr && *excluded1_ > excluded1Start_) {
+      excluded += *excluded1_ - excluded1Start_;
+    }
+    if (excluded2_ != nullptr && *excluded2_ > excluded2Start_) {
+      excluded += *excluded2_ - excluded2Start_;
+    }
+    if (elapsed > excluded) {
+      *target_ += static_cast<Target>(elapsed - excluded);
+    }
+  }
+
+  ExclusiveNanosecondTimer(const ExclusiveNanosecondTimer&) = delete;
+  ExclusiveNanosecondTimer& operator=(const ExclusiveNanosecondTimer&) = delete;
+
+ private:
+  Target* const target_;
+  const uint64_t* const excluded1_;
+  const uint64_t* const excluded2_;
+  const uint64_t excluded1Start_;
+  const uint64_t excluded2Start_;
+  const std::chrono::steady_clock::time_point start_;
+};
 
 /// Sets the size of `buffer`, allocating or growing it from `pool`, and
 /// returns its data. Keeps the bytes - growth copies them and doubles the

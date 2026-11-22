@@ -17,9 +17,11 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <span>
 #include <string>
 
+#include "bolt/common/time/Timer.h"
 #include "bolt/vector/ComplexVector.h"
 
 #include "bolt/shuffle/sparksql/base/CompositeShuffleWriter.h"
@@ -141,7 +143,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
    private:
     /// Null when this one times nothing.
     CellShuffleWriter* const writer_;
-    const uint64_t start_;
+    std::optional<NanosecondTimer> timer_;
   };
 
   void initOnFirstBatch(const RowVector& rv);

@@ -21,6 +21,7 @@
 #include <numeric>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/FlatVector.h"
@@ -223,10 +224,12 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     }
     const auto status = computePartitions(*rv);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
-    const uint64_t start = currentTimeNs();
-    converter_.convert(rv, row2Partition_, heldRows_);
-    metrics_.convertTime +=
-        std::max<int64_t>(0, static_cast<int64_t>(currentTimeNs() - start));
+    uint64_t convertNs = 0;
+    {
+      NanosecondTimer timer(&convertNs);
+      converter_.convert(rv, row2Partition_, heldRows_);
+    }
+    metrics_.convertTime += static_cast<int64_t>(convertNs);
     heldRowBytes_ += rv->totalRowSize();
     metrics_.totalInputRowNumber += numRows;
     metrics_.totalInputBatches += 1;

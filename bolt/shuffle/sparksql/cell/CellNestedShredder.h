@@ -230,11 +230,6 @@ class CellNestedShredder {
 
   void wireColumns(const SplitBatch& batch);
 
-  /// The excluded clock now; 0 without one.
-  uint64_t excludedNow() const {
-    return excludedNs_ != nullptr ? *excludedNs_ : 0;
-  }
-
   /// `n` elements of a pool buffer kept across batches.
   template <typename T>
   T* scratch(BufferPtr& buffer, size_t n);

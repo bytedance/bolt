@@ -18,12 +18,12 @@
 
 #include <folly/Portability.h>
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -32,12 +32,6 @@ static_assert(folly::kIsLittleEndian, "little-endian wire format assumed");
 static_assert(
     sizeof(RowBlockHeader) == 22,
     "RowBlockHeader wire size must remain 22 bytes");
-
-uint64_t currentTimeNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
   if (buffer == nullptr) {
@@ -120,17 +114,19 @@ void buildRowBlock(
       rawBytes,
       RunLayout::kCombinedUncompressed};
   if (codec != nullptr && rawBytes >= kMinCompressBytes) {
-    const uint64_t start = currentTimeNs();
-    resetBuffer(
-        compressedBuffer,
-        codec->maxCompressedLen(rawBytes),
-        memory::spillMemoryPool());
-    const int64_t written = codec->compress(
-        reinterpret_cast<const uint8_t*>(body),
-        static_cast<int64_t>(rawBytes),
-        compressedBuffer->asMutable<uint8_t>(),
-        static_cast<int64_t>(compressedBuffer->size()));
-    compressTimeNs += currentTimeNs() - start;
+    int64_t written = 0;
+    {
+      NanosecondTimer timer(&compressTimeNs);
+      resetBuffer(
+          compressedBuffer,
+          codec->maxCompressedLen(rawBytes),
+          memory::spillMemoryPool());
+      written = codec->compress(
+          reinterpret_cast<const uint8_t*>(body),
+          static_cast<int64_t>(rawBytes),
+          compressedBuffer->asMutable<uint8_t>(),
+          static_cast<int64_t>(compressedBuffer->size()));
+    }
     if (written > 0 && static_cast<uint64_t>(written) < rawBytes) {
       header.storedBytes = static_cast<uint64_t>(written);
       header.layout = RunLayout::kCombined;
