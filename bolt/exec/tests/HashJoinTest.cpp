@@ -981,6 +981,7 @@ class HashJoinTest : public HiveConnectorTestBase {
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
+    memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
     op->pool()->reclaim(targetBytes, 0, reclaimerStats);
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
