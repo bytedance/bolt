@@ -118,6 +118,11 @@ make release_spark
 make export_release
 ```
 
+> [!TIP]
+> Before building Gluten, we recommend installing JDK 17 and Maven. If Maven
+> fails to download dependencies, configure a mirror repository in
+> `~/.m2/settings.xml`.
+
 Then clone the official Apache Gluten repository and build the Bolt backend and Gluten JAR:
 
 ```shell
