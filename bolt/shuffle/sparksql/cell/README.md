@@ -159,7 +159,7 @@ push channel.
 ```text
 ReaderStreamIterator
     |
-CompositeShuffleReader (ShuffleStreamCursor + CodecDecompressor)
+CompositeShuffleReader (StreamByteSource + CodecDecompressor)
     +-- kCompositeRows --> RowBlockReader --> CompositeRowVector
     |
     +-- kCellPayload --> CellShuffleReader
@@ -172,7 +172,7 @@ CompositeShuffleReader (ShuffleStreamCursor + CodecDecompressor)
                          RowVector batches
 ```
 
-- `CompositeShuffleReader` reads streams through `ShuffleStreamCursor`,
+- `CompositeShuffleReader` traverses streams via `StreamByteSource`,
   decompresses via `CodecDecompressor`, and decodes `kCompositeRows` blocks
   into `CompositeRowVector` batches via `RowBlockReader`.
 - `CellShuffleReader` handles `kCellPayload` blocks: `CellPayloadDecoder`
@@ -563,7 +563,7 @@ output.
 | --- | --- |
 | `../base/ShuffleBlockFormat.h` / `.cpp` | Shared block kind, compression layout, packed `RowBlockHeader`, framed row block writer, and buffer helpers |
 | `../base/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`) and `ShuffleDecompressor` |
-| `../base/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, `ShuffleStreamCursor`, and `RowBlockReader` |
+| `../base/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, and `RowBlockReader` |
 | `../base/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
 | `../base/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
 | `../base/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |

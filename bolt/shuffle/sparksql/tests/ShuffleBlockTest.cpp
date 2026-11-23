@@ -190,28 +190,31 @@ TEST_F(ShuffleBlockTest, rowBlockAppendCombinesBlocksAcrossStreams) {
     return toCharVec(block);
   };
 
-  // Place an empty stream between two block-bearing streams to verify
-  // ShuffleStreamCursor skips empty streams cleanly and RowBlockReader::append
+  // Place empty streams around two block-bearing streams to verify
+  // StreamByteSource handles empty streams cleanly and RowBlockReader::append
   // combines small blocks across streams into one RowBlock.
   auto streams = std::make_shared<test::MemoryReaderStreamIterator>(
       std::vector<std::vector<char>>{
           {}, makeBlock(firstRows), {}, makeBlock(secondRows), {}});
 
   CodecDecompressor decompressor(lz4.get());
-  ShuffleStreamCursor cursor(streams, arrow::default_memory_pool());
   RowBlockReader reader(&decompressor, pool_.get());
 
   RowBlock combined;
-  while (true) {
-    const auto kind = cursor.nextBlockKind();
-    if (!kind.has_value()) {
-      break;
+  uint64_t streamsOpened = 0;
+  while (auto in = streams->nextStream(arrow::default_memory_pool())) {
+    ++streamsOpened;
+    StreamByteSource src(std::move(in));
+    while (!src.atEnd()) {
+      uint8_t rawKind = 0;
+      ASSERT_TRUE(src.read(&rawKind, 1));
+      ASSERT_EQ(
+          static_cast<ShuffleBlockKind>(rawKind), ShuffleBlockKind::kRows);
+      reader.append(src, combined, ShuffleBlockKind::kRows);
     }
-    ASSERT_EQ(*kind, ShuffleBlockKind::kRows);
-    reader.append(cursor.source(), combined, ShuffleBlockKind::kRows);
   }
 
-  EXPECT_EQ(cursor.streamsOpened(), 5);
+  EXPECT_EQ(streamsOpened, 5);
   ASSERT_EQ(combined.buffers.size(), 2);
   ASSERT_EQ(combined.rows.size(), firstRows.size() + secondRows.size());
   EXPECT_EQ(combined.rowBytes, 64 * 24);

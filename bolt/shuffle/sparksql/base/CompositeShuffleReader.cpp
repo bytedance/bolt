@@ -36,17 +36,42 @@ CompositeShuffleReader::CompositeShuffleReader(
     : decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
-      cursor_(std::move(streams), arrowPool),
+      streams_(std::move(streams)),
+      arrowPool_(arrowPool),
       rowBlockReader_(decompressor_.get(), pool),
       pool_(pool),
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
-      compositeConverter_(outputType, pool_) {}
+      compositeConverter_(outputType, pool_) {
+  BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
+}
+
+std::optional<ShuffleBlockKind> CompositeShuffleReader::nextBlockKind() {
+  while (!exhausted_) {
+    if (source_ == nullptr) {
+      auto in = streams_->nextStream(arrowPool_);
+      if (in == nullptr) {
+        exhausted_ = true;
+        return std::nullopt;
+      }
+      source_ = std::make_unique<StreamByteSource>(std::move(in));
+      ++streamsOpened_;
+    }
+    if (source_->atEnd()) {
+      source_.reset();
+      continue;
+    }
+    uint8_t rawKind = 0;
+    BOLT_CHECK(source_->read(&rawKind, 1), "truncated shuffle block");
+    return static_cast<ShuffleBlockKind>(rawKind);
+  }
+  return std::nullopt;
+}
 
 void CompositeShuffleReader::readCompositeBlock() {
   nextCompositeRow_ = 0;
   rowBlockReader_.read(
-      cursor_.source(), compositeBlock_, ShuffleBlockKind::kCompositeRows);
+      *source_, compositeBlock_, ShuffleBlockKind::kCompositeRows);
 }
 
 RowVectorPtr CompositeShuffleReader::nextComposite() {

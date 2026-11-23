@@ -19,7 +19,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -27,10 +26,13 @@
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
-#include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
 #include "bolt/shuffle/sparksql/base/ShuffleByteSource.h"
 #include "bolt/vector/ComplexVector.h"
+
+namespace arrow::io {
+class InputStream;
+} // namespace arrow::io
 
 namespace bytedance::bolt::shuffle::sparksql {
 
@@ -110,39 +112,6 @@ class CodecDecompressor final : public ShuffleDecompressor {
  private:
   Codec* const codec_;
   uint64_t decompressTimeNs_{0};
-};
-
-/// Advances across ReaderStreamIterator streams, skipping empty streams and
-/// reading each block's leading kind byte.
-class ShuffleStreamCursor {
- public:
-  ShuffleStreamCursor(
-      std::shared_ptr<ReaderStreamIterator> streams,
-      arrow::MemoryPool* arrowPool)
-      : streams_(std::move(streams)), arrowPool_(arrowPool) {
-    BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
-  }
-
-  /// Opens streams until a non-empty stream yields a block kind byte.
-  /// Returns std::nullopt when every stream is exhausted.
-  std::optional<ShuffleBlockKind> nextBlockKind();
-
-  /// Active byte source for the block whose kind byte was just consumed.
-  ShuffleByteSource& source() {
-    BOLT_CHECK_NOT_NULL(source_, "no active shuffle stream");
-    return *source_;
-  }
-
-  uint64_t streamsOpened() const {
-    return streamsOpened_;
-  }
-
- private:
-  std::shared_ptr<ReaderStreamIterator> streams_;
-  arrow::MemoryPool* const arrowPool_;
-  std::unique_ptr<StreamByteSource> source_;
-  bool exhausted_{false};
-  uint64_t streamsOpened_{0};
 };
 
 /// Decoded framed rows from one or more row blocks. `buffers` owns the

@@ -84,28 +84,6 @@ bool CodecDecompressor::decompress(
              decodedSize) == decodedSize;
 }
 
-std::optional<ShuffleBlockKind> ShuffleStreamCursor::nextBlockKind() {
-  while (!exhausted_) {
-    if (source_ == nullptr) {
-      auto in = streams_->nextStream(arrowPool_);
-      if (in == nullptr) {
-        exhausted_ = true;
-        return std::nullopt;
-      }
-      source_ = std::make_unique<StreamByteSource>(std::move(in));
-      ++streamsOpened_;
-    }
-    if (source_->atEnd()) {
-      source_.reset();
-      continue;
-    }
-    uint8_t rawKind = 0;
-    BOLT_CHECK(source_->read(&rawKind, 1), "truncated shuffle block");
-    return static_cast<ShuffleBlockKind>(rawKind);
-  }
-  return std::nullopt;
-}
-
 void RowBlockReader::read(
     ShuffleByteSource& in,
     RowBlock& out,

@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
@@ -30,7 +31,7 @@ namespace bytedance::bolt::shuffle::sparksql {
 class Codec;
 
 /// Base reader for block-based shuffle formats produced by
-/// CompositeShuffleWriter subclasses. Owns the stream cursor, decompressor,
+/// CompositeShuffleWriter subclasses. Owns stream traversal, decompression,
 /// row-block reader, composite-row deserialization, and common timing/count
 /// metrics. Subclasses decode their format-specific non-composite blocks via
 /// nextNonComposite() and readNextBlock().
@@ -76,7 +77,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
   }
 
   uint64_t streamsRead() const override {
-    return cursor_.streamsOpened();
+    return streamsOpened_;
   }
 
  protected:
@@ -99,7 +100,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
     // Opening streams and reading blocks is the input's share of decode time,
     // decompression aside. Timed per block, not per read.
     NanosecondTimer timer(&readAndDecompressTimeNs_);
-    const auto kind = cursor_.nextBlockKind();
+    const auto kind = nextBlockKind();
     if (!kind.has_value()) {
       return false;
     }
@@ -107,7 +108,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
       readCompositeBlock();
       return false;
     }
-    onBlock(*kind, cursor_.source());
+    onBlock(*kind, *source_);
     return true;
   }
 
@@ -136,6 +137,10 @@ class CompositeShuffleReader : public BlockShuffleReader {
   }
 
  private:
+  /// Opens streams until a non-empty stream yields a block kind byte.
+  /// Returns std::nullopt when every stream is exhausted.
+  std::optional<ShuffleBlockKind> nextBlockKind();
+
   bool hasCompositeRows() const {
     return nextCompositeRow_ < compositeBlock_.rows.size();
   }
@@ -147,7 +152,11 @@ class CompositeShuffleReader : public BlockShuffleReader {
   RowVectorPtr nextComposite();
 
   std::unique_ptr<CodecDecompressor> decompressor_;
-  ShuffleStreamCursor cursor_;
+  std::shared_ptr<ReaderStreamIterator> streams_;
+  arrow::MemoryPool* const arrowPool_;
+  std::unique_ptr<StreamByteSource> source_;
+  bool exhausted_{false};
+  uint64_t streamsOpened_{0};
   RowBlockReader rowBlockReader_;
   memory::MemoryPool* const pool_;
   const int32_t batchSize_;
