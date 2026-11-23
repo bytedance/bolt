@@ -16,8 +16,8 @@
 
 #pragma once
 
+#include <sys/types.h>
 #include <atomic>
-#include <cstdio>
 #include <deque>
 #include <functional>
 #include <initializer_list>
@@ -32,6 +32,97 @@
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+
+namespace detail {
+
+/// Buffered POSIX file descriptor supporting sequential writes, in-buffer
+/// patching, pread, and zero-copy fd-to-fd transfers without stdio buffering
+/// conflicts.
+class BufferedFile {
+ public:
+  BufferedFile() = default;
+  ~BufferedFile() {
+    closeNoThrow();
+  }
+
+  BufferedFile(const BufferedFile&) = delete;
+  BufferedFile& operator=(const BufferedFile&) = delete;
+
+  void open(const std::string& path, int flags, mode_t mode = 0644);
+
+  bool isOpen() const {
+    return fd_ >= 0;
+  }
+
+  int fd() const {
+    return fd_;
+  }
+
+  uint64_t end() const {
+    return end_;
+  }
+
+  uint64_t flushedEnd() const {
+    return flushedEnd_;
+  }
+
+  /// Appends `bytes` sequentially, buffering writes smaller than the write
+  /// buffer and bypassing it for larger writes.
+  void write(const void* data, size_t bytes, uint64_t& writeTimeNs);
+
+  /// Overwrites `bytes` at `offset` (within [0, end())). Bytes still in the
+  /// user-space buffer are patched in place; bytes already written to `fd_`
+  /// are patched directly via pwrite().
+  void
+  patch(uint64_t offset, const void* data, size_t bytes, uint64_t& writeTimeNs);
+
+  /// Flushes the user-space buffer to `fd_`.
+  void flush(uint64_t& writeTimeNs);
+
+  /// Reads `bytes` starting at `offset` from `fd_` and/or the unflushed buffer.
+  void read(uint64_t offset, void* out, size_t bytes) const;
+
+  /// Copies `bytes` starting at `srcOffset` from `srcFd` into this file.
+  /// Large copies use Linux copy_file_range() for kernel-to-kernel zero-copy
+  /// (falling back on cross-filesystem/unsupported errors); smaller copies
+  /// pread directly into the write buffer with no bounce copy.
+  void copyFromFd(
+      int srcFd,
+      uint64_t srcOffset,
+      uint64_t bytes,
+      uint64_t& writeTimeNs);
+
+  /// Flushes and closes `fd_`.
+  void close(uint64_t& writeTimeNs);
+
+  /// Closes `fd_` without throwing (for destructors / remove()).
+  void closeNoThrow();
+
+ private:
+  static constexpr size_t kWriteBufferBytes = 512 << 10;
+  static constexpr uint64_t kCopyFileRangeMinBytes = 256 << 10;
+
+  void writeAllFd(const void* data, size_t bytes, uint64_t& writeTimeNs);
+  void pwriteAllFd(
+      uint64_t offset,
+      const void* data,
+      size_t bytes,
+      uint64_t& writeTimeNs);
+  void preadDirect(
+      int srcFd,
+      uint64_t srcOffset,
+      uint64_t bytes,
+      uint64_t& writeTimeNs);
+
+  int fd_{-1};
+  std::vector<char> buffer_;
+  uint64_t flushedEnd_{0};
+  uint64_t end_{0};
+};
+
+} // namespace detail
+
+class DataFileWriter;
 
 /// Temporary shuffle storage shared by a task's local spillers: appended in
 /// time order, read back at any offset. On local disk, the file is created on
@@ -178,6 +269,8 @@ class ShuffleSpillFile {
   }
 
  private:
+  friend class DataFileWriter;
+
   void openFile();
 
   /// Takes a block when the last block is full: a new one from `pool_`, or the
@@ -217,8 +310,7 @@ class ShuffleSpillFile {
   uint64_t flushes_{0};
   uint64_t directBytes_{0};
 
-  std::FILE* file_{nullptr};
-  int fd_{-1};
+  detail::BufferedFile file_;
   std::string path_;
   uint64_t end_{0};
   /// Where the bytes in memory start: everything before is on disk.
@@ -232,8 +324,6 @@ class ShuffleSpillFile {
   uint64_t writeTimeNs_{0};
   /// Start offsets of non-empty spill runs in this file, ascending.
   std::vector<uint64_t> spillStarts_;
-  /// patch()es not applied yet: offset and bytes.
-  std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
 
 /// The task's final data file, written once, partition by partition.
@@ -241,7 +331,7 @@ class ShuffleSpillFile {
 class DataFileWriter {
  public:
   DataFileWriter(const std::string& path, uint32_t numPartitions);
-  ~DataFileWriter();
+  ~DataFileWriter() = default;
 
   /// Subsequent writes count towards partition `pid`.
   void beginPartition(uint32_t pid);
@@ -250,15 +340,17 @@ class DataFileWriter {
 
   /// Bytes written so far: where the next write lands.
   uint64_t position() const {
-    return static_cast<uint64_t>(bytes_);
+    return file_.end();
   }
 
-  /// Overwrites `bytes` already written at `position`. Applied at close(),
-  /// so a patch per run does not break up the buffered writes.
+  /// Overwrites `bytes` already written at `position`. Patches still in the
+  /// user-space write buffer apply in place without a syscall; only bytes
+  /// already flushed to the OS fall back to pwrite().
   void patch(uint64_t position, const void* data, size_t bytes);
 
-  /// Copies `bytes` of `spill` from `begin`: the part on disk through a
-  /// bounce buffer, the part in memory straight from its blocks.
+  /// Copies `bytes` of `spill` from `begin`: the part on disk via
+  /// copy_file_range() or direct-to-buffer pread (no bounce copy), the part in
+  /// memory straight from its blocks.
   void copyFrom(const ShuffleSpillFile& spill, uint64_t begin, uint64_t bytes);
 
   /// Flushes and closes; fills partitionLengths, totalBytesWritten and
@@ -266,13 +358,10 @@ class DataFileWriter {
   void close(ShuffleWriterMetrics& metrics);
 
  private:
-  std::FILE* file_;
+  detail::BufferedFile file_;
   std::vector<int64_t> lengths_;
   uint32_t pid_{0};
-  int64_t bytes_{0};
   uint64_t writeTimeNs_{0};
-  /// patch()es not applied yet: position and bytes.
-  std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
 
 /// A local output that spills into a shared ShuffleSpillFile, in pieces that

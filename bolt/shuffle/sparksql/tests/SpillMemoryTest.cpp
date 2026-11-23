@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 
@@ -390,6 +391,91 @@ TEST_F(SpillMemoryTest, zeroByteAppendCreatesNoSpillFile) {
   EXPECT_EQ(spill.end(), 0u);
   EXPECT_EQ(spill.bytesWritten(), 0);
   EXPECT_FALSE(std::filesystem::exists(opts.dataFile + ".zero.spill"));
+}
+
+TEST_F(SpillMemoryTest, dataFileWriterPatchesAndCopyFromFastPaths) {
+  // Exercises DataFileWriter's 512 KiB write buffer:
+  // - in-buffer patch, overflow pwrite patch, and straddling patch
+  // - copyFrom() on small on-disk (< 256 KiB), large on-disk (>= 256 KiB,
+  //   copy_file_range), and straddling disk/memory ranges.
+  const auto opts = options();
+  ShuffleSpillFile spill(opts, "copy", pool_.get(), kCap);
+  std::string spillExpected;
+  // Write 400 KiB so the first > 336 KiB is on disk and the newest 64 KiB stays
+  // in memory blocks.
+  appendPieces(spill, spillExpected, 400 << 10);
+  spill.flush();
+  spill.freeze();
+  ASSERT_GE(spill.bytesWritten(), 300 << 10);
+  ASSERT_LT(static_cast<size_t>(spill.bytesWritten()), spillExpected.size());
+
+  const std::string dataPath = dir_ + "/data_fast_copy";
+  std::string expected;
+  ShuffleWriterMetrics metrics;
+  {
+    DataFileWriter writer(dataPath, 3);
+    // Partition 0: write 600 KiB in small pieces so the first 512 KiB flushes
+    // to fd_, then patch an early flushed offset, a straddling offset, and an
+    // in-buffer tail offset.
+    writer.beginPartition(0);
+    std::string p0(600 << 10, '\0');
+    for (auto& ch : p0) {
+      ch = static_cast<char>(rng_());
+    }
+    for (size_t off = 0; off < p0.size(); off += 12 << 10) {
+      const size_t piece = std::min<size_t>(12 << 10, p0.size() - off);
+      writer.write(p0.data() + off, piece);
+    }
+    const std::string earlyPatch = "EARLY_HDR";
+    const std::string straddlePatch = "STRADDLE_BOUNDARY";
+    const std::string tailPatch = "INBUF_HDR";
+    const uint64_t straddlePos = (512 << 10) - 6;
+    const uint64_t tailPos = (580 << 10);
+    writer.patch(16, earlyPatch.data(), earlyPatch.size());
+    p0.replace(16, earlyPatch.size(), earlyPatch);
+    writer.patch(straddlePos, straddlePatch.data(), straddlePatch.size());
+    p0.replace(straddlePos, straddlePatch.size(), straddlePatch);
+    writer.patch(tailPos, tailPatch.data(), tailPatch.size());
+    p0.replace(tailPos, tailPatch.size(), tailPatch);
+    expected += p0;
+
+    // Partition 1: small on-disk slice (< 256 KiB -> direct-to-buffer pread) +
+    // straddling disk/memory tail.
+    writer.beginPartition(1);
+    const uint64_t smallSlice = 37 << 10;
+    writer.copyFrom(spill, 0, smallSlice);
+    expected += spillExpected.substr(0, smallSlice);
+    const uint64_t straddleBegin =
+        static_cast<uint64_t>(spill.bytesWritten()) - (10 << 10);
+    const uint64_t straddleLen = spillExpected.size() - straddleBegin;
+    writer.copyFrom(spill, straddleBegin, straddleLen);
+    expected += spillExpected.substr(straddleBegin, straddleLen);
+
+    // Partition 2: large on-disk + memory slice (>= 256 KiB -> copy_file_range
+    // for the disk prefix, direct write for the in-memory suffix).
+    writer.beginPartition(2);
+    writer.copyFrom(spill, 0, spillExpected.size());
+    expected += spillExpected;
+
+    writer.close(metrics);
+  }
+
+  ASSERT_EQ(metrics.partitionLengths.size(), 3u);
+  EXPECT_EQ(metrics.partitionLengths[0], 600 << 10);
+  EXPECT_EQ(
+      metrics.partitionLengths[1],
+      static_cast<int64_t>(
+          (37 << 10) + spillExpected.size() -
+          (static_cast<size_t>(spill.bytesWritten()) - (10 << 10))));
+  EXPECT_EQ(
+      metrics.partitionLengths[2], static_cast<int64_t>(spillExpected.size()));
+  EXPECT_EQ(metrics.totalBytesWritten, static_cast<int64_t>(expected.size()));
+
+  std::ifstream in(dataPath, std::ios::binary);
+  ASSERT_TRUE(in.good());
+  std::string actual(
+      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(actual, expected);
 }
 
 } // namespace

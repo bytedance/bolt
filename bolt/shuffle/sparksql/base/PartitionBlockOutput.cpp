@@ -16,12 +16,16 @@
 
 #include "bolt/shuffle/sparksql/base/PartitionBlockOutput.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <random>
 
+#include <folly/FileUtil.h>
 #include <folly/ScopeGuard.h>
+#include <folly/String.h>
 #include <folly/lang/Bits.h>
 
 #include "bolt/common/base/Exceptions.h"
@@ -29,6 +33,233 @@
 #include "bolt/shuffle/sparksql/Utils.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+
+namespace detail {
+
+void BufferedFile::open(const std::string& path, int flags, mode_t mode) {
+  BOLT_CHECK_LT(fd_, 0, "BufferedFile is already open");
+  fd_ = ::open(path.c_str(), flags, mode);
+  BOLT_CHECK_GE(fd_, 0, "Failed to open {}: {}", path, folly::errnoStr(errno));
+  flushedEnd_ = 0;
+  end_ = 0;
+  buffer_.clear();
+}
+
+void BufferedFile::writeAllFd(
+    const void* data,
+    size_t bytes,
+    uint64_t& writeTimeNs) {
+  ssize_t written;
+  {
+    NanosecondTimer timer(&writeTimeNs);
+    written = folly::writeFull(fd_, data, bytes);
+  }
+  BOLT_CHECK_EQ(
+      written,
+      static_cast<ssize_t>(bytes),
+      "shuffle file write failed: {}",
+      written < 0 ? folly::errnoStr(errno) : "short write");
+}
+
+void BufferedFile::pwriteAllFd(
+    uint64_t offset,
+    const void* data,
+    size_t bytes,
+    uint64_t& writeTimeNs) {
+  ssize_t written;
+  {
+    NanosecondTimer timer(&writeTimeNs);
+    written = folly::pwriteFull(fd_, data, bytes, static_cast<off_t>(offset));
+  }
+  BOLT_CHECK_EQ(
+      written,
+      static_cast<ssize_t>(bytes),
+      "shuffle file patch failed: {}",
+      written < 0 ? folly::errnoStr(errno) : "short write");
+}
+
+void BufferedFile::write(
+    const void* data,
+    size_t bytes,
+    uint64_t& writeTimeNs) {
+  if (bytes == 0) {
+    return;
+  }
+  if (bytes >= kWriteBufferBytes) {
+    flush(writeTimeNs);
+    writeAllFd(data, bytes, writeTimeNs);
+    flushedEnd_ += bytes;
+    end_ = flushedEnd_;
+    return;
+  }
+  if (buffer_.size() + bytes > kWriteBufferBytes) {
+    flush(writeTimeNs);
+  }
+  if (buffer_.capacity() < kWriteBufferBytes) {
+    buffer_.reserve(kWriteBufferBytes);
+  }
+  const auto* src = static_cast<const char*>(data);
+  buffer_.insert(buffer_.end(), src, src + bytes);
+  end_ += bytes;
+}
+
+void BufferedFile::patch(
+    uint64_t offset,
+    const void* data,
+    size_t bytes,
+    uint64_t& writeTimeNs) {
+  BOLT_CHECK(
+      offset <= end_ && bytes <= end_ - offset,
+      "shuffle file patch beyond its end");
+  if (bytes == 0) {
+    return;
+  }
+  const auto* src = static_cast<const char*>(data);
+  if (offset < flushedEnd_) {
+    const size_t onFd = std::min<uint64_t>(bytes, flushedEnd_ - offset);
+    pwriteAllFd(offset, src, onFd, writeTimeNs);
+    offset += onFd;
+    src += onFd;
+    bytes -= onFd;
+  }
+  if (bytes > 0) {
+    ::memcpy(buffer_.data() + (offset - flushedEnd_), src, bytes);
+  }
+}
+
+void BufferedFile::flush(uint64_t& writeTimeNs) {
+  if (buffer_.empty()) {
+    return;
+  }
+  writeAllFd(buffer_.data(), buffer_.size(), writeTimeNs);
+  flushedEnd_ += buffer_.size();
+  buffer_.clear();
+}
+
+void BufferedFile::read(uint64_t offset, void* out, size_t bytes) const {
+  BOLT_CHECK(
+      offset <= end_ && bytes <= end_ - offset,
+      "shuffle file read beyond what was written");
+  if (bytes == 0) {
+    return;
+  }
+  auto* dst = static_cast<char*>(out);
+  if (offset < flushedEnd_) {
+    const size_t onFd = std::min<uint64_t>(bytes, flushedEnd_ - offset);
+    const ssize_t n =
+        folly::preadFull(fd_, dst, onFd, static_cast<off_t>(offset));
+    BOLT_CHECK_EQ(
+        n,
+        static_cast<ssize_t>(onFd),
+        "shuffle file read failed: {}",
+        n < 0 ? folly::errnoStr(errno) : "unexpected EOF");
+    offset += onFd;
+    dst += onFd;
+    bytes -= onFd;
+  }
+  if (bytes > 0) {
+    ::memcpy(dst, buffer_.data() + (offset - flushedEnd_), bytes);
+  }
+}
+
+void BufferedFile::preadDirect(
+    int srcFd,
+    uint64_t srcOffset,
+    uint64_t bytes,
+    uint64_t& writeTimeNs) {
+  if (bytes == 0) {
+    return;
+  }
+  if (buffer_.capacity() < kWriteBufferBytes) {
+    buffer_.reserve(kWriteBufferBytes);
+  }
+  while (bytes > 0) {
+    if (buffer_.size() == kWriteBufferBytes) {
+      flush(writeTimeNs);
+    }
+    const size_t space = kWriteBufferBytes - buffer_.size();
+    const size_t piece = static_cast<size_t>(std::min<uint64_t>(bytes, space));
+    const size_t prevSize = buffer_.size();
+    buffer_.resize(prevSize + piece);
+    const ssize_t n = folly::preadFull(
+        srcFd, buffer_.data() + prevSize, piece, static_cast<off_t>(srcOffset));
+    BOLT_CHECK_EQ(
+        n,
+        static_cast<ssize_t>(piece),
+        "shuffle spill read failed: {}",
+        n < 0 ? folly::errnoStr(errno) : "unexpected EOF");
+    srcOffset += piece;
+    bytes -= piece;
+    end_ += piece;
+  }
+}
+
+void BufferedFile::copyFromFd(
+    int srcFd,
+    uint64_t srcOffset,
+    uint64_t bytes,
+    uint64_t& writeTimeNs) {
+  if (bytes == 0) {
+    return;
+  }
+#ifdef __linux__
+  if (bytes >= kCopyFileRangeMinBytes) {
+    flush(writeTimeNs);
+    while (bytes > 0) {
+      loff_t inOff = static_cast<loff_t>(srcOffset);
+      ssize_t copied;
+      {
+        NanosecondTimer timer(&writeTimeNs);
+        copied = ::copy_file_range(
+            srcFd, &inOff, fd_, nullptr, static_cast<size_t>(bytes), 0);
+      }
+      if (copied < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
+            errno == EOPNOTSUPP) {
+          break;
+        }
+        BOLT_FAIL("shuffle copy_file_range failed: {}", folly::errnoStr(errno));
+      }
+      BOLT_CHECK_GT(copied, 0, "shuffle copy_file_range hit unexpected EOF");
+      srcOffset += static_cast<uint64_t>(copied);
+      bytes -= static_cast<uint64_t>(copied);
+      flushedEnd_ += static_cast<uint64_t>(copied);
+      end_ = flushedEnd_;
+    }
+  }
+#endif
+  preadDirect(srcFd, srcOffset, bytes, writeTimeNs);
+}
+
+void BufferedFile::close(uint64_t& writeTimeNs) {
+  if (fd_ < 0) {
+    return;
+  }
+  flush(writeTimeNs);
+  const int fd = fd_;
+  fd_ = -1;
+  int status;
+  {
+    NanosecondTimer timer(&writeTimeNs);
+    status = folly::closeNoInt(fd);
+  }
+  BOLT_CHECK_EQ(
+      status, 0, "shuffle file close failed: {}", folly::errnoStr(errno));
+}
+
+void BufferedFile::closeNoThrow() {
+  if (fd_ >= 0) {
+    const int fd = fd_;
+    fd_ = -1;
+    folly::closeNoInt(fd);
+  }
+  buffer_.clear();
+}
+
+} // namespace detail
 
 namespace {
 
@@ -179,9 +410,7 @@ void ShuffleSpillFile::openFile() {
     // Test convenience: sit next to the data file.
     path_ = options_.dataFile + "." + name_ + ".spill";
   }
-  file_ = ::fopen(path_.c_str(), "wb+");
-  BOLT_CHECK_NOT_NULL(file_, "Failed to open {}", path_);
-  fd_ = ::fileno(file_);
+  file_.open(path_, O_RDWR | O_CREAT | O_TRUNC);
 }
 
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
@@ -230,17 +459,10 @@ void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
   // them.
   BOLT_CHECK_EQ(
       diskEnd_, end_, "shuffle spill file written to disk behind memory");
-  if (file_ == nullptr) {
+  if (!file_.isOpen()) {
     openFile();
   }
-  // The I/O calls stay out of the check macros: those evaluate an operand
-  // again to format the failure message.
-  size_t written;
-  {
-    NanosecondTimer timer(&writeTimeNs_);
-    written = ::fwrite(data, 1, bytes, file_);
-  }
-  BOLT_CHECK_EQ(written, bytes, "shuffle spill write failed");
+  file_.write(data, bytes, writeTimeNs_);
   end_ += bytes;
   diskEnd_ = end_;
   if (pool_ != nullptr) {
@@ -251,19 +473,12 @@ void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
 void ShuffleSpillFile::writeOutOldest(memory::ContiguousAllocation& block) {
   const uint64_t bytes = std::min<uint64_t>(blockBytes_, end_ - diskEnd_);
   if (bytes > 0) {
-    if (file_ == nullptr) {
+    if (!file_.isOpen()) {
       openFile();
     }
-    size_t written;
-    int status;
-    {
-      NanosecondTimer timer(&writeTimeNs_);
-      written = ::fwrite(blocks_.front().data<char>(), 1, bytes, file_);
-      // Readable at once, as they were in memory.
-      status = ::fflush(file_);
-    }
-    BOLT_CHECK_EQ(written, bytes, "shuffle spill write failed");
-    BOLT_CHECK_EQ(status, 0, "shuffle spill flush failed");
+    file_.write(blocks_.front().data<char>(), bytes, writeTimeNs_);
+    // Readable at once on fd_, as they were in memory.
+    file_.flush(writeTimeNs_);
     diskEnd_ += bytes;
     flushedBytes_ += bytes;
     ++flushes_;
@@ -295,24 +510,10 @@ void ShuffleSpillFile::visitMemory(
 }
 
 void ShuffleSpillFile::flush() {
-  if (file_ == nullptr) {
+  if (!file_.isOpen()) {
     return;
   }
-  int status;
-  {
-    NanosecondTimer timer(&writeTimeNs_);
-    status = ::fflush(file_);
-    for (const auto& [offset, bytes] : pendingPatches_) {
-      const ssize_t written =
-          ::pwrite(fd_, bytes.data(), bytes.size(), static_cast<off_t>(offset));
-      BOLT_CHECK_EQ(
-          written,
-          static_cast<ssize_t>(bytes.size()),
-          "shuffle spill patch failed");
-    }
-  }
-  pendingPatches_.clear();
-  BOLT_CHECK_EQ(status, 0, "shuffle spill flush failed");
+  file_.flush(writeTimeNs_);
 }
 
 void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
@@ -326,7 +527,7 @@ void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
   const auto* source = static_cast<const char*>(data);
   if (offset < diskEnd_) {
     const size_t onDisk = std::min<uint64_t>(bytes, diskEnd_ - offset);
-    pendingPatches_.emplace_back(offset, std::string(source, onDisk));
+    file_.patch(offset, source, onDisk, writeTimeNs_);
     offset += onDisk;
     source += onDisk;
     bytes -= onDisk;
@@ -385,13 +586,7 @@ void ShuffleSpillFile::copyTo(
 
 void ShuffleSpillFile::readFromDisk(uint64_t offset, char* out, size_t bytes)
     const {
-  BOLT_CHECK(pendingPatches_.empty(), "shuffle spill read before flush()");
-  size_t done = 0;
-  while (done < bytes) {
-    const auto n = ::pread(fd_, out + done, bytes - done, offset + done);
-    BOLT_CHECK_GT(n, 0, "shuffle spill read failed");
-    done += n;
-  }
+  file_.read(offset, out, bytes);
 }
 
 void ShuffleSpillFile::remove() {
@@ -402,23 +597,15 @@ void ShuffleSpillFile::remove() {
     heldBytes_ -= static_cast<int64_t>(blocks_.size() * blockBytes_);
     blocks_.clear();
   }
-  if (file_ != nullptr) {
-    ::fclose(file_);
+  if (file_.isOpen()) {
+    file_.closeNoThrow();
     ::unlink(path_.c_str());
-    file_ = nullptr;
-    fd_ = -1;
   }
 }
 
 DataFileWriter::DataFileWriter(const std::string& path, uint32_t numPartitions)
-    : file_(::fopen(path.c_str(), "wb")), lengths_(numPartitions, 0) {
-  BOLT_CHECK_NOT_NULL(file_, "Failed to open shuffle data file {}", path);
-}
-
-DataFileWriter::~DataFileWriter() {
-  if (file_ != nullptr) {
-    ::fclose(file_);
-  }
+    : lengths_(numPartitions, 0) {
+  file_.open(path, O_WRONLY | O_CREAT | O_TRUNC);
 }
 
 void DataFileWriter::beginPartition(uint32_t pid) {
@@ -430,62 +617,53 @@ void DataFileWriter::write(const void* data, size_t bytes) {
   if (bytes == 0) {
     return;
   }
-  size_t written;
-  {
-    NanosecondTimer timer(&writeTimeNs_);
-    written = ::fwrite(data, 1, bytes, file_);
-  }
-  BOLT_CHECK_EQ(written, bytes, "shuffle data file write failed");
+  file_.write(data, bytes, writeTimeNs_);
   lengths_[pid_] += static_cast<int64_t>(bytes);
-  bytes_ += static_cast<int64_t>(bytes);
 }
 
 void DataFileWriter::patch(uint64_t position, const void* data, size_t bytes) {
-  const auto end = static_cast<uint64_t>(bytes_);
-  BOLT_CHECK(
-      position <= end && bytes <= end - position,
-      "shuffle data file patch beyond its end");
-  if (bytes == 0) {
-    return;
-  }
-  pendingPatches_.emplace_back(
-      position, std::string(static_cast<const char*>(data), bytes));
+  file_.patch(position, data, bytes, writeTimeNs_);
 }
 
 void DataFileWriter::copyFrom(
     const ShuffleSpillFile& spill,
     uint64_t begin,
     uint64_t bytes) {
-  spill.copyTo(begin, bytes, [this](const char* data, size_t piece) {
+  BOLT_CHECK(
+      begin <= spill.end_ && bytes <= spill.end_ - begin,
+      "shuffle spill read beyond what was written");
+  if (bytes == 0) {
+    return;
+  }
+  uint64_t offset = begin;
+  if (offset < spill.diskEnd_) {
+    const uint64_t onDisk = std::min(bytes, spill.diskEnd_ - offset);
+    const uint64_t flushedEnd = spill.file_.flushedEnd();
+    if (offset < flushedEnd) {
+      const uint64_t onFd = std::min(onDisk, flushedEnd - offset);
+      file_.copyFromFd(spill.file_.fd(), offset, onFd, writeTimeNs_);
+      lengths_[pid_] += static_cast<int64_t>(onFd);
+      offset += onFd;
+      bytes -= onFd;
+    }
+    if (offset < spill.diskEnd_ && bytes > 0) {
+      const uint64_t inBuf = std::min(bytes, spill.diskEnd_ - offset);
+      std::vector<char> tmp(inBuf);
+      spill.file_.read(offset, tmp.data(), inBuf);
+      write(tmp.data(), inBuf);
+      offset += inBuf;
+      bytes -= inBuf;
+    }
+  }
+  spill.visitMemory(offset, bytes, [this](const char* data, size_t piece) {
     write(data, piece);
   });
 }
 
 void DataFileWriter::close(ShuffleWriterMetrics& metrics) {
-  int status;
-  {
-    NanosecondTimer timer(&writeTimeNs_);
-    status = ::fflush(file_);
-    for (const auto& [position, bytes] : pendingPatches_) {
-      const ssize_t written = ::pwrite(
-          ::fileno(file_),
-          bytes.data(),
-          bytes.size(),
-          static_cast<off_t>(position));
-      BOLT_CHECK_EQ(
-          written,
-          static_cast<ssize_t>(bytes.size()),
-          "shuffle data file patch failed");
-    }
-  }
-  pendingPatches_.clear();
-  BOLT_CHECK_EQ(status, 0, "shuffle data file flush failed");
-  std::FILE* file = file_;
-  file_ = nullptr;
-  status = ::fclose(file);
-  BOLT_CHECK_EQ(status, 0, "shuffle data file close failed");
+  file_.close(writeTimeNs_);
   metrics.partitionLengths = lengths_;
-  metrics.totalBytesWritten = bytes_;
+  metrics.totalBytesWritten = static_cast<int64_t>(file_.end());
   metrics.totalWriteTime = static_cast<int64_t>(writeTimeNs_);
 }
 
