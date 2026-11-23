@@ -63,6 +63,9 @@ class CompositeShuffleWriter::CompositeRowWriter {
   }
 
   void split(const CompositeRowVectorPtr& rv) {
+    BOLT_CHECK(
+        owner_.compositeActive_,
+        "composite split while ordinary side is active");
     bool needsFlush = false;
     {
       BOLT_CHECK(
@@ -80,10 +83,10 @@ class CompositeShuffleWriter::CompositeRowWriter {
       // Composite rows are copied in whole batches: make room first. A
       // failed reservation is memory pressure: the oldest spill data in
       // memory goes to disk first, as much as the batch takes, and the held
-      // rows after it, into the blocks the spill memory holds.
+      // rows after it, into the blocks the spill file holds.
       if (hasHeldRows_ && !owner_.boltPool_->maybeReserve(rv->totalRowSize())) {
-        if (auto* memory = owner_.spillMemory()) {
-          memory->release(rv->totalRowSize());
+        if (auto* spill = owner_.spillFile()) {
+          spill->release(rv->totalRowSize());
         }
         write();
       }
@@ -101,7 +104,7 @@ class CompositeShuffleWriter::CompositeRowWriter {
     }
     if (needsFlush) {
       // A reclaim asked for it: memory pressure, which that reclaim met with
-      // the spill memory first.
+      // the spill file's memory first.
       flush();
     }
   }
@@ -118,6 +121,14 @@ class CompositeShuffleWriter::CompositeRowWriter {
       state_ = WriteState::kIdle;
     };
     write();
+  }
+
+  bool hasHeldRows() const {
+    return hasHeldRows_;
+  }
+
+  bool isIdle() const {
+    return state_ == WriteState::kIdle;
   }
 
   /// Adds composite raw partition lengths and compression time after
@@ -140,6 +151,9 @@ class CompositeShuffleWriter::CompositeRowWriter {
     if (!hasHeldRows_) {
       return;
     }
+    BOLT_CHECK(
+        owner_.compositeActive_ || owner_.isStopped(),
+        "composite write while ordinary side is active");
     size_t nextRow = 0;
     BufferPtr compressedBuffer;
     owner_.output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
@@ -284,8 +298,16 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   if (!RowVector::isComposite(rv)) {
     if (compositeActive_) {
       composite_->flush();
+      BOLT_CHECK(
+          !composite_->hasHeldRows() && composite_->isIdle(),
+          "composite side must be drained before switching to ordinary");
       compositeActive_ = false;
     }
+    BOLT_CHECK(
+        !compositeActive_ &&
+            (composite_ == nullptr ||
+             (!composite_->hasHeldRows() && composite_->isIdle())),
+        "ordinary split while composite side is active");
     return splitOrdinary(std::move(rv), memLimit);
   }
   BOLT_CHECK(
@@ -302,6 +324,7 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
     }
     compositeActive_ = true;
   }
+  BOLT_CHECK(compositeActive_, "composite split while ordinary side is active");
   composite_->split(std::static_pointer_cast<CompositeRowVector>(rv));
   return arrow::Status::OK();
 }
@@ -310,26 +333,30 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
   if (!compositeActive_) {
+    BOLT_CHECK(
+        composite_ == nullptr ||
+            (!composite_->hasHeldRows() && composite_->isIdle()),
+        "ordinary reclaim while composite side holds data or is active");
     return reclaimOrdinary(size, actual);
   }
   const int64_t before = boltPool_->reservedBytes();
-  // Memory pressure: the spill memory stops growing, so that the held rows
-  // written now reuse its blocks. Then its oldest blocks go to disk, as
+  // Memory pressure: the spill file stops growing in memory, so that the held
+  // rows written now reuse its blocks. Then its oldest blocks go to disk, as
   // much as the request still needs. Mid-write of the composite blocks the
   // held rows wait for the next batch boundary, but the blocks still go: a
-  // block's reservation is taken with its file's blocks full.
-  auto* memory = spillMemory();
-  if (memory != nullptr) {
-    memory->release(0);
+  // block's reservation is taken with the file's blocks full.
+  auto* spill = spillFile();
+  if (spill != nullptr) {
+    spill->release(0);
   }
   composite_->flush();
   boltPool_->release();
-  if (memory != nullptr) {
+  if (spill != nullptr) {
     const int64_t freed = before - boltPool_->reservedBytes();
     if (size <= 0) {
-      memory->releaseAll();
+      spill->releaseAll();
     } else if (freed < size) {
-      memory->release(size - freed);
+      spill->release(size - freed);
     }
     boltPool_->release();
   }
@@ -344,12 +371,16 @@ arrow::Status CompositeShuffleWriter::stop() {
       lifecycle_ == LifecycleState::kStopped ? "stop called twice"
                                              : "stop during split");
   lifecycle_ = LifecycleState::kStopped;
-  // Order matters: stopOrdinary() ends output() - it merges the composite
-  // spill file into the data file, or ends the Celeborn attempt - so every
-  // held composite row must be in output() before it runs.
+  // Order matters: stopOrdinary() ends output() - it merges the shared spill
+  // file into the data file, or ends the Celeborn attempt - so every held
+  // composite row must be in output() before it runs.
   if (composite_ != nullptr) {
     composite_->flush();
+    BOLT_CHECK(
+        !composite_->hasHeldRows() && composite_->isIdle(),
+        "composite side must be drained before stopOrdinary()");
   }
+  compositeActive_ = false;
   RETURN_NOT_OK(stopOrdinary());
   // stopOrdinary() reported the ordinary bytes only; the composite blocks'
   // raw bytes are added here, partition by partition.

@@ -108,10 +108,10 @@ class CellOutput {
   virtual int64_t bytesEvicted() const = 0;
 };
 
-/// The ESS backend: Runs and sealed windows go to a spill file of its own -
-/// kept in the writer's SpillMemory while memory allows - and finalize()
-/// merges them into the shuffle data file, partition-major, together with
-/// the task's composite output.
+/// The ESS backend: Runs and sealed windows go to the task's shared spill file
+/// - kept in memory while memory allows - and finalize() merges them into the
+/// shuffle data file, partition-major, together with the task's composite
+/// output.
 ///
 /// Spill segments are runs in their final wire form, written by the
 /// RunCompressor as any run of the same bytes. The merge writes a payload's
@@ -123,19 +123,17 @@ class CellOutput {
 class LocalCellOutput final : public CellOutput, public PartialSpiller {
  public:
   /// `composite` holds the task's CompositeRowVector blocks, merged after
-  /// this output's payloads in every partition; it must outlive this
-  /// object. `options` gives the codec, the data file and the spill
+  /// this output's payloads in every partition; both share `spill`, which must
+  /// outlive them. `options` gives the codec, the data file and the spill
   /// directories; `pool` backs the scratch buffer and must outlive this
   /// object. The compression workspaces come from the spill pool.
-  /// `memory`, if not null, may keep the spill file's newest bytes and must
-  /// outlive this object.
   LocalCellOutput(
       PartialSpiller& composite,
+      ShuffleSpillFile& spill,
       const CellLayout* layout,
       CellShuffleOptions cellOptions,
       PartitionWriterOptions options,
-      memory::MemoryPool* pool,
-      SpillMemory* memory = nullptr);
+      memory::MemoryPool* pool);
 
   void spillRun(const CellWindowInput& in) override;
   void sealWindow(const CellWindowInput& in) override;
@@ -149,7 +147,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       ShuffleWriterMetrics& metrics) override;
 
   int64_t bytesEvicted() const override {
-    return spilledBytes() + composite_.spilledBytes();
+    return spilledBytes();
   }
 
  private:

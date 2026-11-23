@@ -565,7 +565,7 @@ output.
 | `../base/ShuffleByteSource.h` | Shared pull-based byte source (`ShuffleByteSource`) and `ShuffleDecompressor` |
 | `../base/ShuffleBlockReader.h` / `.cpp` | Shared `BlockShuffleReader` interface, `StreamByteSource`, `CodecDecompressor`, and `RowBlockReader` |
 | `../base/CompositeShuffleReader.h` / `.cpp` | Base reader: stream traversal, decompression/read metrics, and `CompositeRows` deserialization |
-| `../base/PartitionBlockOutput.h` / `.cpp` | `SpillMemory`, `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
+| `../base/PartitionBlockOutput.h` / `.cpp` | `ShuffleSpillFile`, `DataFileWriter`, `PartialSpiller`, `LocalBlockOutput`, `RssBlockOutput` |
 | `../base/CompositeShuffleWriter.h` / `.cpp` | Base writer: partitioning and `CompositeRowVector` handling |
 | `CellFormat.h` / `.cpp` | Wire format definition and constants; `CellLayout` (row type to wire columns and streams); `BOLT_CELL_KERNEL` |
 | `CellEncoding.h` | Encoding Block encode/decode kernels (scalar and AVX2), `StreamCursor` |

@@ -21,6 +21,7 @@
 #include <cstring>
 #include <random>
 
+#include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 
 #include "bolt/common/base/Exceptions.h"
@@ -49,17 +50,47 @@ uint64_t spillBlockBytes(int64_t capBytes) {
 
 } // namespace
 
-SpillMemory::SpillMemory(memory::MemoryPool* pool, int64_t capBytes)
-    : pool_(pool),
-      capBytes_(std::max<int64_t>(capBytes, 0)),
-      blockBytes_(spillBlockBytes(capBytes)),
+ShuffleSpillFile::WriteGuard::WriteGuard(
+    ShuffleSpillFile& file,
+    const void* owner)
+    : file_(file), owner_(owner) {
+  BOLT_CHECK_NOT_NULL(owner_, "spill write owner must not be null");
+  BOLT_CHECK(!file_.frozen_, "shuffle spill file written after it was frozen");
+  const void* expected = nullptr;
+  BOLT_CHECK(
+      file_.activeWriter_.compare_exchange_strong(
+          expected, owner_, std::memory_order_acq_rel),
+      "concurrent or nested write to shared ShuffleSpillFile");
+}
+
+ShuffleSpillFile::WriteGuard::~WriteGuard() {
+  const void* expected = owner_;
+  const bool released = file_.activeWriter_.compare_exchange_strong(
+      expected, nullptr, std::memory_order_acq_rel);
+  BOLT_DCHECK(released, "ShuffleSpillFile write guard released out of order");
+}
+
+ShuffleSpillFile::ShuffleSpillFile(
+    PartitionWriterOptions options,
+    std::string name,
+    memory::MemoryPool* pool,
+    int64_t memoryCapBytes)
+    : options_(std::move(options)),
+      name_(std::move(name)),
+      pool_(pool),
+      capBytes_(pool_ != nullptr ? std::max<int64_t>(memoryCapBytes, 0) : 0),
+      blockBytes_(pool_ != nullptr ? spillBlockBytes(capBytes_) : 0),
       blockShift_(blockBytes_ == 0 ? 0 : folly::findLastSet(blockBytes_) - 1) {}
 
-bool SpillMemory::takeBlock(memory::ContiguousAllocation& block) {
+ShuffleSpillFile::~ShuffleSpillFile() {
+  remove();
+}
+
+bool ShuffleSpillFile::takeBlock(memory::ContiguousAllocation& block) {
   if (growing_ && heldBytes_ + static_cast<int64_t>(blockBytes_) <= capBytes_) {
     // Reserved first, as a cell chunk is. The reservation may reclaim the
-    // writer, which may write blocks of any file out: the asking file's
-    // last block is full, so they are whole.
+    // writer, which may write blocks of this file out: the last block is full,
+    // so they are whole.
     if (pool_->maybeReserve(blockBytes_)) {
       pool_->allocateContiguous(
           memory::AllocationTraits::numPages(blockBytes_), block);
@@ -69,40 +100,26 @@ bool SpillMemory::takeBlock(memory::ContiguousAllocation& block) {
     }
     growing_ = false;
   }
-  auto* file = largestFile();
-  if (file == nullptr) {
+  if (blocks_.empty()) {
     return false;
   }
-  file->writeOutOldest(block);
+  writeOutOldest(block);
   return true;
 }
 
-ShuffleSpillFile* SpillMemory::largestFile() const {
-  ShuffleSpillFile* largest = nullptr;
-  for (auto* file : files_) {
-    if (!file->blocks_.empty() &&
-        (largest == nullptr ||
-         file->blocks_.size() > largest->blocks_.size())) {
-      largest = file;
-    }
-  }
-  return largest;
-}
-
-bool SpillMemory::releaseOne() {
-  auto* file = largestFile();
-  if (file == nullptr) {
+bool ShuffleSpillFile::releaseOne() {
+  if (blocks_.empty()) {
     return false;
   }
-  BOLT_CHECK(!file->frozen_, "shuffle spill memory released during the merge");
+  BOLT_CHECK(!frozen_, "shuffle spill memory released during the merge");
   memory::ContiguousAllocation block;
-  file->writeOutOldest(block);
+  writeOutOldest(block);
   // `block` goes back to the pool as it leaves.
   heldBytes_ -= static_cast<int64_t>(blockBytes_);
   return true;
 }
 
-int64_t SpillMemory::release(int64_t bytes) {
+int64_t ShuffleSpillFile::release(int64_t bytes) {
   growing_ = false;
   int64_t freed = 0;
   while (freed < bytes && releaseOne()) {
@@ -111,7 +128,7 @@ int64_t SpillMemory::release(int64_t bytes) {
   return freed;
 }
 
-int64_t SpillMemory::releaseAll() {
+int64_t ShuffleSpillFile::releaseAll() {
   growing_ = false;
   int64_t freed = 0;
   while (releaseOne()) {
@@ -120,22 +137,26 @@ int64_t SpillMemory::releaseAll() {
   return freed;
 }
 
-ShuffleSpillFile::ShuffleSpillFile(
-    PartitionWriterOptions options,
-    std::string name,
-    SpillMemory* memory)
-    : options_(std::move(options)), name_(std::move(name)), memory_(memory) {
-  if (memory_ != nullptr) {
-    memory_->files_.push_back(this);
+void ShuffleSpillFile::recordSpillRun(uint64_t begin) {
+  if (end_ > begin) {
+    BOLT_CHECK(
+        spillStarts_.empty() || begin >= spillStarts_.back(),
+        "overlapping spill runs in ShuffleSpillFile");
+    spillStarts_.push_back(begin);
   }
 }
 
-ShuffleSpillFile::~ShuffleSpillFile() {
-  remove();
-  if (memory_ != nullptr) {
-    auto& files = memory_->files_;
-    files.erase(std::find(files.begin(), files.end(), this));
-  }
+int64_t ShuffleSpillFile::spilledRuns() const {
+  return static_cast<int64_t>(
+      std::lower_bound(spillStarts_.begin(), spillStarts_.end(), diskEnd_) -
+      spillStarts_.begin());
+}
+
+void ShuffleSpillFile::freeze() {
+  BOLT_CHECK(
+      activeWriter_.load(std::memory_order_acquire) == nullptr,
+      "shuffle spill file frozen while a write is in progress");
+  frozen_ = true;
 }
 
 void ShuffleSpillFile::openFile() {
@@ -165,26 +186,30 @@ void ShuffleSpillFile::openFile() {
 
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
   BOLT_CHECK(!frozen_, "shuffle spill file appended after it was frozen");
+  BOLT_CHECK(!appending_, "reentrant append to ShuffleSpillFile");
+  appending_ = true;
+  SCOPE_EXIT {
+    appending_ = false;
+  };
   const uint64_t offset = end_;
   if (bytes == 0) {
     return offset;
   }
-  if (memory_ == nullptr || memory_->blockBytes_ == 0) {
+  if (blockBytes_ == 0) {
     appendToDisk(data, bytes);
     return offset;
   }
-  const uint64_t blockBytes = memory_->blockBytes_;
   const auto* source = static_cast<const char*>(data);
   while (bytes > 0) {
     // Recomputed after a block is taken: taking one may write blocks of
     // this file out.
-    const uint64_t room = blocks_.size() * blockBytes - (end_ - diskEnd_);
+    const uint64_t room = blocks_.size() * blockBytes_ - (end_ - diskEnd_);
     if (room == 0) {
       // Taken with the last block full only, so that what a reclaim reached
       // from the reservation writes out of this file is whole.
       memory::ContiguousAllocation block;
-      if (!memory_->takeBlock(block)) {
-        // No block anywhere: none of this file's bytes is in memory either.
+      if (!takeBlock(block)) {
+        // No block held: none of this file's bytes is in memory either.
         appendToDisk(source, bytes);
         break;
       }
@@ -192,7 +217,7 @@ uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
       continue;
     }
     const size_t piece = std::min<uint64_t>(room, bytes);
-    ::memcpy(blocks_.back().data<char>() + (blockBytes - room), source, piece);
+    ::memcpy(blocks_.back().data<char>() + (blockBytes_ - room), source, piece);
     end_ += piece;
     source += piece;
     bytes -= piece;
@@ -218,14 +243,13 @@ void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
   BOLT_CHECK_EQ(written, bytes, "shuffle spill write failed");
   end_ += bytes;
   diskEnd_ = end_;
-  if (memory_ != nullptr) {
-    memory_->directBytes_ += bytes;
+  if (pool_ != nullptr) {
+    directBytes_ += bytes;
   }
 }
 
 void ShuffleSpillFile::writeOutOldest(memory::ContiguousAllocation& block) {
-  const uint64_t bytes =
-      std::min<uint64_t>(memory_->blockBytes_, end_ - diskEnd_);
+  const uint64_t bytes = std::min<uint64_t>(blockBytes_, end_ - diskEnd_);
   if (bytes > 0) {
     if (file_ == nullptr) {
       openFile();
@@ -241,8 +265,8 @@ void ShuffleSpillFile::writeOutOldest(memory::ContiguousAllocation& block) {
     BOLT_CHECK_EQ(written, bytes, "shuffle spill write failed");
     BOLT_CHECK_EQ(status, 0, "shuffle spill flush failed");
     diskEnd_ += bytes;
-    memory_->flushedBytes_ += bytes;
-    ++memory_->flushes_;
+    flushedBytes_ += bytes;
+    ++flushes_;
   }
   block = std::move(blocks_.front());
   blocks_.pop_front();
@@ -260,12 +284,11 @@ void ShuffleSpillFile::visitMemory(
       offset >= diskEnd_ && offset <= end_ && bytes <= end_ - offset &&
           !blocks_.empty(),
       "shuffle spill memory read out of range");
-  const uint64_t blockBytes = memory_->blockBytes_;
   uint64_t at = offset - diskEnd_;
   while (bytes > 0) {
-    const uint64_t inBlock = at & (blockBytes - 1);
-    const uint64_t piece = std::min(bytes, blockBytes - inBlock);
-    visit(blocks_[at >> memory_->blockShift_].data<char>() + inBlock, piece);
+    const uint64_t inBlock = at & (blockBytes_ - 1);
+    const uint64_t piece = std::min(bytes, blockBytes_ - inBlock);
+    visit(blocks_[at >> blockShift_].data<char>() + inBlock, piece);
     at += piece;
     bytes -= piece;
   }
@@ -293,6 +316,7 @@ void ShuffleSpillFile::flush() {
 }
 
 void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
+  BOLT_CHECK(!frozen_, "shuffle spill file patched after it was frozen");
   BOLT_CHECK(
       offset <= end_ && bytes <= end_ - offset,
       "shuffle spill patch beyond its end");
@@ -371,9 +395,11 @@ void ShuffleSpillFile::readFromDisk(uint64_t offset, char* out, size_t bytes)
 }
 
 void ShuffleSpillFile::remove() {
+  BOLT_CHECK(
+      activeWriter_.load(std::memory_order_acquire) == nullptr,
+      "shuffle spill file removed while a write is in progress");
   if (!blocks_.empty()) {
-    memory_->heldBytes_ -=
-        static_cast<int64_t>(blocks_.size() * memory_->blockBytes_);
+    heldBytes_ -= static_cast<int64_t>(blocks_.size() * blockBytes_);
     blocks_.clear();
   }
   if (file_ != nullptr) {
@@ -465,16 +491,20 @@ void DataFileWriter::close(ShuffleWriterMetrics& metrics) {
 
 void PartialSpiller::mergeToDataFile(
     const PartitionWriterOptions& options,
+    ShuffleSpillFile& spill,
     std::initializer_list<PartialSpiller*> spillers,
     ShuffleWriterMetrics& metrics) {
   BOLT_CHECK_GE(options.numPartitions, 0, "numPartitions must be non-negative");
+  BOLT_CHECK(!spill.isFrozen(), "partial spiller merged twice");
+  for (auto* spiller : spillers) {
+    BOLT_CHECK(
+        &spiller->spill_ == &spill,
+        "all partial spillers must share the same ShuffleSpillFile");
+  }
   // Nothing may be appended behind the merge: it would break the
   // partition-major order or be missed by partitions already written.
-  for (auto* spiller : spillers) {
-    BOLT_CHECK(!spiller->spill_.isFrozen(), "partial spiller merged twice");
-    spiller->spill_.flush();
-    spiller->spill_.freeze();
-  }
+  spill.flush();
+  spill.freeze();
   const auto numPartitions = static_cast<uint32_t>(options.numPartitions);
   DataFileWriter out(options.dataFile, numPartitions);
   for (uint32_t pid = 0; pid < numPartitions; ++pid) {
@@ -484,35 +514,24 @@ void PartialSpiller::mergeToDataFile(
     }
   }
   out.close(metrics);
-  metrics.totalBytesEvicted = 0;
-  metrics.totalSpillFiles = 0;
-  metrics.totalEvictTime = 0;
-  for (auto* spiller : spillers) {
-    spiller->spill_.remove();
-    const int64_t bytesOnDisk = spiller->spill_.bytesWritten();
-    metrics.totalBytesEvicted += bytesOnDisk;
-    const auto& starts = spiller->spillStarts_;
-    metrics.totalSpillFiles += static_cast<int64_t>(
-        std::lower_bound(
-            starts.begin(), starts.end(), static_cast<uint64_t>(bytesOnDisk)) -
-        starts.begin());
-    metrics.totalEvictTime +=
-        static_cast<int64_t>(spiller->spill_.writeTimeNs());
-  }
+  spill.remove();
+  metrics.totalBytesEvicted = spill.bytesWritten();
+  metrics.totalSpillFiles = spill.spilledRuns();
+  metrics.totalEvictTime = static_cast<int64_t>(spill.writeTimeNs());
 }
 
 LocalBlockOutput::LocalBlockOutput(
     PartitionWriterOptions options,
-    SpillMemory* memory)
-    : PartialSpiller(options, "blocks", memory), options_(std::move(options)) {
+    ShuffleSpillFile& spill)
+    : PartialSpiller(spill), options_(std::move(options)) {
   BOLT_CHECK_GE(
       options_.numPartitions, 0, "numPartitions must be non-negative");
 }
 
 void LocalBlockOutput::writeBlocks(const BlockSource& next) {
-  BOLT_CHECK(!spill_.isFrozen(), "writeBlocks after the merge");
+  auto writeGuard = scopedWrite();
   const auto numPartitions = static_cast<uint32_t>(options_.numPartitions);
-  auto& ends = spillOffsets_.emplace_back(numPartitions + 1);
+  std::vector<uint64_t> ends(numPartitions + 1);
   ends[0] = spill_.end();
   BufferPtr block;
   for (uint32_t pid = 0; pid < numPartitions; ++pid) {
@@ -523,10 +542,11 @@ void LocalBlockOutput::writeBlocks(const BlockSource& next) {
   }
   countSpill(ends[0]);
   spill_.flush();
+  spillOffsets_.push_back(std::move(ends));
 }
 
 void LocalBlockOutput::finish(ShuffleWriterMetrics& metrics) {
-  mergeToDataFile(options_, {this}, metrics);
+  mergeToDataFile(options_, spill_, {this}, metrics);
 }
 
 void LocalBlockOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {

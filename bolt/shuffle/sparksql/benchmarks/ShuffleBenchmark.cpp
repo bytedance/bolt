@@ -2729,9 +2729,8 @@ void keepOutput(const Case& c, Writer writer, const Written& w) {
 
 void removeFiles(const std::string& dataFile) {
   ::unlink(dataFile.c_str());
-  // The spill files PartialSpiller names <dataFile>.<name>.spill.
+  // The shared spill file ShuffleSpillFile names <dataFile>.<name>.spill.
   ::unlink((dataFile + ".cell.spill").c_str());
-  ::unlink((dataFile + ".blocks.spill").c_str());
 }
 
 void registerCase(const CaseSpec& spec, const std::vector<Writer>& writers) {

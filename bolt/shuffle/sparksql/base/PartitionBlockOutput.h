@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdio>
 #include <deque>
 #include <functional>
@@ -32,122 +33,63 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 
-class ShuffleSpillFile;
-
-/// Memory in which the spill files of one writer keep their newest bytes
-/// instead of on disk: a spill that the merge copies into the data file
-/// anyway then costs no disk write and read. Blocks of one size from the
-/// writer's pool, accounted to it, at most capBytes() of them over every
-/// file together. A file keeps its blocks oldest first, and its bytes in
-/// memory always end it: a block written out continues the file on disk.
+/// Temporary shuffle storage shared by a task's local spillers: appended in
+/// time order, read back at any offset. On local disk, the file is created on
+/// the first byte it gets, in a random configured directory so concurrent tasks
+/// spread their I/O over the disks, and removed by remove() or on destruction.
 ///
-/// A file that needs a block takes a new one while the memory still grows
-/// and stays within the cap. Otherwise it reuses the oldest block of the
-/// file holding the most, the asking one included, written out first, so
-/// the memory keeps the newest bytes at a constant size; with no block
-/// anywhere, the file appends to disk. Memory pressure - release() - writes
-/// the oldest blocks out and frees them, and so does a failed reservation
-/// of a new block: either ends the growth for good, and the memory only
-/// reuses what it holds from then on.
+/// When configured with a memory pool and cap (`memoryCapBytes`), it keeps its
+/// newest bytes in fixed-size blocks from `pool` instead of on disk: a spill
+/// that the merge copies into the data file anyway then costs no disk write and
+/// read. Offsets stay continuous: [0, diskEnd) on disk and [diskEnd, end()) in
+/// memory, packed oldest first. While still growing within `capBytes()`, it
+/// reserves new blocks from `pool`; otherwise it reuses its oldest block after
+/// writing it to disk, or appends directly to disk when no block is held.
+/// Memory pressure (`release()` / `releaseAll()`) or a failed reservation ends
+/// growth for good.
 ///
 /// A new block's reservation may reclaim the writer, and that reclaim may
-/// release() blocks of any file, the asking one included. A file asks only
-/// once its last block is full, so the blocks written out are whole and
-/// the file is consistent whenever that happens. During the merge nothing
-/// is released: the writer cannot be reclaimed while it stops.
-class SpillMemory {
- public:
-  /// Blocks of up to 4 MiB from `pool`, at least four of them within
-  /// `capBytes`; `pool` must outlive this object, as must every file
-  /// attached to it. A cap below four machine pages keeps nothing in memory.
-  SpillMemory(memory::MemoryPool* pool, int64_t capBytes);
-
-  SpillMemory(const SpillMemory&) = delete;
-  SpillMemory& operator=(const SpillMemory&) = delete;
-
-  /// Memory pressure: writes the oldest blocks out, of the file holding the
-  /// most first, and frees them until at least `bytes` are freed - none for
-  /// 0 or less - and ends the growth. Returns the bytes freed.
-  int64_t release(int64_t bytes);
-
-  /// release() of every block.
-  int64_t releaseAll();
-
-  /// The most block bytes the files hold together.
-  int64_t capBytes() const {
-    return capBytes_;
-  }
-
-  /// Block bytes the files hold now, and the most they held.
-  int64_t heldBytes() const {
-    return heldBytes_;
-  }
-  int64_t peakBytes() const {
-    return peakBytes_;
-  }
-
-  /// Bytes the files wrote out of their blocks, and how many blocks.
-  uint64_t flushedBytes() const {
-    return flushedBytes_;
-  }
-  uint64_t flushes() const {
-    return flushes_;
-  }
-
-  /// Bytes the files appended to disk directly, for want of a block.
-  uint64_t directBytes() const {
-    return directBytes_;
-  }
-
- private:
-  friend class ShuffleSpillFile;
-
-  /// A block for a file whose last block is full: a new one, or the oldest
-  /// of the file holding the most, written out. False when there is none.
-  bool takeBlock(memory::ContiguousAllocation& block);
-
-  /// The file holding the most blocks; null when none holds one.
-  ShuffleSpillFile* largestFile() const;
-
-  /// Writes the oldest block of the file holding the most out and frees it;
-  /// false when no file holds a block.
-  bool releaseOne();
-
-  memory::MemoryPool* const pool_;
-  const int64_t capBytes_;
-  /// A power of two; 0 keeps nothing in memory.
-  const uint64_t blockBytes_;
-  const uint32_t blockShift_;
-  /// False once memory ran short: the blocks held are reused from then on.
-  bool growing_{true};
-  int64_t heldBytes_{0};
-  int64_t peakBytes_{0};
-  uint64_t flushedBytes_{0};
-  uint64_t flushes_{0};
-  uint64_t directBytes_{0};
-  std::vector<ShuffleSpillFile*> files_;
-};
-
-/// Temporary shuffle storage of one output: appended in time order, read
-/// back at any offset. On local disk, the file is created on the first byte
-/// it gets, in a random configured directory so concurrent tasks spread
-/// their I/O over the disks, and removed by remove() or on destruction.
-/// Attached to a SpillMemory, it keeps its newest bytes in blocks of it:
-/// the offsets stay the same, [0, diskEnd) on disk and [diskEnd, end()) in
-/// memory, packed from the oldest block's start.
+/// release() blocks of this file. Blocks are only taken when the last block is
+/// full, so blocks written out are whole and the file stays consistent. During
+/// the merge nothing may be released. Producers sharing one file must serialize
+/// writes through scopedWrite().
 class ShuffleSpillFile {
  public:
+  /// RAII exclusive-write guard preventing concurrent or nested writes into a
+  /// shared ShuffleSpillFile (e.g. between ordinary and composite paths).
+  class WriteGuard {
+   public:
+    WriteGuard(ShuffleSpillFile& file, const void* owner);
+    ~WriteGuard();
+
+    WriteGuard(const WriteGuard&) = delete;
+    WriteGuard& operator=(const WriteGuard&) = delete;
+
+   private:
+    ShuffleSpillFile& file_;
+    const void* owner_;
+  };
+
   /// `name` tells a task's spill files apart when, with no configured
   /// directory, they sit next to the data file: <dataFile>.<name>.spill.
-  /// `memory`, if not null, must outlive this file.
+  /// When `pool` is non-null, keeps blocks of up to 4 MiB (at least four within
+  /// `memoryCapBytes`; a cap below four machine pages keeps nothing in memory).
+  /// `pool`, if not null, must outlive this file.
   ShuffleSpillFile(
       PartitionWriterOptions options,
       std::string name,
-      SpillMemory* memory = nullptr);
+      memory::MemoryPool* pool = nullptr,
+      int64_t memoryCapBytes = 0);
   ~ShuffleSpillFile();
 
   ShuffleSpillFile(const ShuffleSpillFile&) = delete;
   ShuffleSpillFile& operator=(const ShuffleSpillFile&) = delete;
+
+  /// Acquires exclusive write access for `owner` until the returned guard is
+  /// destroyed.
+  WriteGuard scopedWrite(const void* owner) {
+    return WriteGuard(*this, owner);
+  }
 
   /// Appends `bytes` and returns the offset they start at.
   uint64_t append(const void* data, size_t bytes);
@@ -170,22 +112,60 @@ class ShuffleSpillFile {
       uint64_t bytes,
       const std::function<void(const char* data, size_t bytes)>& out) const;
 
+  /// Records one spill run if `begin`, the spill end before it, has moved.
+  void recordSpillRun(uint64_t begin);
+
+  /// Number of recorded spill runs whose bytes actually reached disk.
+  int64_t spilledRuns() const;
+
   /// The offset the next append starts at.
   uint64_t end() const {
     return end_;
   }
 
   /// No append is accepted afterwards; reads still are.
-  void freeze() {
-    frozen_ = true;
-  }
+  void freeze();
 
   bool isFrozen() const {
     return frozen_;
   }
 
-  /// Closes and deletes the file, and frees its blocks.
+  /// Closes and deletes the file, and frees its memory blocks.
   void remove();
+
+  /// Memory pressure: writes the oldest blocks out and frees them until at
+  /// least `bytes` are freed - none for 0 or less - and ends growth. Returns
+  /// the bytes freed.
+  int64_t release(int64_t bytes);
+
+  /// release() of every held block.
+  int64_t releaseAll();
+
+  /// The most block bytes this file may hold in memory.
+  int64_t capBytes() const {
+    return capBytes_;
+  }
+
+  /// Block bytes held in memory now, and the most held.
+  int64_t heldBytes() const {
+    return heldBytes_;
+  }
+  int64_t peakBytes() const {
+    return peakBytes_;
+  }
+
+  /// Bytes written out of memory blocks to disk, and how many blocks.
+  uint64_t flushedBytes() const {
+    return flushedBytes_;
+  }
+  uint64_t flushes() const {
+    return flushes_;
+  }
+
+  /// Bytes appended to disk directly, for want of a memory block.
+  uint64_t directBytes() const {
+    return directBytes_;
+  }
 
   /// Bytes written to disk: the evict metric.
   int64_t bytesWritten() const {
@@ -198,9 +178,15 @@ class ShuffleSpillFile {
   }
 
  private:
-  friend class SpillMemory;
-
   void openFile();
+
+  /// Takes a block when the last block is full: a new one from `pool_`, or the
+  /// oldest held block written out first. False when none is available.
+  bool takeBlock(memory::ContiguousAllocation& block);
+
+  /// Writes the oldest held block to disk and frees it; false when none is
+  /// held.
+  bool releaseOne();
 
   /// Appends to disk, behind every byte: none may be in memory.
   void appendToDisk(const void* data, size_t bytes);
@@ -218,7 +204,19 @@ class ShuffleSpillFile {
 
   const PartitionWriterOptions options_;
   const std::string name_;
-  SpillMemory* const memory_;
+  memory::MemoryPool* const pool_;
+  const int64_t capBytes_;
+  /// A power of two; 0 keeps nothing in memory.
+  const uint64_t blockBytes_;
+  const uint32_t blockShift_;
+  /// False once memory ran short: the blocks held are reused from then on.
+  bool growing_{true};
+  int64_t heldBytes_{0};
+  int64_t peakBytes_{0};
+  uint64_t flushedBytes_{0};
+  uint64_t flushes_{0};
+  uint64_t directBytes_{0};
+
   std::FILE* file_{nullptr};
   int fd_{-1};
   std::string path_;
@@ -229,7 +227,11 @@ class ShuffleSpillFile {
   /// are full.
   std::deque<memory::ContiguousAllocation> blocks_;
   bool frozen_{false};
+  bool appending_{false};
+  std::atomic<const void*> activeWriter_{nullptr};
   uint64_t writeTimeNs_{0};
+  /// Start offsets of non-empty spill runs in this file, ascending.
+  std::vector<uint64_t> spillStarts_;
   /// patch()es not applied yet: offset and bytes.
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
@@ -273,17 +275,17 @@ class DataFileWriter {
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
 
-/// A local output that spills to a ShuffleSpillFile of its own, in pieces
-/// that only become final output in the merge: there, partition by
-/// partition, it writes its share into the task's data file. Several
-/// spillers - a task's ordinary and composite outputs - share one data file
-/// through mergeToDataFile() and nothing else.
+/// A local output that spills into a shared ShuffleSpillFile, in pieces that
+/// only become final output in the merge: there, partition by partition, it
+/// writes its share into the task's data file. Several spillers - a task's
+/// ordinary and composite outputs - share one ShuffleSpillFile and one data
+/// file through mergeToDataFile().
 class PartialSpiller {
  public:
-  /// Writes the task's data file from `spillers`: for each partition, every
-  /// spiller's share in the order given. Seals their spill files first -
-  /// nothing may be appended behind the merge, and a spiller is merged once
-  /// only - and removes them afterwards, freeing their memory. Fills
+  /// Writes the task's data file from `spillers`, all sharing `spill`: for each
+  /// partition, every spiller's share in the order given. Seals `spill` first -
+  /// nothing may be appended behind the merge, and a spill file is merged once
+  /// only - and removes it afterwards, freeing its memory. Fills
   /// partitionLengths, totalBytesWritten, totalBytesEvicted - the bytes that
   /// reached disk - and the write and evict times, and totalSpillFiles with
   /// the spill runs that put bytes on disk: every run goes into the one spill
@@ -291,24 +293,27 @@ class PartialSpiller {
   /// writer's file per spill corresponds to.
   static void mergeToDataFile(
       const PartitionWriterOptions& options,
+      ShuffleSpillFile& spill,
       std::initializer_list<PartialSpiller*> spillers,
       ShuffleWriterMetrics& metrics);
 
   virtual ~PartialSpiller() = default;
 
-  /// Bytes written to disk.
+  /// Bytes written to disk in the shared spill file.
   int64_t spilledBytes() const {
     return spill_.bytesWritten();
   }
 
  protected:
-  /// `memory`, if not null, may keep the spill file's newest bytes and must
-  /// outlive this object.
-  PartialSpiller(
-      PartitionWriterOptions options,
-      std::string name,
-      SpillMemory* memory = nullptr)
-      : spill_(std::move(options), std::move(name), memory) {}
+  /// `spill` is shared by the task's local spillers and must outlive this
+  /// object.
+  explicit PartialSpiller(ShuffleSpillFile& spill) : spill_(spill) {}
+
+  /// Acquires an exclusive write guard on `spill_` so ordinary and composite
+  /// paths cannot interleave or concurrently append to the shared spill file.
+  ShuffleSpillFile::WriteGuard scopedWrite() {
+    return spill_.scopedWrite(this);
+  }
 
   /// Partition `pid`'s share of the data file. Called by mergeToDataFile()
   /// only, for partition 0, 1, ..., with the spill file frozen.
@@ -316,16 +321,10 @@ class PartialSpiller {
 
   /// Records one spill run if `begin`, the spill end before it, has moved.
   void countSpill(uint64_t begin) {
-    if (spill_.end() > begin) {
-      spillStarts_.push_back(begin);
-    }
+    spill_.recordSpillRun(begin);
   }
 
-  ShuffleSpillFile spill_;
-
- private:
-  /// Start offsets of non-empty spill runs in `spill_`, ascending.
-  std::vector<uint64_t> spillStarts_;
+  ShuffleSpillFile& spill_;
 };
 
 /// Produces the next opaque block of partition `pid` into `block`; false
@@ -357,17 +356,14 @@ class PartitionBlockOutput {
 };
 
 /// Local disk. Each writeBlocks() call becomes a block run of P + 1 offsets
-/// in its own spill file; the merge copies each partition's blocks
+/// in the shared spill file; the merge copies each partition's blocks
 /// verbatim, in call order. Merged with another output's share by
 /// mergeToDataFile(), or on its own by finish().
 class LocalBlockOutput final : public PartitionBlockOutput,
                                public PartialSpiller {
  public:
-  /// `memory`, if not null, may keep the spill file's newest bytes and must
-  /// outlive this object.
-  explicit LocalBlockOutput(
-      PartitionWriterOptions options,
-      SpillMemory* memory = nullptr);
+  /// `spill` must outlive this object.
+  LocalBlockOutput(PartitionWriterOptions options, ShuffleSpillFile& spill);
 
   void writeBlocks(const BlockSource& next) override;
 

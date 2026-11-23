@@ -50,7 +50,7 @@ class SpillMemoryTest : public testing::Test {
   void TearDown() override {
     // A block's maybeReserve() leaves the pool a minimum reservation until
     // release(), as the writers call it at their end; each test's
-    // SpillMemory is gone by now.
+    // ShuffleSpillFile is gone by now.
     pool_->release();
     std::filesystem::remove_all(dir_);
   }
@@ -113,106 +113,141 @@ class SpillMemoryTest : public testing::Test {
 TEST_F(SpillMemoryTest, keepsTheNewestBytes) {
   // Past the cap, a file reuses its oldest block, written out first: the
   // memory keeps the newest bytes, at most the cap, and the disk the rest.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "newest", &memory);
+  ShuffleSpillFile file(options(), "newest", pool_.get(), kCap);
   std::string expected;
   appendPieces(file, expected, 300 << 10);
   const auto onDisk = static_cast<size_t>(file.bytesWritten());
   EXPECT_GE(onDisk, expected.size() - kCap);
   EXPECT_LT(onDisk, expected.size());
-  EXPECT_EQ(memory.flushedBytes(), onDisk);
-  EXPECT_EQ(memory.directBytes(), uint64_t{0});
-  EXPECT_EQ(memory.heldBytes(), kCap);
-  EXPECT_EQ(memory.peakBytes(), kCap);
+  EXPECT_EQ(file.flushedBytes(), onDisk);
+  EXPECT_EQ(file.directBytes(), uint64_t{0});
+  EXPECT_EQ(file.heldBytes(), kCap);
+  EXPECT_EQ(file.peakBytes(), kCap);
   expectContents(file, expected);
 }
 
 TEST_F(SpillMemoryTest, releaseWritesTheOldestOutAndEndsTheGrowth) {
   // Asked for a byte, release() writes the oldest block out and frees it,
   // and the memory grows no more: later bytes reuse the blocks left.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "release", &memory);
+  ShuffleSpillFile file(options(), "release", pool_.get(), kCap);
   std::string expected;
   append(file, expected, 2 * kBlock + kBlock / 2);
-  EXPECT_EQ(memory.heldBytes(), 3 * kBlock);
-  EXPECT_EQ(memory.release(1), kBlock);
+  EXPECT_EQ(file.heldBytes(), 3 * kBlock);
+  EXPECT_EQ(file.release(1), kBlock);
   EXPECT_EQ(file.bytesWritten(), kBlock);
-  EXPECT_EQ(memory.heldBytes(), 2 * kBlock);
+  EXPECT_EQ(file.heldBytes(), 2 * kBlock);
   appendPieces(file, expected, 100 << 10);
-  EXPECT_EQ(memory.heldBytes(), 2 * kBlock);
-  EXPECT_EQ(memory.peakBytes(), 3 * kBlock);
+  EXPECT_EQ(file.heldBytes(), 2 * kBlock);
+  EXPECT_EQ(file.peakBytes(), 3 * kBlock);
   EXPECT_GE(
       static_cast<size_t>(file.bytesWritten()), expected.size() - 2 * kBlock);
   expectContents(file, expected);
   // Asked for nothing, it frees nothing.
-  EXPECT_EQ(memory.release(0), 0);
-  EXPECT_EQ(memory.heldBytes(), 2 * kBlock);
+  EXPECT_EQ(file.release(0), 0);
+  EXPECT_EQ(file.heldBytes(), 2 * kBlock);
 }
 
 TEST_F(SpillMemoryTest, releaseAllEmptiesTheMemory) {
   // releaseAll() writes every block out, the last, partly filled one
-  // included; with no block left anywhere, a file appends to disk.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "all", &memory);
+  // included; with no block left, the file appends directly to disk.
+  ShuffleSpillFile file(options(), "all", pool_.get(), kCap);
   std::string expected;
   append(file, expected, 2 * kBlock + kBlock / 2);
-  EXPECT_EQ(memory.releaseAll(), 3 * kBlock);
-  EXPECT_EQ(memory.heldBytes(), 0);
+  EXPECT_EQ(file.releaseAll(), 3 * kBlock);
+  EXPECT_EQ(file.heldBytes(), 0);
   EXPECT_EQ(static_cast<size_t>(file.bytesWritten()), expected.size());
   append(file, expected, 10 << 10);
-  EXPECT_EQ(memory.heldBytes(), 0);
-  EXPECT_EQ(memory.directBytes(), uint64_t{10 << 10});
+  EXPECT_EQ(file.heldBytes(), 0);
+  EXPECT_EQ(file.directBytes(), uint64_t{10 << 10});
   EXPECT_EQ(static_cast<size_t>(file.bytesWritten()), expected.size());
   expectContents(file, expected);
 }
 
 TEST_F(SpillMemoryTest, offKeepsNothing) {
   // A cap below four machine pages keeps nothing in memory.
-  SpillMemory memory(pool_.get(), 8 << 10);
-  ShuffleSpillFile file(options(), "off", &memory);
+  ShuffleSpillFile file(options(), "off", pool_.get(), 8 << 10);
   std::string expected;
   appendPieces(file, expected, 50 << 10);
-  EXPECT_EQ(memory.peakBytes(), 0);
+  EXPECT_EQ(file.peakBytes(), 0);
   EXPECT_EQ(static_cast<size_t>(file.bytesWritten()), expected.size());
   expectContents(file, expected);
 }
 
 TEST_F(SpillMemoryTest, aReleaseBetweenBlocksKeepsTheFileWhole) {
   // A block's reservation may reclaim the writer, whose reclaim writes
-  // blocks of the asking file out: with its last block full, as when the
-  // file asks. The file then goes on from what is left.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "between", &memory);
+  // blocks of this file out: with its last block full, as when the file
+  // asks. The file then goes on from what is left.
+  ShuffleSpillFile file(options(), "between", pool_.get(), kCap);
   std::string expected;
   append(file, expected, 2 * kBlock);
-  EXPECT_EQ(memory.release(kBlock), kBlock);
+  EXPECT_EQ(file.release(kBlock), kBlock);
   EXPECT_EQ(file.bytesWritten(), kBlock);
   // No growth after a release: the next bytes reuse the block left,
   // written out first.
   append(file, expected, kBlock / 4);
   EXPECT_EQ(file.bytesWritten(), 2 * kBlock);
-  EXPECT_EQ(memory.heldBytes(), kBlock);
-  EXPECT_EQ(memory.releaseAll(), kBlock);
+  EXPECT_EQ(file.heldBytes(), kBlock);
+  EXPECT_EQ(file.releaseAll(), kBlock);
   append(file, expected, kBlock / 4);
   EXPECT_EQ(static_cast<size_t>(file.bytesWritten()), expected.size());
   expectContents(file, expected);
 }
 
-TEST_F(SpillMemoryTest, filesShareTheMemory) {
-  // Two files under one cap: past it, the one asking reuses the oldest
-  // block of the file holding the most.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile first(options(), "first", &memory);
-  ShuffleSpillFile second(options(), "second", &memory);
-  std::string firstExpected;
-  std::string secondExpected;
-  append(first, firstExpected, kCap);
-  append(second, secondExpected, kBlock + kBlock / 4);
-  EXPECT_EQ(first.bytesWritten(), 2 * kBlock);
-  EXPECT_EQ(second.bytesWritten(), 0);
-  EXPECT_EQ(memory.heldBytes(), kCap);
-  expectContents(first, firstExpected);
-  expectContents(second, secondExpected);
+TEST_F(SpillMemoryTest, sharedFileSerializesProducersAndRejectsOverlap) {
+  // Two outputs sharing one ShuffleSpillFile share its memory budget when
+  // writing sequentially, and reject nested or concurrent writes.
+  auto opts = options();
+  opts.numPartitions = 2;
+  ShuffleSpillFile spill(opts, "shared", pool_.get(), kCap);
+  LocalBlockOutput first(opts, spill);
+  LocalBlockOutput second(opts, spill);
+
+  const auto emitBytes = [&](LocalBlockOutput& output,
+                             uint32_t targetPid,
+                             size_t bytes,
+                             char fill) {
+    bool emitted = false;
+    output.writeBlocks([&](uint32_t pid, BufferPtr& block) {
+      if (pid != targetPid || emitted) {
+        return false;
+      }
+      emitted = true;
+      block = AlignedBuffer::allocate<char>(bytes, pool_.get(), fill);
+      return true;
+    });
+  };
+
+  emitBytes(first, 0, kCap, 'a');
+  emitBytes(second, 1, kBlock + kBlock / 4, 'b');
+  EXPECT_EQ(spill.bytesWritten(), 2 * kBlock);
+  EXPECT_EQ(spill.heldBytes(), kCap);
+
+  // Attempting to write to `second` while `first` holds the shared write guard
+  // must fail fast.
+  bool nestedTriggered = false;
+  BOLT_ASSERT_THROW(
+      first.writeBlocks([&](uint32_t pid, BufferPtr& block) {
+        if (pid == 0 && !nestedTriggered) {
+          nestedTriggered = true;
+          emitBytes(second, 0, 16, 'c');
+        }
+        return false;
+      }),
+      "concurrent or nested write to shared ShuffleSpillFile");
+
+  // Freezing while a write guard is held must also fail.
+  {
+    auto guard = spill.scopedWrite(&first);
+    BOLT_ASSERT_THROW(spill.freeze(), "frozen while a write is in progress");
+  }
+
+  ShuffleWriterMetrics metrics;
+  PartialSpiller::mergeToDataFile(opts, spill, {&first, &second}, metrics);
+  ASSERT_EQ(metrics.partitionLengths.size(), 2u);
+  EXPECT_EQ(metrics.partitionLengths[0], kCap);
+  EXPECT_EQ(metrics.partitionLengths[1], kBlock + kBlock / 4);
+  EXPECT_EQ(metrics.totalBytesEvicted, 2 * kBlock);
+  EXPECT_EQ(metrics.totalSpillFiles, 1);
 }
 
 TEST_F(SpillMemoryTest, aShortPoolEndsTheGrowth) {
@@ -222,13 +257,12 @@ TEST_F(SpillMemoryTest, aShortPoolEndsTheGrowth) {
   auto root = memory::memoryManager()->addRootPool("", 16 << 20);
   auto pool = root->addLeafChild("spill");
   {
-    SpillMemory memory(pool.get(), 64 << 20);
-    ShuffleSpillFile file(options(), "short", &memory);
+    ShuffleSpillFile file(options(), "short", pool.get(), 64 << 20);
     std::string expected;
     appendPieces(file, expected, 40 << 20);
-    EXPECT_GT(memory.peakBytes(), 0);
-    EXPECT_LE(memory.peakBytes(), 16 << 20);
-    EXPECT_EQ(memory.heldBytes(), memory.peakBytes());
+    EXPECT_GT(file.peakBytes(), 0);
+    EXPECT_LE(file.peakBytes(), 16 << 20);
+    EXPECT_EQ(file.heldBytes(), file.peakBytes());
     EXPECT_GT(file.bytesWritten(), 0);
     expectContents(file, expected);
   }
@@ -238,8 +272,7 @@ TEST_F(SpillMemoryTest, aShortPoolEndsTheGrowth) {
 TEST_F(SpillMemoryTest, patchesReachTheBytesOnDisk) {
   // A run's header is patched once its body is written: on disk by then,
   // or still in memory, the patch lands either way.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "patch", &memory);
+  ShuffleSpillFile file(options(), "patch", pool_.get(), kCap);
   std::string expected;
   append(file, expected, 8);
   appendPieces(file, expected, 100 << 10);
@@ -256,19 +289,18 @@ TEST_F(SpillMemoryTest, patchesReachTheBytesOnDisk) {
 TEST_F(SpillMemoryTest, nothingIsReleasedDuringTheMerge) {
   // The merge reads the blocks: the writer cannot be reclaimed while it
   // stops, so a release() then is a bug.
-  SpillMemory memory(pool_.get(), kCap);
-  ShuffleSpillFile file(options(), "merge", &memory);
+  ShuffleSpillFile file(options(), "merge", pool_.get(), kCap);
   std::string expected;
   append(file, expected, kBlock);
   file.flush();
   file.freeze();
-  BOLT_ASSERT_THROW(memory.release(1), "released during the merge");
+  BOLT_ASSERT_THROW(file.release(1), "released during the merge");
 }
 
 TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
   // totalSpillFiles counts only runs whose bytes actually reached disk: runs
-  // that stay wholly in SpillMemory are not counted, a run starting right at
-  // the disk/memory boundary is not counted, a run straddling it is, and empty
+  // that stay wholly in memory are not counted, a run starting right at the
+  // disk/memory boundary is not counted, a run straddling it is, and empty
   // runs are never counted.
   const auto writeRun = [&](LocalBlockOutput& output, size_t bytes) {
     bool emitted = false;
@@ -289,8 +321,9 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
 
   // All runs stay in memory.
   {
-    SpillMemory memory(pool_.get(), kCap);
-    LocalBlockOutput output(makeOptions(), &memory);
+    const auto opts = makeOptions();
+    ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
+    LocalBlockOutput output(opts, spill);
     writeRun(output, kBlock / 2);
     writeRun(output, 0);
     writeRun(output, kBlock / 2);
@@ -302,13 +335,14 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
 
   // Exact boundary: run 0 is [0, kBlock), run 1 starts at kBlock (in memory).
   {
-    SpillMemory memory(pool_.get(), kCap);
-    LocalBlockOutput output(makeOptions(), &memory);
+    const auto opts = makeOptions();
+    ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
+    LocalBlockOutput output(opts, spill);
     writeRun(output, kBlock);
     writeRun(output, 0);
     writeRun(output, kBlock);
     writeRun(output, kBlock / 2);
-    ASSERT_EQ(memory.release(1), kBlock);
+    ASSERT_EQ(spill.release(1), kBlock);
     ShuffleWriterMetrics metrics;
     output.finish(metrics);
     EXPECT_EQ(metrics.totalBytesEvicted, kBlock);
@@ -319,12 +353,13 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
   // 3*kBlock/2) so half of run 1 reaches disk; run 2 starts at 3*kBlock/2 (in
   // memory).
   {
-    SpillMemory memory(pool_.get(), kCap);
-    LocalBlockOutput output(makeOptions(), &memory);
+    const auto opts = makeOptions();
+    ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
+    LocalBlockOutput output(opts, spill);
     writeRun(output, kBlock / 2);
     writeRun(output, kBlock);
     writeRun(output, kBlock);
-    ASSERT_EQ(memory.release(1), kBlock);
+    ASSERT_EQ(spill.release(1), kBlock);
     ShuffleWriterMetrics metrics;
     output.finish(metrics);
     EXPECT_EQ(metrics.totalBytesEvicted, kBlock);
@@ -333,13 +368,14 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
 
   // All runs flushed to disk.
   {
-    SpillMemory memory(pool_.get(), kCap);
-    LocalBlockOutput output(makeOptions(), &memory);
+    const auto opts = makeOptions();
+    ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
+    LocalBlockOutput output(opts, spill);
     writeRun(output, kBlock / 2);
     writeRun(output, 0);
     writeRun(output, kBlock);
     writeRun(output, kBlock / 2);
-    ASSERT_GT(memory.releaseAll(), 0);
+    ASSERT_GT(spill.releaseAll(), 0);
     ShuffleWriterMetrics metrics;
     output.finish(metrics);
     EXPECT_EQ(metrics.totalBytesEvicted, 2 * kBlock);
@@ -349,7 +385,7 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
 
 TEST_F(SpillMemoryTest, zeroByteAppendCreatesNoSpillFile) {
   const auto opts = options();
-  ShuffleSpillFile spill(opts, "zero", nullptr);
+  ShuffleSpillFile spill(opts, "zero");
   EXPECT_EQ(spill.append(nullptr, 0), 0u);
   EXPECT_EQ(spill.end(), 0u);
   EXPECT_EQ(spill.bytesWritten(), 0);

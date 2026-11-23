@@ -79,20 +79,22 @@ CellShuffleWriter::CellShuffleWriter(
         options_.cellOptions,
         boltPool_);
   } else {
-    // Ordinary and composite outputs share one spill-memory budget.
+    // Ordinary and composite outputs share one spill file and memory budget.
     const int64_t spillMemoryBytes = options_.cellOptions.spillMemoryBytes;
-    spillMemory_ = std::make_unique<SpillMemory>(
+    spillFile_ = std::make_unique<ShuffleSpillFile>(
+        options_.partitionWriterOptions,
+        "cell",
         boltPool_,
         spillMemoryBytes >= 0 ? spillMemoryBytes : kNoSpillMemoryCap);
     auto blocks = std::make_unique<LocalBlockOutput>(
-        options_.partitionWriterOptions, spillMemory_.get());
+        options_.partitionWriterOptions, *spillFile_);
     output_ = std::make_unique<LocalCellOutput>(
         *blocks,
+        *spillFile_,
         &layout_,
         options_.cellOptions,
         options_.partitionWriterOptions,
-        boltPool_,
-        spillMemory_.get());
+        boltPool_);
     blocks_ = std::move(blocks);
   }
 }
@@ -103,6 +105,8 @@ CellShuffleWriter::~CellShuffleWriter() {
   shredder_.reset();
   splitter_.reset();
   output_.reset();
+  blocks_.reset();
+  spillFile_.reset();
   allocator_.reset();
   boltPool_->release();
 }
@@ -226,10 +230,10 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       state_ == State::kUninitialized,
       "CellShuffleWriter is already initialized");
   state_ = State::kIdle;
-  const std::string spillMemory = spillMemory_ == nullptr ? "0"
-      : spillMemory_->capBytes() == kNoSpillMemoryCap
+  const std::string spillMemory = spillFile_ == nullptr ? "0"
+      : spillFile_->capBytes() == kNoSpillMemoryCap
       ? "no cap"
-      : std::to_string(spillMemory_->capBytes());
+      : std::to_string(spillFile_->capBytes());
   LOG(INFO) << "CellShuffleWriter init: layout="
             << (nestedLayout_ != nullptr  ? "native nested"
                     : adapter_ != nullptr ? "adapter"
@@ -251,6 +255,9 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 arrow::Status CellShuffleWriter::splitOrdinary(
     RowVectorPtr rv,
     int64_t /*memLimitIgnored: cell memory decisions never use it*/) {
+  BOLT_CHECK(
+      !isCompositeActive(),
+      "splitOrdinary called while composite side is active");
   if (!isInitialized()) {
     initOnFirstBatch(*rv);
   }
@@ -583,7 +590,7 @@ void CellShuffleWriter::prepareChunkGrowth() {
   // Count both allocated chunks and retained spill bytes.
   const auto overBytes = [&]() {
     return allocator_->allocatedBytes() + kChunkBytes +
-        (spillMemory_ != nullptr ? spillMemory_->heldBytes() : 0) -
+        (spillFile_ != nullptr ? spillFile_->heldBytes() : 0) -
         memorySpillThresholdBytes_;
   };
   const auto overCap = [&]() {
@@ -600,7 +607,7 @@ void CellShuffleWriter::prepareChunkGrowth() {
     // Flush buffered spill bytes first, at least one reservation quantum.
     SealSpillTimer timer(*this);
     const int64_t over = overCap() ? overBytes() : 0;
-    if (spillMemory_->release(std::max<int64_t>(over, 2 * kChunkBytes)) > 0 &&
+    if (spillFile_->release(std::max<int64_t>(over, 2 * kChunkBytes)) > 0 &&
         !overCap() && boltPool_->maybeReserve(kChunkBytes)) {
       ++pressure_.growthFlushes;
       return;
@@ -693,13 +700,15 @@ void CellShuffleWriter::maybeSeal() {
 arrow::Status CellShuffleWriter::reclaimOrdinary(
     int64_t size,
     int64_t* actual) {
+  BOLT_CHECK(
+      !isCompositeActive(),
+      "reclaimOrdinary called while composite side is active");
   *actual = 0;
   if (!isInitialized()) {
     // No ordinary batch yet: only the composite blocks may hold spill
     // memory.
-    if (spillMemory_ != nullptr) {
-      *actual =
-          size > 0 ? spillMemory_->release(size) : spillMemory_->releaseAll();
+    if (spillFile_ != nullptr) {
+      *actual = size > 0 ? spillFile_->release(size) : spillFile_->releaseAll();
     }
     if (*actual > 0) {
       boltPool_->release();
@@ -722,12 +731,12 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
-  if (spillMemory_ != nullptr) {
+  if (spillFile_ != nullptr) {
     // Output reserves between blocks, so its completed spill blocks are
     // reclaimable.
     SealSpillTimer timer(*this);
-    const int64_t freed = size > 0 ? spillMemory_->release(size - *actual)
-                                   : spillMemory_->releaseAll();
+    const int64_t freed = size > 0 ? spillFile_->release(size - *actual)
+                                   : spillFile_->releaseAll();
     if (freed > 0) {
       pressure_.freedSpillMemory += freed;
       *actual += freed;
@@ -825,14 +834,24 @@ arrow::Status CellShuffleWriter::reclaimWindow(int64_t size, int64_t* actual) {
 }
 
 arrow::Status CellShuffleWriter::flushOrdinary() {
+  BOLT_CHECK(
+      !isCompositeActive(),
+      "flushOrdinary called while composite side is active");
   // Switching to composite input releases the ordinary window.
   if (isInitialized() && splitter_->hasWindowRows()) {
     releaseWindow(SealReason::kComposite);
   }
+  BOLT_CHECK(
+      !isInitialized() ||
+          (!splitter_->hasWindowRows() && !splitter_->isWritingOutput()),
+      "ordinary side must be idle after flushOrdinary()");
   return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::stopOrdinary() {
+  BOLT_CHECK(
+      !isCompositeActive(),
+      "stopOrdinary called while composite side is active");
   if (isInitialized()) {
     try {
       splitter_->finish(metrics_, columnPositionCounts());
@@ -888,15 +907,15 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
 
 void CellShuffleWriter::logPressure() const {
   std::string spillMemory;
-  if (spillMemory_ != nullptr) {
+  if (spillFile_ != nullptr) {
     const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
     spillMemory = fmt::format(
         ", spill memory: held peak={:.1f}MB flushed={:.1f}MB ({} flushes) "
         "direct={:.1f}MB",
-        mb(spillMemory_->peakBytes()),
-        mb(spillMemory_->flushedBytes()),
-        spillMemory_->flushes(),
-        mb(spillMemory_->directBytes()));
+        mb(spillFile_->peakBytes()),
+        mb(spillFile_->flushedBytes()),
+        spillFile_->flushes(),
+        mb(spillFile_->directBytes()));
   }
   const uint64_t totalSealSpillNs =
       convertSpillNs_ + shredSpillNs_ + splitSpillNs_ + otherSpillNs_;

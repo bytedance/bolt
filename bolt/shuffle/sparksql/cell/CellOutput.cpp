@@ -124,12 +124,12 @@ void writeCells(
 
 LocalCellOutput::LocalCellOutput(
     PartialSpiller& composite,
+    ShuffleSpillFile& spill,
     const CellLayout* layout,
     CellShuffleOptions cellOptions,
     PartitionWriterOptions options,
-    memory::MemoryPool* pool,
-    SpillMemory* memory)
-    : PartialSpiller(options, "cell", memory),
+    memory::MemoryPool* pool)
+    : PartialSpiller(spill),
       composite_(composite),
       options_(std::move(options)),
       layout_(layout),
@@ -140,7 +140,8 @@ LocalCellOutput::LocalCellOutput(
 }
 
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
-  auto& run = runs_.emplace_back();
+  auto writeGuard = scopedWrite();
+  SpilledRun run;
   // Runs are compressed as they spill, in their final form: both disk
   // passes write compressed bytes and the merge copies the segments
   // verbatim.
@@ -160,9 +161,11 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   compressor_.releaseWorkspace();
   scratch_.reset();
   spill_.flush();
+  runs_.push_back(std::move(run));
 }
 
 void LocalCellOutput::sealWindow(const CellWindowInput& in) {
+  auto writeGuard = scopedWrite();
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     if (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0) {
       continue;
@@ -404,7 +407,7 @@ void LocalCellOutput::finalize(
       mergeInput_.reset();
     };
     // Per partition: the Cell payloads, then the composite blocks.
-    mergeToDataFile(options_, {this, &composite_}, metrics);
+    mergeToDataFile(options_, spill_, {this, &composite_}, metrics);
   }
   compressor_.releaseWorkspace();
   segmentSizes_.clear();

@@ -80,10 +80,10 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// the subclass ends it in stopOrdinary().
   virtual PartitionBlockOutput& output() = 0;
 
-  /// The memory the outputs' spill files keep their newest bytes in, or
-  /// null. Memory pressure on the composite side writes its oldest blocks
-  /// to disk first, and the held rows after it, into the blocks it holds.
-  virtual SpillMemory* spillMemory() {
+  /// The shared local spill file whose newest bytes stay in memory, or null.
+  /// Memory pressure on the composite side writes its oldest blocks to disk
+  /// first, and the held rows after it, into the blocks it holds.
+  virtual ShuffleSpillFile* spillFile() {
     return nullptr;
   }
 
@@ -96,6 +96,11 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// True once stop() has begun.
   bool isStopped() const {
     return lifecycle_ == LifecycleState::kStopped;
+  }
+
+  /// True while the composite path owns buffered state and handles reclaims.
+  bool isCompositeActive() const {
+    return compositeActive_;
   }
 
   /// Computes partition ids into row2Partition_ and counts into

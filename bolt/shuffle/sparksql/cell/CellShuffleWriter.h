@@ -64,10 +64,13 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   arrow::Status flushOrdinary() override;
   arrow::Status stopOrdinary() override;
   PartitionBlockOutput& output() override {
+    BOLT_CHECK(
+        isCompositeActive() || isStopped(),
+        "composite output accessed while ordinary side is active");
     return *blocks_;
   }
-  SpillMemory* spillMemory() override {
-    return spillMemory_.get();
+  ShuffleSpillFile* spillFile() override {
+    return spillFile_.get();
   }
 
  private:
@@ -233,9 +236,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellNestedLayout> nestedLayout_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
-  /// Locally, where both outputs' spill files keep their newest bytes;
-  /// declared before them, as it must outlive them. Null on Celeborn.
-  std::unique_ptr<SpillMemory> spillMemory_;
+  /// Locally, the shared spill file (and its in-memory block cache) used by
+  /// both outputs; declared before them, as it must outlive them. Null on
+  /// Celeborn.
+  std::unique_ptr<ShuffleSpillFile> spillFile_;
   /// The block output that serves the composite rows: locally a spill of
   /// its own, merged by output_ after the Cell payloads; on Celeborn also
   /// the push channel of those payloads, and finishing it ends the attempt
