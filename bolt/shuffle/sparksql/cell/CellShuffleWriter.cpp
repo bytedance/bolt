@@ -138,7 +138,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       types.push_back(physicalType.childAt(i));
     }
     layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
-    if (adapter->hasComplexColumns()) {
+    if (adapter->needsAdaptation()) {
       adapter_ = std::move(adapter);
     }
   }
@@ -217,7 +217,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       *layout_.rowType(),
       numPartitions_,
       options_,
-      nestedLayout_ == nullptr && adapter_ == nullptr,
+      nestedLayout_ == nullptr &&
+          (adapter_ == nullptr || !adapter_->hasComplexColumns()),
       boltPool_);
   splitter_->setStreamCheck(shuffleCheck_.get());
 
@@ -254,13 +255,17 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     initOnFirstBatch(*rv);
   }
   if (adapter_ != nullptr) {
-    NanosecondTimer timer(&convertWallNs_);
-    auto* prevSpill = activeSpillNs_;
-    activeSpillNs_ = &convertSpillNs_;
-    SCOPE_EXIT {
-      activeSpillNs_ = prevSpill;
-    };
-    rv = adapter_->pack(rv, boltPool_);
+    if (adapter_->hasComplexColumns()) {
+      NanosecondTimer timer(&convertWallNs_);
+      auto* prevSpill = activeSpillNs_;
+      activeSpillNs_ = &convertSpillNs_;
+      SCOPE_EXIT {
+        activeSpillNs_ = prevSpill;
+      };
+      rv = adapter_->pack(rv, boltPool_);
+    } else {
+      rv = adapter_->pack(rv, boltPool_);
+    }
   }
   // Load lazy columns before sizing slices; unloaded columns estimate as zero.
   if (isLazyNotLoaded(*rv)) {
@@ -340,10 +345,6 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     {
       NanosecondTimer classifyTimer(&nullClassifyNs_);
       for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-        if (layout_.isUnknownColumn(col)) {
-          nullClass[col] = NullClass::kAllNull;
-          continue;
-        }
         auto& column = decoded[col];
         column.decode(*rv->childAt(col + columnOffset));
         // Classify once so stale null buffers do not add a per-row bit test.

@@ -81,9 +81,9 @@ CellSplitter::CellSplitter(
       numStreams_(layout.numStreams()),
       enableNonTemporalStores_(enableNonTemporalStores),
       cells_(&pool, &allocator, numPartitions_, numStreams_),
-      nulls_(&pool, numPartitions_, layout.numWireColumns()),
+      nulls_(&pool, numPartitions_, layout.numColumns()),
       windowRowCounts_(numPartitions_, 0),
-      encodingTags_((layout.numWireColumns() + 7) / 8, 0),
+      encodingTags_((layout.numColumns() + 7) / 8, 0),
       arena_(&pool),
       partitionBytes_(numPartitions_, 0),
       variableBytes_(numPartitions_, 0),
@@ -224,7 +224,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
       : nullptr;
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_.firstStream(col);
@@ -287,7 +287,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   auto* check = streamCheck_ != nullptr && streamCheck_->checksColumn(col)
       ? streamCheck_
       : nullptr;
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_.firstStream(col);
@@ -349,7 +349,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
 
 template <bool kHasNulls, InputMapping kMapping, bool kStreaming>
 void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col];
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_.firstStream(col);
@@ -430,7 +430,7 @@ void CellSplitter::dispatchRaw(
 
 template <bool kHasNulls>
 void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col];
   const uint32_t stream = layout_.firstStream(col);
   uint8_t* __restrict cur = cursors(stream);
@@ -457,7 +457,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
 
 template <bool kHasNulls, InputMapping kMapping>
 void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col];
   const Timestamp* __restrict vals = decoded.data<Timestamp>();
   const uint32_t secondsStream = layout_.firstStream(col);
@@ -518,12 +518,8 @@ void CellSplitter::split(const SplitBatch& batch) {
       : layout_.numColumns();
   for (uint32_t i = 0; i < numColumns; ++i) {
     const uint32_t col = batch.columns.has_value() ? (*batch.columns)[i] : i;
-    if (layout_.isUnknownColumn(col)) {
-      continue;
-    }
-    const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
-    const bool recordNulls = nulls_.observeBatch(nullColumn, klass, positions);
+    const bool recordNulls = nulls_.observeBatch(col, klass, positions);
     if (klass == NullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
       // vector whose scan came back all-null): values contribute nothing
@@ -534,7 +530,7 @@ void CellSplitter::split(const SplitBatch& batch) {
         for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
           const uint32_t count = batch.partition2RowCount[pid];
           if (count > 0) {
-            nulls_.setNullRun(pid, nullColumn, positions[pid], count);
+            nulls_.setNullRun(pid, col, positions[pid], count);
           }
         }
       }
@@ -623,7 +619,7 @@ void CellSplitter::split(const SplitBatch& batch) {
 
 CellWindowInput CellSplitter::windowInput(
     ColumnPositionCounts positions) const {
-  BOLT_CHECK(positions.empty() || positions.size() == layout_.numWireColumns());
+  BOLT_CHECK(positions.empty() || positions.size() == layout_.numColumns());
   CellWindowInput in;
   in.cells = &cells_;
   in.nulls = &nulls_;
@@ -959,8 +955,7 @@ void CellSplitter::enableDictionary(uint32_t col) {
       "dictionary form is defined for string columns only");
   dictEnabled_[col] = 1;
   dictStates_[col].assign(numPartitions_, DictState{});
-  const auto wire = layout_.wireColumn(col);
-  encodingTags_[wire / 8] |= static_cast<uint8_t>(1u << (wire % 8));
+  encodingTags_[col / 8] |= static_cast<uint8_t>(1u << (col % 8));
 }
 
 void CellSplitter::closeDictSegment(
@@ -1240,7 +1235,7 @@ template <
     bool kStreaming,
     bool kPrefetchInput>
 void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
-  const auto nullColumn = layout_.wireColumn(col);
+  const auto nullColumn = col;
   auto& decoded = batch.decoded[col]; // nulls() may materialize lazily
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_.firstStream(col);

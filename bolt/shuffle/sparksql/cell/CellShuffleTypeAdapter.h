@@ -20,14 +20,14 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Packs a row type's ARRAY, MAP and ROW columns into one trailing VARBINARY
-/// column of CompactRows, and unpacks them. Used when nested types are not
-/// shredded (CellShuffleOptions::nativeNestedTypes off, or a schema past
-/// the nested layout's column limit).
+/// Adapts a logical row type to a Cell physical row type: strips UNKNOWN
+/// columns (restored as null constants on unpack) and, when nested types are
+/// not shredded, packs ARRAY, MAP and ROW columns into one trailing VARBINARY
+/// column of CompactRows.
 class CellShuffleTypeAdapter {
  public:
   /// Whether every leaf of `type`, at any depth of ARRAY, MAP and ROW, is a
-  /// type a Cell column carries: the schemas both Cell layouts take.
+  /// supported Cell scalar type or UNKNOWN.
   static bool isSupported(const TypePtr& type);
 
   explicit CellShuffleTypeAdapter(RowTypePtr logicalType);
@@ -40,14 +40,23 @@ class CellShuffleTypeAdapter {
     return !complexColumns_.empty();
   }
 
+  bool hasUnknownColumns() const {
+    return !unknownColumns_.empty();
+  }
+
+  bool needsAdaptation() const {
+    return hasComplexColumns() || hasUnknownColumns();
+  }
+
   /// The physical batch of `input`, row for row: the simple columns,
-  /// sharing their storage, then one binary column holding each row's
-  /// complex fields as a CompactRow. Without complex columns, `input`
-  /// itself.
+  /// sharing their storage, with UNKNOWN columns omitted and (when
+  /// hasComplexColumns()) one trailing binary column holding each row's
+  /// complex fields as a CompactRow. When !needsAdaptation(), returns `input`.
   RowVectorPtr pack(const RowVectorPtr& input, memory::MemoryPool* pool) const;
 
   /// The logical batch of a physical batch pack() made, row for row: the
-  /// simple columns shared, the complex ones deserialized.
+  /// simple columns shared, complex columns deserialized, and UNKNOWN columns
+  /// restored as null constants.
   RowVectorPtr unpack(const RowVectorPtr& input, memory::MemoryPool* pool)
       const;
 
@@ -57,6 +66,7 @@ class CellShuffleTypeAdapter {
   RowTypePtr packedType_;
   std::vector<uint32_t> simpleColumns_;
   std::vector<uint32_t> complexColumns_;
+  std::vector<uint32_t> unknownColumns_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

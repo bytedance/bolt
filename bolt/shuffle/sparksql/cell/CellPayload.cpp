@@ -410,25 +410,23 @@ bool CellPayloadDecoder::parseNullBody(
   }
 
   const uint32_t numColumns = layout_.numColumns();
-  const uint32_t tagBytes = nullTagBytes(layout_.numWireColumns());
+  const uint32_t tagBytes = nullTagBytes(numColumns);
   const auto nullBody = bufferBytes(nullBody_);
   const auto* nullData = reinterpret_cast<const uint8_t*>(nullBody.data());
   if (nullBody.size() < tagBytes) {
     return fail(error, "null body shorter than its tags");
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
-    const auto tag = layout_.isUnknownColumn(col)
-        ? NullTag::kAllNull
-        : getNullTag(nullData, layout_.wireColumn(col));
+    const auto tag = getNullTag(nullData, col);
     if (tag == NullTag::kReserved) {
       return fail(error, "reserved null tag");
     }
     nullTags_[col] = tag;
   }
   // Unused high bits of the last tags byte must be zero.
-  if ((layout_.numWireColumns() % 4) != 0) {
+  if ((numColumns % 4) != 0) {
     const uint8_t tail = nullData[tagBytes - 1];
-    if ((tail >> ((layout_.numWireColumns() % 4) * 2)) != 0) {
+    if ((tail >> ((numColumns % 4) * 2)) != 0) {
       return fail(error, "non-zero unused null tag bits");
     }
   }
@@ -694,7 +692,7 @@ bool CellPayloadDecoder::openPayload(
   }
   // The source's null tags, records, encoding tags and streams of each
   // column.
-  encodingTags_.assign((layout_.numWireColumns() + 7) / 8, 0);
+  encodingTags_.assign((layout_.numColumns() + 7) / 8, 0);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     const uint32_t from = sourceColumns[col];
     BOLT_CHECK_EQ(
@@ -703,10 +701,8 @@ bool CellPayloadDecoder::openPayload(
     nullTags_[col] = source.nullTags_[from];
     records_[col] = source.records_[from];
     if (layout_.isStringColumn(col)) {
-      const uint32_t at = source.layout_.wireColumn(from);
-      const uint32_t wire = layout_.wireColumn(col);
-      encodingTags_[wire / 8] |= static_cast<uint8_t>(
-          ((source.encodingTags_[at / 8] >> (at % 8)) & 1) << (wire % 8));
+      encodingTags_[col / 8] |= static_cast<uint8_t>(
+          ((source.encodingTags_[from / 8] >> (from % 8)) & 1) << (col % 8));
     }
   }
   for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
@@ -732,13 +728,14 @@ bool CellPayloadDecoder::parsePayload(
   // payload without wire columns.
   const uint32_t nullStoredSize = memory::loadUnaligned<uint32_t>(header + 16);
   const uint32_t nullDecodedSize = memory::loadUnaligned<uint32_t>(header + 20);
-  if (layout_.numWireColumns() == 0 &&
+  const uint32_t numColumns = layout_.numColumns();
+  if (numColumns == 0 &&
       (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
        memory::loadUnaligned<uint64_t>(header + 8) != 0)) {
     return fail(
         error, "payload without wire columns must contain only its header");
   }
-  if (layout_.numWireColumns() != 0 && nullStoredSize < 1) {
+  if (numColumns != 0 && nullStoredSize < 1) {
     return fail(error, "null stored size must be at least 1");
   }
   // Bounds on untrusted fields.
@@ -753,23 +750,18 @@ bool CellPayloadDecoder::parsePayload(
     return false;
   }
 
-  const uint32_t numColumns = layout_.numColumns();
-  encodingTags_.resize((layout_.numWireColumns() + 7) / 8);
+  encodingTags_.resize((numColumns + 7) / 8);
   if (!in.read(encodingTags_.data(), encodingTags_.size())) {
     return fail(error, "truncated encoding tags");
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
-    if (layout_.isUnknownColumn(col)) {
-      continue;
-    }
-    const auto wire = layout_.wireColumn(col);
-    const bool tagged = (encodingTags_[wire / 8] >> (wire % 8)) & 1;
+    const bool tagged = (encodingTags_[col / 8] >> (col % 8)) & 1;
     if (tagged && !layout_.isStringColumn(col)) {
       return fail(error, "encoding tag on a non-string column");
     }
   }
-  if ((layout_.numWireColumns() % 8) != 0 &&
-      (encodingTags_.back() >> (layout_.numWireColumns() % 8)) != 0) {
+  if ((numColumns % 8) != 0 &&
+      (encodingTags_.back() >> (numColumns % 8)) != 0) {
     return fail(error, "non-zero unused encoding tag bits");
   }
 
@@ -810,9 +802,6 @@ bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
   auto& cursor = cursors_[col];
   cursor.valuesRead = 0;
   const auto kind = layout_.rowType()->childAt(col)->kind();
-  if (kind == TypeKind::UNKNOWN) {
-    return true;
-  }
   const uint32_t stream = layout_.firstStream(col);
   const auto bytes = streamViews_[stream];
   const auto* data = reinterpret_cast<const uint8_t*>(bytes.data());
@@ -860,8 +849,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   const auto lengthBytes = streamViews_[layout_.firstStream(col)];
   const auto dataBytes = streamViews_[layout_.firstStream(col) + 1];
   const uint32_t nonNull = nonNullCount_[col];
-  const auto wire = layout_.wireColumn(col);
-  cursor.isDictionary = (encodingTags_[wire / 8] >> (wire % 8)) & 1;
+  cursor.isDictionary = (encodingTags_[col / 8] >> (col % 8)) & 1;
   cursor.data = dataBytes;
   cursor.dataOffset = 0;
   cursor.entries.clear();
@@ -1100,9 +1088,6 @@ bool CellPayloadDecoder::appendRows(
   }
   for (uint32_t col = 0; col < layout_.numColumns() && numRows > 0; ++col) {
     const auto kind = layout_.rowType()->childAt(col)->kind();
-    if (kind == TypeKind::UNKNOWN) {
-      continue;
-    }
     auto& cursor = cursors_[col];
     const uint32_t dense = appendNulls(col, numRows);
     bool ok = true;
@@ -1647,9 +1632,6 @@ RowVectorPtr CellPayloadDecoder::finishBatch() {
   for (uint32_t col = 0; col < numColumns; ++col) {
     const auto& type = rowType->childAt(col);
     switch (type->kind()) {
-      case TypeKind::UNKNOWN:
-        children[col] = BaseVector::createNullConstant(type, batchRows_, pool_);
-        break;
       case TypeKind::BOOLEAN:
         children[col] = makeFlat<bool>(col, type);
         break;
@@ -1720,32 +1702,31 @@ void buildNullBody(
     uint32_t rows,
     BufferPtr& out,
     memory::MemoryPool* pool) {
-  const uint32_t numWireColumns = in.layout->numWireColumns();
-  if (numWireColumns == 0) {
+  const uint32_t numColumns = in.layout->numColumns();
+  if (numColumns == 0) {
     return;
   }
-  const uint32_t tagBytes = nullTagBytes(numWireColumns);
+  const uint32_t tagBytes = nullTagBytes(numColumns);
   const size_t tagStart = out ? out->size() : 0;
   resizeBuffer(out, checkedPlus<size_t>(tagStart, tagBytes), pool);
   auto* tags = out->asMutable<uint8_t>() + tagStart;
   ::memset(tags, 0, tagBytes);
-  for (uint32_t wireCol = 0; wireCol < numWireColumns; ++wireCol) {
+  for (uint32_t col = 0; col < numColumns; ++col) {
     const uint32_t positions =
-        in.columnPositions != nullptr && in.columnPositions[wireCol] != nullptr
-        ? in.columnPositions[wireCol][pid]
+        in.columnPositions != nullptr && in.columnPositions[col] != nullptr
+        ? in.columnPositions[col][pid]
         : rows;
-    const auto summary = in.nulls->summarize(pid, wireCol, positions);
-    setNullTag(tags, wireCol, summary.tag);
+    const auto summary = in.nulls->summarize(pid, col, positions);
+    setNullTag(tags, col, summary.tag);
   }
   // Records follow the tags for kRawNull columns, in column order, written
   // together once `out` has room for them all.
   std::vector<uint32_t> rawColumns;
   size_t recordsBytes = 0;
-  for (uint32_t wireCol = 0; wireCol < numWireColumns; ++wireCol) {
-    if (getNullTag(out->as<uint8_t>() + tagStart, wireCol) ==
-        NullTag::kRawNull) {
-      rawColumns.push_back(wireCol);
-      recordsBytes += in.nulls->recordsBytes(pid, wireCol);
+  for (uint32_t col = 0; col < numColumns; ++col) {
+    if (getNullTag(out->as<uint8_t>() + tagStart, col) == NullTag::kRawNull) {
+      rawColumns.push_back(col);
+      recordsBytes += in.nulls->recordsBytes(pid, col);
     }
   }
   if (rawColumns.empty()) {

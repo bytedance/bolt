@@ -51,12 +51,14 @@ class CellNestedLayout {
 
   struct Node {
     Kind kind;
-    /// The logical type: a leaf's is its column's.
+    /// The logical type: a non-UNKNOWN leaf's is its column's.
     TypePtr type;
     /// The space the node's column has its positions in.
     uint32_t space;
-    /// The column's index among its space's columns.
-    uint32_t spaceColumn;
+    /// The node's column index in layout(), or kNone for UNKNOWN leaves.
+    uint32_t layoutColumn{kNone};
+    /// The column's index among its space's columns, or kNone for UNKNOWN.
+    uint32_t spaceColumn{kNone};
     /// A container's space; kNone for a leaf or a ROW.
     uint32_t ownedSpace{kNone};
     /// An ARRAY's element; a MAP's key, then its value; a ROW's fields.
@@ -66,12 +68,10 @@ class CellNestedLayout {
   struct Space {
     /// Containers between the space and the rows.
     uint32_t depth;
-    /// The layout columns at the space's positions, ascending, UNKNOWN
-    /// columns included.
+    /// The layout() columns at the space's positions, ascending (UNKNOWN
+    /// leaves omitted).
     std::vector<uint32_t> columns;
-    /// Those with a wire column: the columns a split of the space covers.
-    std::vector<uint32_t> wireColumns;
-    /// The containers among the columns, in node order.
+    /// The containers among the space's nodes, in node order.
     std::vector<uint32_t> containers;
     /// The row type of `columns`, a decoder's for the space.
     RowTypePtr rowType;
@@ -122,9 +122,19 @@ class CellNestedLayout {
     return maxDepth_;
   }
 
+  /// Node index owning layout() column `col`.
+  uint32_t nodeIndexOfColumn(uint32_t col) const {
+    return nodeOfColumn_[col];
+  }
+
+  /// Node owning layout() column `col`.
+  const Node& nodeOfColumn(uint32_t col) const {
+    return nodes_[nodeOfColumn_[col]];
+  }
+
   /// Whether a layout column has the rows' positions (space 0).
   bool inRowSpace(uint32_t col) const {
-    return nodes_[col].space == 0;
+    return nodes_[nodeOfColumn_[col]].space == 0;
   }
 
  private:
@@ -133,6 +143,7 @@ class CellNestedLayout {
 
   RowTypePtr logicalType_;
   std::vector<Node> nodes_;
+  std::vector<uint32_t> nodeOfColumn_;
   std::vector<uint32_t> topNodes_;
   std::vector<Space> spaces_;
   uint32_t maxDepth_{0};

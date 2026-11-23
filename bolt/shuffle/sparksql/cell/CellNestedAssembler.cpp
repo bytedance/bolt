@@ -271,6 +271,11 @@ RowVectorPtr CellNestedAssembler::assemble() {
   std::vector<VectorPtr> vectors(layout_.numNodes());
   for (uint32_t n = layout_.numNodes(); n-- > 0;) {
     const auto& node = layout_.node(n);
+    if (node.kind == Kind::kLeaf && node.type->kind() == TypeKind::UNKNOWN) {
+      vectors[n] = BaseVector::createNullConstant(
+          node.type, batches[node.space]->size(), pool_);
+      continue;
+    }
     auto& column = batches[node.space]->childAt(node.spaceColumn);
     if (node.kind == Kind::kLeaf) {
       vectors[n] = std::move(column);

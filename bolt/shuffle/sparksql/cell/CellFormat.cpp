@@ -35,18 +35,10 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
   layout.rowType_ = rowType;
   layout.numColumns_ = static_cast<uint32_t>(rowType->size());
   layout.firstStream_.reserve(layout.numColumns_);
-  layout.wireOfColumn_.reserve(layout.numColumns_);
   for (uint32_t col = 0; col < layout.numColumns_; ++col) {
     const auto kind = rowType->childAt(col)->kind();
     layout.firstStream_.push_back(
         static_cast<uint32_t>(layout.streams_.size()));
-    if (kind == TypeKind::UNKNOWN) {
-      layout.wireOfColumn_.push_back(kInvalidWireColumn);
-      continue;
-    }
-    layout.wireOfColumn_.push_back(
-        static_cast<uint32_t>(layout.logicalOfWire_.size()));
-    layout.logicalOfWire_.push_back(col);
     switch (kind) {
       case TypeKind::BOOLEAN:
       case TypeKind::TINYINT:

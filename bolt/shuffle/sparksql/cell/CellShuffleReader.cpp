@@ -80,7 +80,7 @@ RowVectorPtr CellShuffleReader::nextNonComposite() {
         });
   }
   auto output = nextPhysical();
-  if (output != nullptr && adapter_->hasComplexColumns()) {
+  if (output != nullptr && adapter_->needsAdaptation()) {
     output = adapter_->unpack(output, pool());
   }
   return output;

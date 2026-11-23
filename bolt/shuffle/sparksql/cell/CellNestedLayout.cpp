@@ -72,7 +72,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       supports(logicalType_),
       "no nested Cell layout for {}",
       logicalType_->toString());
-  spaces_.push_back(Space{0, {}, {}, {}, nullptr});
+  spaces_.push_back(Space{0, {}, {}, nullptr});
   for (const auto& child : logicalType_->children()) {
     topNodes_.push_back(addNode(child, 0));
   }
@@ -81,11 +81,21 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
   std::vector<TypePtr> types;
   names.reserve(nodes_.size());
   types.reserve(nodes_.size());
+  nodeOfColumn_.reserve(nodes_.size());
   for (uint32_t n = 0; n < nodes_.size(); ++n) {
+    auto& node = nodes_[n];
+    if (node.kind == Kind::kLeaf && node.type->kind() == TypeKind::UNKNOWN) {
+      continue;
+    }
+    const uint32_t layoutCol = static_cast<uint32_t>(types.size());
+    node.layoutColumn = layoutCol;
+    nodeOfColumn_.push_back(n);
+    auto& space = spaces_[node.space];
+    node.spaceColumn = static_cast<uint32_t>(space.columns.size());
+    space.columns.push_back(layoutCol);
     names.push_back(fmt::format("n{}", n));
     // A leaf's column has its own type, a container's its lengths, a
     // ROW's its presence.
-    const auto& node = nodes_[n];
     if (node.kind == Kind::kLeaf) {
       types.push_back(node.type);
     } else if (node.kind == Kind::kRow) {
@@ -97,12 +107,11 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
   for (auto& space : spaces_) {
     std::vector<std::string> spaceNames;
     std::vector<TypePtr> spaceTypes;
+    spaceNames.reserve(space.columns.size());
+    spaceTypes.reserve(space.columns.size());
     for (const auto col : space.columns) {
       spaceNames.push_back(names[col]);
       spaceTypes.push_back(types[col]);
-      if (types[col]->kind() != TypeKind::UNKNOWN) {
-        space.wireColumns.push_back(col);
-      }
     }
     space.rowType = ROW(std::move(spaceNames), std::move(spaceTypes));
   }
@@ -115,14 +124,12 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
   node.kind = kindOf(type);
   node.type = type;
   node.space = space;
-  node.spaceColumn = static_cast<uint32_t>(spaces_[space].columns.size());
-  spaces_[space].columns.push_back(id);
   if (node.kind == Kind::kArray || node.kind == Kind::kMap) {
     node.ownedSpace = static_cast<uint32_t>(spaces_.size());
     spaces_[space].containers.push_back(id);
     const uint32_t depth = spaces_[space].depth + 1;
     maxDepth_ = std::max(maxDepth_, depth);
-    spaces_.push_back(Space{depth, {}, {}, {}, nullptr});
+    spaces_.push_back(Space{depth, {}, {}, nullptr});
   }
   // A ROW's fields have its positions, a container's children those of its
   // space.

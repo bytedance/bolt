@@ -234,14 +234,13 @@ struct CellStream {
   StreamKind kind;
 };
 
-/// Maps a shuffle row type (pid column already stripped) onto wire columns
-/// and streams. Complex types reach it shredded (nested layouts) or packed
-/// into binary; create() rejects physical types it cannot map.
+/// Maps a physical shuffle row type (pid and UNKNOWN columns already stripped)
+/// onto wire columns and streams. Complex types reach it shredded (nested
+/// layouts) or packed into binary; create() rejects types it cannot map.
 class CellLayout {
  public:
   static bool isSupportedType(const TypePtr& type) {
     switch (type->kind()) {
-      case TypeKind::UNKNOWN:
       case TypeKind::BOOLEAN:
       case TypeKind::TIMESTAMP:
       case TypeKind::HUGEINT:
@@ -259,30 +258,10 @@ class CellLayout {
     }
   }
 
-  static constexpr uint32_t kInvalidWireColumn = UINT32_MAX;
-
   static CellLayout create(const RowTypePtr& rowType);
 
   uint32_t numColumns() const {
     return numColumns_;
-  }
-
-  // UNKNOWN has no wire slot, null state or value stream.
-  bool isUnknownColumn(uint32_t column) const {
-    return rowType_->childAt(column)->kind() == TypeKind::UNKNOWN;
-  }
-
-  uint32_t numWireColumns() const {
-    return static_cast<uint32_t>(logicalOfWire_.size());
-  }
-
-  uint32_t wireColumn(uint32_t column) const {
-    BOLT_CHECK(!isUnknownColumn(column));
-    return wireOfColumn_[column];
-  }
-
-  uint32_t logicalColumn(uint32_t wireColumn) const {
-    return logicalOfWire_[wireColumn];
   }
 
   uint32_t numStreams() const {
@@ -293,7 +272,7 @@ class CellLayout {
     return streams_[index];
   }
 
-  /// First stream of a logical column; a String column owns this stream
+  /// First stream of a column; a String column owns this stream
   /// (Length/Index) and the next one (Data), a Timestamp column this one
   /// (Seconds) and the next one (Nanos).
   uint32_t firstStream(uint32_t column) const {
@@ -312,8 +291,6 @@ class CellLayout {
  private:
   RowTypePtr rowType_;
   uint32_t numColumns_{0};
-  std::vector<uint32_t> logicalOfWire_;
-  std::vector<uint32_t> wireOfColumn_;
   std::vector<CellStream> streams_;
   std::vector<uint32_t> firstStream_;
 };

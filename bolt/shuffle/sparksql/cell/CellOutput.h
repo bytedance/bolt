@@ -28,10 +28,11 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Per wire column, its committed position counts across all partitions.
+/// Per column, its committed position counts across all partitions.
 /// Empty, or a nullptr entry, uses the payload's row counts. A nonempty
-/// table has numWireColumns entries; each non-null entry has numPartitions
-/// counts. The table and counts are borrowed until the output call returns.
+/// table has layout->numColumns() entries; each non-null entry has
+/// numPartitions counts. The table and counts are borrowed until the output
+/// call returns.
 using ColumnPositionCounts = std::span<const uint32_t* const>;
 
 /// What an output backend reads from the splitter when draining or sealing:
@@ -45,8 +46,8 @@ struct CellWindowInput {
   /// Per partition: rows and string bytes of its open payload.
   std::span<const uint32_t> rowCounts;
   std::span<const uint64_t> variableBytes;
-  /// Payload encoding tags: ceil(numWireColumns / 8) bytes, one bit per
-  /// wire column, set when the column is written in dictionary form. Constant
+  /// Payload encoding tags: ceil(layout->numColumns() / 8) bytes, one bit per
+  /// column, set when the column is written in dictionary form. Constant
   /// for the writer's lifetime (the probe decides once).
   std::span<const uint8_t> encodingTags;
   /// Also the length of the per-partition arrays below.

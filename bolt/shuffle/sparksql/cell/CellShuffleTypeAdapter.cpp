@@ -34,7 +34,7 @@ bool isComplex(const TypePtr& type) {
 } // namespace
 
 bool CellShuffleTypeAdapter::isSupported(const TypePtr& type) {
-  if (CellLayout::isSupportedType(type)) {
+  if (type->kind() == TypeKind::UNKNOWN || CellLayout::isSupportedType(type)) {
     return true;
   }
   if (!isComplex(type)) {
@@ -60,7 +60,9 @@ CellShuffleTypeAdapter::CellShuffleTypeAdapter(RowTypePtr logicalType)
   std::vector<TypePtr> complexTypes;
   for (uint32_t i = 0; i < logicalType_->size(); ++i) {
     const auto& type = logicalType_->childAt(i);
-    if (isComplex(type)) {
+    if (type->kind() == TypeKind::UNKNOWN) {
+      unknownColumns_.push_back(i);
+    } else if (isComplex(type)) {
       complexColumns_.push_back(i);
       complexNames.push_back(logicalType_->nameOf(i));
       complexTypes.push_back(type);
@@ -74,6 +76,8 @@ CellShuffleTypeAdapter::CellShuffleTypeAdapter(RowTypePtr logicalType)
     packedType_ = ROW(std::move(complexNames), std::move(complexTypes));
     names.push_back("__cell_packed_complex");
     types.push_back(VARBINARY());
+  }
+  if (needsAdaptation()) {
     physicalType_ = ROW(std::move(names), std::move(types));
   } else {
     physicalType_ = logicalType_;
@@ -88,10 +92,19 @@ RowVectorPtr CellShuffleTypeAdapter::pack(
       "CellShuffleTypeAdapter does not take composite rows");
   BOLT_DCHECK(
       input->type()->equivalent(*logicalType_), "Cell input schema changed");
-  if (!hasComplexColumns()) {
+  if (!needsAdaptation()) {
     return input;
   }
   const vector_size_t numRows = input->size();
+  if (!hasComplexColumns()) {
+    std::vector<VectorPtr> children;
+    children.reserve(simpleColumns_.size());
+    for (const auto col : simpleColumns_) {
+      children.push_back(input->childAt(col));
+    }
+    return std::make_shared<RowVector>(
+        pool, physicalType_, nullptr, numRows, std::move(children));
+  }
   std::vector<VectorPtr> complex;
   for (const auto col : complexColumns_) {
     complex.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
@@ -123,6 +136,7 @@ RowVectorPtr CellShuffleTypeAdapter::pack(
   }
   binary->setStringBuffers({buffer});
   std::vector<VectorPtr> children;
+  children.reserve(simpleColumns_.size() + 1);
   for (const auto col : simpleColumns_) {
     children.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
   }
@@ -134,31 +148,37 @@ RowVectorPtr CellShuffleTypeAdapter::pack(
 RowVectorPtr CellShuffleTypeAdapter::unpack(
     const RowVectorPtr& input,
     memory::MemoryPool* pool) const {
-  if (!hasComplexColumns()) {
+  if (!needsAdaptation()) {
     return input;
   }
   BOLT_DCHECK(
       input->type()->equivalent(*physicalType_),
       "Invalid Cell physical schema");
   const vector_size_t numRows = input->size();
-  DecodedVector binary(*input->childAt(simpleColumns_.size()));
-  std::vector<std::string_view> rows;
-  rows.reserve(numRows);
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    BOLT_CHECK(!binary.isNullAt(i), "Cell complex payload must be non-null");
-    // Keep a reference into the vector's buffer: inline StringView::data()
-    // points into the StringView object itself, so a by-value copy would
-    // dangle once this iteration ends.
-    const auto& value = binary.data<StringView>()[binary.index(i)];
-    rows.emplace_back(value.data(), value.size());
-  }
-  auto complex = row::CompactRow::deserialize(rows, packedType_, pool);
   std::vector<VectorPtr> children(logicalType_->size());
   for (uint32_t i = 0; i < simpleColumns_.size(); ++i) {
     children[simpleColumns_[i]] = input->childAt(i);
   }
-  for (uint32_t i = 0; i < complexColumns_.size(); ++i) {
-    children[complexColumns_[i]] = complex->childAt(i);
+  for (const auto col : unknownColumns_) {
+    children[col] = BaseVector::createNullConstant(
+        logicalType_->childAt(col), numRows, pool);
+  }
+  if (hasComplexColumns()) {
+    DecodedVector binary(*input->childAt(simpleColumns_.size()));
+    std::vector<std::string_view> rows;
+    rows.reserve(numRows);
+    for (vector_size_t i = 0; i < numRows; ++i) {
+      BOLT_CHECK(!binary.isNullAt(i), "Cell complex payload must be non-null");
+      // Keep a reference into the vector's buffer: inline StringView::data()
+      // points into the StringView object itself, so a by-value copy would
+      // dangle once this iteration ends.
+      const auto& value = binary.data<StringView>()[binary.index(i)];
+      rows.emplace_back(value.data(), value.size());
+    }
+    auto complex = row::CompactRow::deserialize(rows, packedType_, pool);
+    for (uint32_t i = 0; i < complexColumns_.size(); ++i) {
+      children[complexColumns_[i]] = complex->childAt(i);
+    }
   }
   return std::make_shared<RowVector>(
       pool, logicalType_, nullptr, numRows, std::move(children));

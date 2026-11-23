@@ -147,11 +147,11 @@ CellNestedShredder::CellNestedShredder(
       numPartitions_(numPartitions),
       pool_(pool),
       inputs_(layout.numNodes()),
-      decoded_(layout.numNodes()),
-      nullClass_(layout.numNodes(), NullClass::kAllNull),
-      views_(layout.numNodes()),
-      viewIndices_(layout.numNodes()),
-      viewNulls_(layout.numNodes()),
+      decoded_(layout.layout().numColumns()),
+      nullClass_(layout.layout().numColumns(), NullClass::kAllNull),
+      views_(layout.layout().numColumns()),
+      viewIndices_(layout.layout().numColumns()),
+      viewNulls_(layout.layout().numColumns()),
       counts_(layout.numSpaces(), nullptr),
       maxCount_(layout.numSpaces(), 0),
       totals_(layout.numSpaces(), 0),
@@ -173,10 +173,9 @@ CellNestedShredder::CellNestedShredder(
   // Output calls borrow this table while constructing null bodies. Columns
   // of a space share its counts; row-space entries use the splitter's rows.
   const auto& cellLayout = layout.layout();
-  columnPositionCounts_.reserve(cellLayout.numWireColumns());
-  for (uint32_t wire = 0; wire < cellLayout.numWireColumns(); ++wire) {
-    const uint32_t space = layout.node(cellLayout.logicalColumn(wire)).space;
-    columnPositionCounts_.push_back(counts_[space]);
+  columnPositionCounts_.reserve(cellLayout.numColumns());
+  for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
+    columnPositionCounts_.push_back(counts_[layout.nodeOfColumn(col).space]);
   }
 }
 
@@ -238,10 +237,11 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
   // The rows' columns: a leaf as it comes, a ROW as its presence, a
   // container as its lengths.
   for (const uint32_t col : layout_.space(0).columns) {
-    const auto& node = layout_.node(col);
+    const uint32_t n = layout_.nodeIndexOfColumn(col);
+    const auto& node = layout_.node(n);
     auto& klass = nullClass_[col];
-    auto& input = inputs_[col];
-    if (node.type->kind() == TypeKind::UNKNOWN || input.allNull) {
+    auto& input = inputs_[n];
+    if (input.allNull) {
       klass = NullClass::kAllNull;
       continue;
     }
@@ -258,7 +258,7 @@ void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
 }
 
 NullClass CellNestedShredder::viewRows(uint32_t col) {
-  auto& input = inputs_[col];
+  auto& input = inputs_[layout_.nodeIndexOfColumn(col)];
   auto& decoded = input.decoded;
   auto& view = views_[col];
   view.reset();
@@ -328,9 +328,10 @@ void CellNestedShredder::decodeNode(uint32_t n, const VectorPtr& vector) {
 }
 
 void CellNestedShredder::decodeColumn(uint32_t n, const VectorPtr& vector) {
+  const auto& node = layout_.node(n);
   auto& input = inputs_[n];
-  if (layout_.node(n).space == 0) {
-    decoded_[n].decode(*vector);
+  if (node.space == 0) {
+    decoded_[node.layoutColumn].decode(*vector);
     return;
   }
   input.decoded.decode(*vector);
@@ -512,7 +513,7 @@ void CellNestedShredder::split(
 
   const auto& rows = layout_.space(0);
   bool someNulls = false;
-  for (const uint32_t col : rows.wireColumns) {
+  for (const uint32_t col : rows.columns) {
     someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
   const uint32_t* pids = row2Partition.data();
@@ -533,7 +534,7 @@ void CellNestedShredder::split(
   if (rowIndex != nullptr) {
     batch.rowIndexInPid = {rowIndex, row2Partition.size()};
   }
-  batch.columns = rows.wireColumns;
+  batch.columns = rows.columns;
   wireColumns(batch);
 
   const Entries entries{pids, nullptr, 0, static_cast<uint32_t>(numRows_), 0};
@@ -601,7 +602,7 @@ void CellNestedShredder::splitElements(
   const uint32_t ownedSpace = layout_.node(container).ownedSpace;
   const auto& space = layout_.space(ownedSpace);
   const auto& decoded = input.decoded;
-  if (space.wireColumns.empty()) {
+  if (space.columns.empty()) {
     // UNKNOWN elements: positions to count, no value to split.
     uint32_t* counts = counts_[ownedSpace];
     for (uint32_t k = 0; k < parent.size; ++k) {
@@ -680,7 +681,7 @@ void CellNestedShredder::splitElementBatch(
     uint32_t depth) {
   const auto& space = layout_.space(spaceIndex);
   bool someNulls = false;
-  for (const uint32_t col : space.wireColumns) {
+  for (const uint32_t col : space.columns) {
     nullClass_[col] = view(col, elements);
     someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
@@ -712,7 +713,7 @@ void CellNestedShredder::splitElementBatch(
   if (rowIndexInPid != nullptr) {
     batch.rowIndexInPid = {rowIndexInPid, elements.size};
   }
-  batch.columns = space.wireColumns;
+  batch.columns = space.columns;
   batch.positionBase = counts;
   wireColumns(batch);
   // Committed before the space's next element batch splits, which starts
@@ -735,7 +736,7 @@ void CellNestedShredder::splitElementBatch(
 }
 
 NullClass CellNestedShredder::view(uint32_t col, const ElementBatch& elements) {
-  auto& input = inputs_[col];
+  auto& input = inputs_[layout_.nodeIndexOfColumn(col)];
   if (input.allNull) {
     return NullClass::kAllNull;
   }
