@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -80,13 +81,18 @@ class CompressionContextPool {
     return Ref{std::move(context), this};
   }
 
+  size_t idleSize() const {
+    std::scoped_lock lock(mutex_);
+    return idle_.size();
+  }
+
  private:
   void Release(std::unique_ptr<Context> context) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     idle_.push_back(std::move(context));
   }
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::vector<std::unique_ptr<Context>> idle_;
 };
 

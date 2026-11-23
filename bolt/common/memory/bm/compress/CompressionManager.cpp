@@ -176,10 +176,13 @@ CompressionRecordResult CompressionManager::BuildSpillRecord(
   CompressionContextSet contexts;
   CompressionContextPool<Lz4CompressionContext>::Ref lz4Context;
   CompressionContextPool<ZstdCompressionContext>::Ref zstdContext;
-  if (selectedKind == CompressionKind::kLz4Block) {
+  if (selectedKind == CompressionKind::kLz4Block &&
+      impl_->config.lz4.strategy == Lz4Strategy::kPooledContext) {
     lz4Context = impl_->lz4Contexts.Acquire();
     contexts.lz4 = lz4Context.get();
-  } else if (selectedKind == CompressionKind::kZstdFrame) {
+  } else if (
+      selectedKind == CompressionKind::kZstdFrame &&
+      impl_->config.zstd.strategy == ZstdStrategy::kPooledContext) {
     zstdContext = impl_->zstdContexts.Acquire();
     contexts.zstd = zstdContext.get();
   }
@@ -272,6 +275,20 @@ IoBuffer CompressionManager::DecodeSpillRecord(
         rawPayload.length());
   }
   return rawPayload;
+}
+
+size_t CompressionManager::testingIdleCompressionContextCount(
+    CompressionKind kind) const {
+  switch (kind) {
+    case CompressionKind::kLz4Block:
+      return impl_->lz4Contexts.idleSize();
+    case CompressionKind::kZstdFrame:
+      return impl_->zstdContexts.idleSize();
+    case CompressionKind::kOpenZlFrame:
+      return impl_->openZlContexts.idleSize();
+    default:
+      return 0;
+  }
 }
 
 } // namespace bytedance::bolt::memory::bm::compress

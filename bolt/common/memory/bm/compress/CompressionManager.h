@@ -21,6 +21,7 @@
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -55,6 +56,9 @@ class CompressionManager {
       uint64_t* decompressionTimeUs,
       uint64_t blockId = 0,
       CompressionKind* storedKindOut = nullptr);
+
+  /// Returns the number of idle pooled compression contexts for testing.
+  size_t testingIdleCompressionContextCount(CompressionKind kind) const;
 
  private:
   struct Impl;

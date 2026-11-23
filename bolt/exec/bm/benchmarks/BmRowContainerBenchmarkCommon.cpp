@@ -90,6 +90,11 @@ DEFINE_uint32(
     "Ready marker after input materialization and sleep for this many seconds "
     "before entering the measured path. This lets perf attach after benchmark "
     "setup is complete.");
+DEFINE_string(
+    bolt_benchmark_bm_zstd_strategy,
+    "default",
+    "Zstd compression strategy for BM row container benchmarks: default, "
+    "oneshot, or pooled.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
@@ -341,8 +346,18 @@ BenchmarkContext::BenchmarkContext(
   config.spillStoreConfig.compressionConfig.minCompressBytes = 1;
   config.spillStoreConfig.compressionConfig.lz4.strategy =
       memory::bm::compress::Lz4Strategy::kPooledContext;
-  config.spillStoreConfig.compressionConfig.zstd.strategy =
-      memory::bm::compress::ZstdStrategy::kPooledContext;
+  if (FLAGS_bolt_benchmark_bm_zstd_strategy == "oneshot") {
+    config.spillStoreConfig.compressionConfig.zstd.strategy =
+        memory::bm::compress::ZstdStrategy::kOneShot;
+  } else if (FLAGS_bolt_benchmark_bm_zstd_strategy == "pooled") {
+    config.spillStoreConfig.compressionConfig.zstd.strategy =
+        memory::bm::compress::ZstdStrategy::kPooledContext;
+  } else if (FLAGS_bolt_benchmark_bm_zstd_strategy != "default") {
+    BOLT_USER_FAIL(
+        "Unsupported --bolt_benchmark_bm_zstd_strategy '{}'; expected "
+        "default, oneshot, or pooled",
+        FLAGS_bolt_benchmark_bm_zstd_strategy);
+  }
   config.spillStoreConfig.compressionConfig.zstd.compressionLevel = 3;
   bufferManager =
       memory::bm::BufferManager::Create(*rootPool, std::move(config));
