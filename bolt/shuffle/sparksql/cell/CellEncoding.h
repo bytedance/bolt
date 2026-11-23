@@ -362,41 +362,63 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
 
 #if defined(__AVX2__)
 
-/// Applies the decoded fields' final step on T lanes, in place: the base of
-/// kForBitPack, or the sign extension of a kBitPack field narrower than T
-/// as (x ^ m) - m with m its sign bit (AVX2 has no 64-bit arithmetic
-/// shift).
+/// Adds the Frame-of-Reference `base` to each unpacked unsigned residual in a
+/// full block, in place.
 template <typename T>
-inline void finishFieldsAvx2(T* dst, uint32_t bits, bool isForBitPack, T base) {
+inline void addBaseAvx2(T* dst, T base) {
   constexpr uint32_t kCount = kCacheLineBytes / sizeof(T);
   constexpr uint32_t kLanes = 32 / sizeof(T);
-  if (!isForBitPack && bits == sizeof(T) * 8) {
-    return;
-  }
-  __m256i addend;
-  __m256i flip;
+  __m256i baseVec;
   if constexpr (sizeof(T) == 8) {
-    addend = _mm256_set1_epi64x(isForBitPack ? base : int64_t{1} << (bits - 1));
+    baseVec = _mm256_set1_epi64x(base);
   } else if constexpr (sizeof(T) == 4) {
-    addend = _mm256_set1_epi32(
-        isForBitPack ? base : static_cast<int32_t>(uint32_t{1} << (bits - 1)));
+    baseVec = _mm256_set1_epi32(base);
   } else {
-    addend = _mm256_set1_epi16(
-        isForBitPack ? base : static_cast<int16_t>(uint16_t{1} << (bits - 1)));
+    baseVec = _mm256_set1_epi16(base);
   }
-  flip = isForBitPack ? _mm256_setzero_si256() : addend;
   for (uint32_t i = 0; i < kCount; i += kLanes) {
     auto* lane = reinterpret_cast<__m256i*>(dst + i);
-    __m256i v = _mm256_xor_si256(_mm256_loadu_si256(lane), flip);
+    __m256i v = _mm256_loadu_si256(lane);
     if constexpr (sizeof(T) == 8) {
-      v = isForBitPack ? _mm256_add_epi64(v, addend)
-                       : _mm256_sub_epi64(v, addend);
+      v = _mm256_add_epi64(v, baseVec);
     } else if constexpr (sizeof(T) == 4) {
-      v = isForBitPack ? _mm256_add_epi32(v, addend)
-                       : _mm256_sub_epi32(v, addend);
+      v = _mm256_add_epi32(v, baseVec);
     } else {
-      v = isForBitPack ? _mm256_add_epi16(v, addend)
-                       : _mm256_sub_epi16(v, addend);
+      v = _mm256_add_epi16(v, baseVec);
+    }
+    _mm256_storeu_si256(lane, v);
+  }
+}
+
+/// Sign-extends each unpacked `bits`-wide two's-complement kBitPack field in a
+/// full block to T, in place, via (x ^ signBit) - signBit (AVX2 has no 64-bit
+/// arithmetic right shift).
+template <typename T>
+inline void signExtendFieldsAvx2(T* dst, uint32_t bits) {
+  constexpr uint32_t kCount = kCacheLineBytes / sizeof(T);
+  constexpr uint32_t kLanes = 32 / sizeof(T);
+  if (bits == sizeof(T) * 8) {
+    return;
+  }
+  __m256i signBit;
+  if constexpr (sizeof(T) == 8) {
+    signBit = _mm256_set1_epi64x(int64_t{1} << (bits - 1));
+  } else if constexpr (sizeof(T) == 4) {
+    signBit =
+        _mm256_set1_epi32(static_cast<int32_t>(uint32_t{1} << (bits - 1)));
+  } else {
+    signBit =
+        _mm256_set1_epi16(static_cast<int16_t>(uint16_t{1} << (bits - 1)));
+  }
+  for (uint32_t i = 0; i < kCount; i += kLanes) {
+    auto* lane = reinterpret_cast<__m256i*>(dst + i);
+    __m256i v = _mm256_xor_si256(_mm256_loadu_si256(lane), signBit);
+    if constexpr (sizeof(T) == 8) {
+      v = _mm256_sub_epi64(v, signBit);
+    } else if constexpr (sizeof(T) == 4) {
+      v = _mm256_sub_epi32(v, signBit);
+    } else {
+      v = _mm256_sub_epi16(v, signBit);
     }
     _mm256_storeu_si256(lane, v);
   }
@@ -413,34 +435,33 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
   if (sizeof(T) == 8 || bits > 25) {
     const __m256i mask =
         _mm256_set1_epi64x(static_cast<int64_t>((uint64_t{1} << bits) - 1));
-    const __m256i width = _mm256_set1_epi64x(bits);
+    const int64_t b = static_cast<int64_t>(bits);
+    const int64_t b2 = b << 1;
+    const __m256i baseOffsets = _mm256_setr_epi64x(0, b, b2, b2 + b);
     if constexpr (sizeof(T) == 8) {
       if (bits <= 16) {
         // Four fields fit in one word. The second group starts at bit
         // 4 * bits: even widths are byte-aligned, odd widths leave four
         // leading bits. That offset plus four fields still fits in 64 bits.
-        const __m256i shifts =
-            _mm256_mul_epu32(_mm256_setr_epi64x(0, 1, 2, 3), width);
         const __m256i low =
             _mm256_set1_epi64x(memory::loadUnaligned<int64_t>(in));
         const __m256i high = _mm256_set1_epi64x(
             memory::loadUnaligned<int64_t>(in + (bits >> 1)));
         const __m256i highShifts =
-            _mm256_add_epi64(shifts, _mm256_set1_epi64x((4 * bits) & 7));
+            _mm256_add_epi64(baseOffsets, _mm256_set1_epi64x((b << 2) & 7));
         _mm256_storeu_si256(
             reinterpret_cast<__m256i*>(dst),
-            _mm256_and_si256(_mm256_srlv_epi64(low, shifts), mask));
+            _mm256_and_si256(_mm256_srlv_epi64(low, baseOffsets), mask));
         _mm256_storeu_si256(
             reinterpret_cast<__m256i*>(dst + 4),
             _mm256_and_si256(_mm256_srlv_epi64(high, highShifts), mask));
         return;
       }
     }
-    for (uint32_t i = 0; i < kCount; i += 4) {
-      const __m256i bit = _mm256_mul_epu32(
-          _mm256_add_epi64(
-              _mm256_setr_epi64x(0, 1, 2, 3), _mm256_set1_epi64x(i)),
-          width);
+    const __m256i bitStep = _mm256_set1_epi64x(b << 2);
+    __m256i bit = baseOffsets;
+    for (uint32_t i = 0; i < kCount;
+         i += 4, bit = _mm256_add_epi64(bit, bitStep)) {
       __m256i v = _mm256_i64gather_epi64(
           reinterpret_cast<const long long*>(in), _mm256_srli_epi64(bit, 3), 1);
       v = _mm256_and_si256(
@@ -450,23 +471,33 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
       } else {
         // 4 x u64 to 4 x u32: only int32 fields of 26..32 bits come here.
+        // AVX2 has no non-saturating cross-lane u64->u32 truncate instruction
+        // (vpackusdw saturates signed 32-bit values and stays in-lane), so
+        // vpermd is the single-instruction AVX2 choice; AVX-512VL has vpmovqd.
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(dst + i), _mm256_cvtepi64_epi32(v));
+#else
         const __m256i narrow = _mm256_permutevar8x32_epi32(
             v, _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7));
         _mm_storeu_si128(
             reinterpret_cast<__m128i*>(dst + i),
             _mm256_castsi256_si128(narrow));
+#endif
       }
     }
     return;
   }
   const __m256i mask =
       _mm256_set1_epi32(static_cast<int32_t>((uint32_t{1} << bits) - 1));
-  const __m256i width = _mm256_set1_epi32(bits);
-  for (uint32_t i = 0; i < kCount; i += 8) {
-    const __m256i bit = _mm256_mullo_epi32(
-        _mm256_add_epi32(
-            _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), _mm256_set1_epi32(i)),
-        width);
+  const int32_t b = static_cast<int32_t>(bits);
+  const int32_t b2 = b << 1;
+  const int32_t b3 = b2 + b;
+  const int32_t b4 = b << 2;
+  const __m256i bitStep = _mm256_set1_epi32(b << 3);
+  __m256i bit = _mm256_setr_epi32(0, b, b2, b3, b4, b4 + b, b4 + b2, b4 + b3);
+  for (uint32_t i = 0; i < kCount;
+       i += 8, bit = _mm256_add_epi32(bit, bitStep)) {
     __m256i v = _mm256_i32gather_epi32(
         reinterpret_cast<const int*>(in), _mm256_srli_epi32(bit, 3), 1);
     v = _mm256_and_si256(
@@ -513,12 +544,12 @@ decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
       inBytes - headerBytes < std::max(bodyBytes, reach)) {
     return 0;
   }
-  T base{};
-  if (isForBitPack) {
-    base = memory::loadUnaligned<T>(in + 1);
-  }
   unpackFieldsAvx2(in + headerBytes, bits, dst);
-  finishFieldsAvx2(dst, bits, isForBitPack, base);
+  if (isForBitPack) {
+    addBaseAvx2(dst, memory::loadUnaligned<T>(in + 1));
+  } else {
+    signExtendFieldsAvx2(dst, bits);
+  }
   return static_cast<uint32_t>(headerBytes + bodyBytes);
 }
 
@@ -653,10 +684,13 @@ class StreamCursor {
   }
 
   /// Returns up to maxValues from the current Encoding Block, without
-  /// combining its remainder with the next block. The values point into
-  /// this cursor and stay valid until its next operation. May be mixed with
-  /// next(). Returns 0 and clears values when maxValues is zero, no values
-  /// remain, or the next block is malformed; a zero limit does not advance.
+  /// combining its remainder with the next block. Used by zero-copy
+  /// block-oriented consumers (such as CellPayloadDecoder's flat string length
+  /// loop) to read values directly from staged_ and specialize on natural
+  /// full-block boundaries. The values point into this cursor and stay valid
+  /// until its next operation. May be mixed with next(). Returns 0 and clears
+  /// values when maxValues is zero, no values remain, or the next block is
+  /// malformed; a zero limit does not advance.
   BOLT_CELL_KERNEL FOLLY_NOINLINE uint32_t
   nextBlock(uint32_t maxValues, const T*& values) {
     values = nullptr;
