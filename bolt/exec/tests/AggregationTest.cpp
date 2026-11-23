@@ -484,6 +484,7 @@ class AggregationTest : public OperatorTestBase,
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
+    memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
     op->pool()->reclaim(targetBytes, 0, reclaimerStats);
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
@@ -4444,6 +4445,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyInput) {
         {
           MemoryReclaimer::Stats stats;
           SuspendedSection suspendedSection(driver);
+          memory::ScopedMemoryArbitrationContext arbitrationContext(
+              task->pool());
           task->pool()->reclaim(kMaxBytes, 0, stats);
           ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
           ASSERT_GT(stats.reclaimExecTimeUs, 0);
@@ -4517,6 +4520,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyOutput) {
         {
           MemoryReclaimer::Stats stats;
           SuspendedSection suspendedSection(driver);
+          memory::ScopedMemoryArbitrationContext arbitrationContext(
+              task->pool());
           task->pool()->reclaim(kMaxBytes, 0, stats);
           ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
           ASSERT_GT(stats.reclaimExecTimeUs, 0);
