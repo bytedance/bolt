@@ -22,8 +22,11 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/time/Timer.h"
+#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/base/ShuffleBlockFormat.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -36,6 +39,179 @@ constexpr uint64_t kCompositeBlockBytes = 4 << 20;
 
 } // namespace
 
+class CompositeShuffleWriter::CompositeRowWriter {
+ public:
+  explicit CompositeRowWriter(CompositeShuffleWriter& owner)
+      : owner_(owner),
+        converter_(owner.boltPool_),
+        heldRows_(owner.numPartitions_),
+        rawPartitionBytes_(owner.numPartitions_, 0) {
+    const auto& writerOptions = owner_.options_.partitionWriterOptions;
+    if (writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
+      codec_ = createCodec(
+          writerOptions.compressionType,
+          CodecOptions{
+              getCodecBackend(writerOptions.codecBackend),
+              writerOptions.compressionLevel,
+              writerOptions.checksumEnabled});
+    }
+  }
+
+  ~CompositeRowWriter() {
+    // A failed split or stop may leave composite rows held.
+    converter_.reset();
+  }
+
+  void split(const CompositeRowVectorPtr& rv) {
+    bool needsFlush = false;
+    {
+      BOLT_CHECK(
+          state_ == WriteState::kIdle,
+          "composite split is already in progress");
+      state_ = WriteState::kBusy;
+      SCOPE_EXIT {
+        needsFlush = (state_ == WriteState::kFlushDeferred);
+        state_ = WriteState::kIdle;
+      };
+      const vector_size_t numRows = rv->size();
+      if (numRows == 0) {
+        return;
+      }
+      // Composite rows are copied in whole batches: make room first. A
+      // failed reservation is memory pressure: the oldest spill data in
+      // memory goes to disk first, as much as the batch takes, and the held
+      // rows after it, into the blocks the spill memory holds.
+      if (hasHeldRows_ && !owner_.boltPool_->maybeReserve(rv->totalRowSize())) {
+        if (auto* memory = owner_.spillMemory()) {
+          memory->release(rv->totalRowSize());
+        }
+        write();
+      }
+      const auto status = owner_.computePartitions(*rv);
+      BOLT_CHECK(status.ok(), "{}", status.ToString());
+      uint64_t convertNs = 0;
+      {
+        NanosecondTimer timer(&convertNs);
+        converter_.convert(rv, owner_.row2Partition_, heldRows_);
+      }
+      owner_.metrics_.convertTime += static_cast<int64_t>(convertNs);
+      hasHeldRows_ = true;
+      owner_.metrics_.totalInputRowNumber += numRows;
+      owner_.metrics_.totalInputBatches += 1;
+    }
+    if (needsFlush) {
+      // A reclaim asked for it: memory pressure, which that reclaim met with
+      // the spill memory first.
+      flush();
+    }
+  }
+
+  /// Writes the held composite rows out - or, while a split or write is
+  /// under way, right after it.
+  void flush() {
+    if (state_ != WriteState::kIdle) {
+      state_ = WriteState::kFlushDeferred;
+      return;
+    }
+    state_ = WriteState::kBusy;
+    SCOPE_EXIT {
+      state_ = WriteState::kIdle;
+    };
+    write();
+  }
+
+  /// Adds composite raw partition lengths and compression time after
+  /// stopOrdinary() has written the ordinary side's metrics.
+  void addMetrics(ShuffleWriterMetrics& metrics) const {
+    for (int32_t pid = 0; pid < owner_.numPartitions_; ++pid) {
+      metrics.rawPartitionLengths[pid] += rawPartitionBytes_[pid];
+    }
+    metrics.totalCompressTime += static_cast<int64_t>(compressTimeNs_);
+  }
+
+ private:
+  /// Writes the held rows now. The caller holds state_ != kIdle.
+  void write() {
+    SCOPE_EXIT {
+      if (state_ == WriteState::kFlushDeferred) {
+        state_ = WriteState::kBusy;
+      }
+    };
+    if (!hasHeldRows_) {
+      return;
+    }
+    size_t nextRow = 0;
+    BufferPtr compressedBuffer;
+    owner_.output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
+      return nextBlock(pid, block, nextRow, compressedBuffer);
+    });
+    converter_.reset();
+    hasHeldRows_ = false;
+    compressedBuffer.reset();
+    owner_.boltPool_->release();
+  }
+
+  /// The BlockSource of write(): partition `pid`'s next block, from its row
+  /// `nextRow` on, compressed through `compressedBuffer`.
+  bool nextBlock(
+      uint32_t pid,
+      BufferPtr& block,
+      size_t& nextRow,
+      BufferPtr& compressedBuffer) {
+    auto& rows = heldRows_[pid];
+    if (nextRow >= rows.size()) {
+      rows.clear();
+      nextRow = 0;
+      return false;
+    }
+    const size_t begin = nextRow;
+    uint64_t raw = 0;
+    while (nextRow < rows.size()) {
+      const uint64_t bytes = framedRowBytes(rows[nextRow]);
+      if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
+        break;
+      }
+      raw += bytes;
+      ++nextRow;
+    }
+    buildRowBlock(
+        ShuffleBlockKind::kCompositeRows,
+        rows.data() + begin,
+        nextRow - begin,
+        raw,
+        codec_.get(),
+        block,
+        compressedBuffer,
+        owner_.boltPool_,
+        compressTimeNs_);
+    rawPartitionBytes_[pid] += static_cast<int64_t>(kRowBlockHeaderBytes + raw);
+    return true;
+  }
+
+  /// Reentrancy state for split/write. A flush reached while kBusy (e.g. a
+  /// reclaim triggered by allocation) transitions to kFlushDeferred so it runs
+  /// after the in-flight composite split completes.
+  enum class WriteState : uint8_t {
+    kIdle,
+    kBusy,
+    kFlushDeferred,
+  };
+
+  CompositeShuffleWriter& owner_;
+  /// Null when compressionType is UNCOMPRESSED.
+  std::unique_ptr<Codec> codec_;
+  ShuffleRowToRowConverter converter_;
+  /// Per partition: the held rows, each pointing at [size i32][bytes].
+  std::vector<std::vector<uint8_t*>> heldRows_;
+  bool hasHeldRows_{false};
+  WriteState state_{WriteState::kIdle};
+  /// Accumulated here, not in metrics_: stopOrdinary() overwrites the ordinary
+  /// side's raw partition lengths and compression time, and stop() adds these
+  /// after.
+  std::vector<int64_t> rawPartitionBytes_;
+  uint64_t compressTimeNs_{0};
+};
+
 CompositeShuffleWriter::CompositeShuffleWriter(
     ShuffleWriterOptions options,
     memory::MemoryPool* boltPool,
@@ -47,10 +223,7 @@ CompositeShuffleWriter::CompositeShuffleWriter(
           arrowPool),
       boltPool_(boltPool),
       // Partitioner::compute fills but does not size this.
-      partition2RowCount_(numPartitions_),
-      converter_(boltPool),
-      heldRows_(numPartitions_),
-      rawPartitionBytes_(numPartitions_, 0) {
+      partition2RowCount_(numPartitions_) {
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
   BOLT_CHECK(
@@ -58,15 +231,6 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       "Failed to create partitioner: {}",
       maybePartitioner.status().ToString());
   partitioner_ = *maybePartitioner;
-  const auto& writerOptions = options_.partitionWriterOptions;
-  if (writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
-    codec_ = createCodec(
-        writerOptions.compressionType,
-        CodecOptions{
-            getCodecBackend(writerOptions.codecBackend),
-            writerOptions.compressionLevel,
-            writerOptions.checksumEnabled});
-  }
 }
 
 arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
@@ -87,23 +251,23 @@ arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
       static_cast<int32_t>(TypeKind::INTEGER),
       "pid column must be INTEGER");
   const int32_t* pids;
+  std::vector<int32_t> pidValues;
   if (pidChild->isFlatEncoding()) {
     pids = pidChild->asUnchecked<FlatVector<int32_t>>()->rawValues();
   } else {
-    pidDecoded_.decode(*pidChild);
-    pidValues_.resize(rv.size());
+    DecodedVector pidDecoded(*pidChild);
+    pidValues.resize(rv.size());
     for (vector_size_t row = 0; row < rv.size(); ++row) {
-      pidValues_[row] = pidDecoded_.valueAt<int32_t>(row);
+      pidValues[row] = pidDecoded.valueAt<int32_t>(row);
     }
-    pids = pidValues_.data();
+    pids = pidValues.data();
   }
   return partitioner_->compute(
       pids, rv.size(), row2Partition_, partition2RowCount_);
 }
 
 CompositeShuffleWriter::~CompositeShuffleWriter() {
-  // A failed split or stop may leave composite rows held.
-  converter_.reset();
+  composite_.reset();
   boltPool_->release();
 }
 
@@ -118,9 +282,9 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
     lifecycle_ = LifecycleState::kIdle;
   };
   if (!RowVector::isComposite(rv)) {
-    if (activeSide_ == ActiveSide::kComposite) {
-      flushComposite();
-      activeSide_ = ActiveSide::kOrdinary;
+    if (compositeActive_) {
+      composite_->flush();
+      compositeActive_ = false;
     }
     return splitOrdinary(std::move(rv), memLimit);
   }
@@ -131,18 +295,21 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   if (rv->size() == 0) {
     return arrow::Status::OK();
   }
-  if (activeSide_ == ActiveSide::kOrdinary) {
+  if (!compositeActive_) {
     RETURN_NOT_OK(flushOrdinary());
-    activeSide_ = ActiveSide::kComposite;
+    if (composite_ == nullptr) {
+      composite_ = std::make_unique<CompositeRowWriter>(*this);
+    }
+    compositeActive_ = true;
   }
-  splitComposite(std::static_pointer_cast<CompositeRowVector>(rv));
+  composite_->split(std::static_pointer_cast<CompositeRowVector>(rv));
   return arrow::Status::OK();
 }
 
 arrow::Status CompositeShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
-  if (activeSide_ == ActiveSide::kOrdinary) {
+  if (!compositeActive_) {
     return reclaimOrdinary(size, actual);
   }
   const int64_t before = boltPool_->reservedBytes();
@@ -155,7 +322,7 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
   if (memory != nullptr) {
     memory->release(0);
   }
-  flushComposite();
+  composite_->flush();
   boltPool_->release();
   if (memory != nullptr) {
     const int64_t freed = before - boltPool_->reservedBytes();
@@ -180,132 +347,22 @@ arrow::Status CompositeShuffleWriter::stop() {
   // Order matters: stopOrdinary() ends output() - it merges the composite
   // spill file into the data file, or ends the Celeborn attempt - so every
   // held composite row must be in output() before it runs.
-  flushComposite();
+  if (composite_ != nullptr) {
+    composite_->flush();
+  }
   RETURN_NOT_OK(stopOrdinary());
   // stopOrdinary() reported the ordinary bytes only; the composite blocks'
   // raw bytes are added here, partition by partition.
   metrics_.rawPartitionLengths.resize(numPartitions_, 0);
-  for (int32_t pid = 0; pid < numPartitions_; ++pid) {
-    metrics_.rawPartitionLengths[pid] += rawPartitionBytes_[pid];
+  if (composite_ != nullptr) {
+    composite_->addMetrics(metrics_);
   }
   metrics_.dataSize = std::accumulate(
       metrics_.rawPartitionLengths.begin(),
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
-  metrics_.totalCompressTime += static_cast<int64_t>(compressTimeNs_);
   metrics_.peakBytes = boltPool_->peakBytes();
   return arrow::Status::OK();
-}
-
-void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
-  bool needsFlush = false;
-  {
-    BOLT_CHECK(
-        compositeState_ == CompositeState::kIdle,
-        "composite split is already in progress");
-    compositeState_ = CompositeState::kBusy;
-    SCOPE_EXIT {
-      needsFlush = (compositeState_ == CompositeState::kFlushDeferred);
-      compositeState_ = CompositeState::kIdle;
-    };
-    const vector_size_t numRows = rv->size();
-    if (numRows == 0) {
-      return;
-    }
-    // Composite rows are copied in whole batches: make room first. A
-    // failed reservation is memory pressure: the oldest spill data in
-    // memory goes to disk first, as much as the batch takes, and the held
-    // rows after it, into the blocks the spill memory holds.
-    if (heldRowBytes_ > 0 && !boltPool_->maybeReserve(rv->totalRowSize())) {
-      if (auto* memory = spillMemory()) {
-        memory->release(rv->totalRowSize());
-      }
-      writeComposite();
-    }
-    const auto status = computePartitions(*rv);
-    BOLT_CHECK(status.ok(), "{}", status.ToString());
-    uint64_t convertNs = 0;
-    {
-      NanosecondTimer timer(&convertNs);
-      converter_.convert(rv, row2Partition_, heldRows_);
-    }
-    metrics_.convertTime += static_cast<int64_t>(convertNs);
-    heldRowBytes_ += rv->totalRowSize();
-    metrics_.totalInputRowNumber += numRows;
-    metrics_.totalInputBatches += 1;
-  }
-  if (needsFlush) {
-    // A reclaim asked for it: memory pressure, which that reclaim met with
-    // the spill memory first.
-    flushComposite();
-  }
-}
-
-void CompositeShuffleWriter::flushComposite() {
-  if (compositeState_ != CompositeState::kIdle) {
-    compositeState_ = CompositeState::kFlushDeferred;
-    return;
-  }
-  compositeState_ = CompositeState::kBusy;
-  SCOPE_EXIT {
-    compositeState_ = CompositeState::kIdle;
-  };
-  writeComposite();
-}
-
-void CompositeShuffleWriter::writeComposite() {
-  SCOPE_EXIT {
-    if (compositeState_ == CompositeState::kFlushDeferred) {
-      compositeState_ = CompositeState::kBusy;
-    }
-  };
-  if (heldRowBytes_ == 0) {
-    return;
-  }
-  size_t nextRow = 0;
-  BufferPtr compressedBuffer;
-  output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
-    return nextBlock(pid, block, nextRow, compressedBuffer);
-  });
-  converter_.reset();
-  heldRowBytes_ = 0;
-  compressedBuffer.reset();
-  boltPool_->release();
-}
-
-bool CompositeShuffleWriter::nextBlock(
-    uint32_t pid,
-    BufferPtr& block,
-    size_t& nextRow,
-    BufferPtr& compressedBuffer) {
-  auto& rows = heldRows_[pid];
-  if (nextRow >= rows.size()) {
-    rows.clear();
-    nextRow = 0;
-    return false;
-  }
-  const size_t begin = nextRow;
-  uint64_t raw = 0;
-  while (nextRow < rows.size()) {
-    const uint64_t bytes = framedRowBytes(rows[nextRow]);
-    if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
-      break;
-    }
-    raw += bytes;
-    ++nextRow;
-  }
-  buildRowBlock(
-      ShuffleBlockKind::kCompositeRows,
-      rows.data() + begin,
-      nextRow - begin,
-      raw,
-      codec_.get(),
-      block,
-      compressedBuffer,
-      boltPool_,
-      compressTimeNs_);
-  rawPartitionBytes_[pid] += static_cast<int64_t>(kRowBlockHeaderBytes + raw);
-  return true;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

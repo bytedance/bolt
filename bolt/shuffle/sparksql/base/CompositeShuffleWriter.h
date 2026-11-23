@@ -16,13 +16,13 @@
 
 #pragma once
 
-#include "bolt/vector/ComplexVector.h"
-#include "bolt/vector/DecodedVector.h"
+#include <memory>
+#include <vector>
 
-#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/vector/ComplexVector.h"
+
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
 #include "bolt/shuffle/sparksql/base/PartitionBlockOutput.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 
@@ -98,12 +98,6 @@ class CompositeShuffleWriter : public ShuffleWriter {
     return lifecycle_ == LifecycleState::kStopped;
   }
 
-  /// Compression codec configured by PartitionWriterOptions, or null when
-  /// uncompressed.
-  Codec* codec() const {
-    return codec_.get();
-  }
-
   /// Computes partition ids into row2Partition_ and counts into
   /// partition2RowCount_ for the configured partitioning (single, round-robin,
   /// or leading INTEGER pid column).
@@ -116,23 +110,9 @@ class CompositeShuffleWriter : public ShuffleWriter {
   std::vector<uint32_t> partition2RowCount_;
 
  private:
-  void splitComposite(const CompositeRowVectorPtr& rv);
-
-  /// Writes the held composite rows out - or, while a split or write is
-  /// under way, right after it.
-  void flushComposite();
-
-  /// Writes the held rows now. The caller holds compositeInProgress_, or
-  /// is the split making room.
-  void writeComposite();
-
-  /// The BlockSource of writeComposite(): partition `pid`'s next block,
-  /// from its row `nextRow` on, compressed through `compressedBuffer`.
-  bool nextBlock(
-      uint32_t pid,
-      BufferPtr& block,
-      size_t& nextRow,
-      BufferPtr& compressedBuffer);
+  /// Lazily initialized on the first composite batch so ordinary-only shuffles
+  /// pay no per-partition buffer or codec setup cost.
+  class CompositeRowWriter;
 
   enum class LifecycleState : uint8_t {
     kIdle,
@@ -140,42 +120,11 @@ class CompositeShuffleWriter : public ShuffleWriter {
     kStopped,
   };
 
-  /// Which path currently owns buffered state and handles reclaims. Only one
-  /// side holds data at a time: switching flushes the other first.
-  enum class ActiveSide : uint8_t {
-    kOrdinary,
-    kComposite,
-  };
-
-  /// Reentrancy state for composite split/write. A flush reached while kBusy
-  /// (e.g. a reclaim triggered by allocation) transitions to kFlushDeferred
-  /// so it runs after the in-flight composite split completes.
-  enum class CompositeState : uint8_t {
-    kIdle,
-    kBusy,
-    kFlushDeferred,
-  };
-
   LifecycleState lifecycle_{LifecycleState::kIdle};
-  ActiveSide activeSide_{ActiveSide::kOrdinary};
-
-  /// Null when compressionType is UNCOMPRESSED.
-  std::unique_ptr<Codec> codec_;
-  ShuffleRowToRowConverter converter_;
-  /// Per partition: the held rows, each pointing at [size i32][bytes].
-  std::vector<std::vector<uint8_t*>> heldRows_;
-  /// A wrapped pid column, materialized; a flat one is read in place.
-  DecodedVector pidDecoded_;
-  std::vector<int32_t> pidValues_;
-  /// Bytes of heldRows_, as the batches' totalRowSize() counted them.
-  int64_t heldRowBytes_{0};
-  CompositeState compositeState_{CompositeState::kIdle};
-
-  /// Accumulated here, not in metrics_: the outputs assign their raw
-  /// partition lengths and compression time when stopOrdinary() ends them,
-  /// and stop() adds these after.
-  std::vector<int64_t> rawPartitionBytes_;
-  uint64_t compressTimeNs_{0};
+  /// Whether the composite path currently owns buffered state and handles
+  /// reclaims. Switching sides flushes the other first.
+  bool compositeActive_{false};
+  std::unique_ptr<CompositeRowWriter> composite_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql
