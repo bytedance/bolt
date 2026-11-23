@@ -105,9 +105,7 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
     }
     const auto rows = static_cast<uint32_t>(
         std::min<int64_t>(left, capacity - decoder_->batchRows()));
-    std::string error;
-    const bool ok = decoder_->appendRows(rows, capacity, error);
-    BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
+    decoder_->appendRows(rows, capacity);
   }
   return decoder_->finishBatch();
 }

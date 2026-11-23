@@ -1067,20 +1067,18 @@ void CellPayloadDecoder::dropBatch() {
   batchStringBytes_ = 0;
 }
 
-bool CellPayloadDecoder::appendRows(
-    uint32_t numRows,
-    vector_size_t capacity,
-    std::string& error) {
+void CellPayloadDecoder::appendRows(uint32_t numRows, vector_size_t capacity) {
   BOLT_CHECK_LE(numRows, payloadRowsLeft());
   if (!batchOpen_) {
     openBatch(
         std::max<vector_size_t>(capacity, static_cast<vector_size_t>(numRows)));
   }
-  const auto failed = [&] {
+  std::string error;
+  const auto failMalformed = [&] {
     rowCount_ = 0;
     rowsRead_ = 0;
     dropBatch();
-    return false;
+    BOLT_FAIL("malformed cell shuffle payload: {}", error);
   };
   const uint64_t rows = static_cast<uint64_t>(batchRows_) + numRows;
   if (rows > static_cast<uint64_t>(batchCapacity_)) {
@@ -1128,16 +1126,15 @@ bool CellPayloadDecoder::appendRows(
         break;
     }
     if (!ok) {
-      return failed();
+      failMalformed();
     }
     cursor.valuesRead += dense;
   }
   batchRows_ += numRows;
   rowsRead_ += numRows;
   if (numRows > 0 && rowsRead_ == rowCount_ && !finishPayload(error)) {
-    return failed();
+    failMalformed();
   }
-  return true;
 }
 
 void CellPayloadDecoder::growBatch(uint64_t rows) {
@@ -1671,27 +1668,6 @@ RowVectorPtr CellPayloadDecoder::finishBatch() {
       pool_, rowType, BufferPtr(nullptr), batchRows_, std::move(children));
   dropBatch();
   return out;
-}
-
-bool CellPayloadDecoder::decode(
-    ShuffleByteSource& in,
-    RowVectorPtr& out,
-    std::string& error) {
-  BOLT_CHECK(!batchOpen_, "a batch is under construction");
-  if (!beginPayload(in, error)) {
-    return false;
-  }
-  if (rowCount_ > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-    rowCount_ = 0;
-    return fail(error, "row count beyond one vector");
-  }
-  const auto rows = static_cast<vector_size_t>(rowCount_);
-  openBatch(rows);
-  if (!appendRows(rowCount_, rows, error)) {
-    return false;
-  }
-  out = finishBatch();
-  return true;
 }
 
 // Writer side.

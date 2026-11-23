@@ -78,8 +78,8 @@ class CellPayloadDecoder {
 
   /// Reads one payload as beginPayload() does, but opens no column: the
   /// decoders of its columns open it with openPayload(). `rowCount` is the
-  /// header's. What it read stays valid until the next readPayload(),
-  /// beginPayload() or decode() of this decoder.
+  /// header's. What it read stays valid until the next readPayload() or
+  /// beginPayload() of this decoder.
   bool
   readPayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
 
@@ -105,10 +105,9 @@ class CellPayloadDecoder {
   /// under construction, opening one of `capacity` rows when none is open
   /// and growing it when they do not fit: in a layout whose columns have
   /// different position counts, a batch's position count varies with the
-  /// The checks that need a whole stream run with the payload's last rows.
-  /// On malformed input returns false with `error` set; the payload and the
-  /// batch are then dropped.
-  bool appendRows(uint32_t numRows, vector_size_t capacity, std::string& error);
+  /// payload. The checks that need a whole stream run with the payload's last
+  /// rows. On malformed input drops the payload and the batch and throws.
+  void appendRows(uint32_t numRows, vector_size_t capacity);
 
   vector_size_t batchRows() const {
     return batchRows_;
@@ -142,11 +141,6 @@ class CellPayloadDecoder {
   const BufferPtr& batchValues(uint32_t col) const {
     return batch_[col].values;
   }
-
-  /// Decodes exactly one payload from `in` as one vector of all its rows.
-  /// On success fills `out` and returns true; on malformed input returns
-  /// false with `error` set and consumes an unspecified prefix of `in`.
-  bool decode(ShuffleByteSource& in, RowVectorPtr& out, std::string& error);
 
   const CellLayout& layout() const {
     return layout_;

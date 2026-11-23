@@ -207,13 +207,11 @@ void CellNestedAssembler::appendSpace(
   const vector_size_t open = s == 0
       ? capacity
       : static_cast<vector_size_t>(std::max<uint64_t>(positions, 1));
-  std::string error;
   uint64_t left = positions;
   do {
     const auto piece =
         static_cast<uint32_t>(std::min<uint64_t>(left, kAppendPositions));
-    const bool ok = decoder.appendRows(piece, open, error);
-    BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
+    decoder.appendRows(piece, open);
     left -= piece;
   } while (left > 0);
 
