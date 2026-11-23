@@ -107,27 +107,19 @@ class CodecDecompressor final : public ShuffleDecompressor {
     return decompressTimeNs_;
   }
 
-  const uint64_t* decompressTimeNsPtr() const {
-    return &decompressTimeNs_;
-  }
-
  private:
   Codec* const codec_;
   uint64_t decompressTimeNs_{0};
 };
 
-/// Advances across ReaderStreamIterator streams, skipping empty streams,
-/// reading each block's leading kind byte, and accounting input read time
-/// disjoint from decompression time.
+/// Advances across ReaderStreamIterator streams, skipping empty streams and
+/// reading each block's leading kind byte.
 class ShuffleStreamCursor {
  public:
   ShuffleStreamCursor(
       std::shared_ptr<ReaderStreamIterator> streams,
-      arrow::MemoryPool* arrowPool,
-      const CodecDecompressor* decompressor)
-      : streams_(std::move(streams)),
-        arrowPool_(arrowPool),
-        decompressor_(decompressor) {
+      arrow::MemoryPool* arrowPool)
+      : streams_(std::move(streams)), arrowPool_(arrowPool) {
     BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
   }
 
@@ -141,21 +133,6 @@ class ShuffleStreamCursor {
     return *source_;
   }
 
-  /// Scoped timer that charges wall time minus decompression time to
-  /// readTimeNs(). Timed per block rather than per small read.
-  using ReadTimer = ExclusiveNanosecondTimer<uint64_t>;
-
-  ReadTimer timeRead() {
-    return ReadTimer(
-        &readTimeNs_,
-        decompressor_ == nullptr ? nullptr
-                                 : decompressor_->decompressTimeNsPtr());
-  }
-
-  uint64_t readTimeNs() const {
-    return readTimeNs_;
-  }
-
   uint64_t streamsOpened() const {
     return streamsOpened_;
   }
@@ -163,10 +140,8 @@ class ShuffleStreamCursor {
  private:
   std::shared_ptr<ReaderStreamIterator> streams_;
   arrow::MemoryPool* const arrowPool_;
-  const CodecDecompressor* const decompressor_;
   std::unique_ptr<StreamByteSource> source_;
   bool exhausted_{false};
-  uint64_t readTimeNs_{0};
   uint64_t streamsOpened_{0};
 };
 

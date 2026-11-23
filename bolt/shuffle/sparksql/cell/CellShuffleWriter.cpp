@@ -210,7 +210,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       options_.cellOptions.enableNonTemporalStores);
   if (nestedLayout_ != nullptr) {
     shredder_ = std::make_unique<CellNestedShredder>(
-        *nestedLayout_, *splitter_, numPartitions_, *boltPool_, &sealSpillNs_);
+        *nestedLayout_, *splitter_, numPartitions_, *boltPool_);
   }
 
   shuffleCheck_ = CellShuffleCheck::create(
@@ -254,8 +254,12 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     initOnFirstBatch(*rv);
   }
   if (adapter_ != nullptr) {
-    // Less the spills of a reclaim that the pack's allocations set off.
-    ExclusiveNanosecondTimer timer(&metrics_.convertTime, &sealSpillNs_);
+    NanosecondTimer timer(&convertWallNs_);
+    auto* prevSpill = activeSpillNs_;
+    activeSpillNs_ = &convertSpillNs_;
+    SCOPE_EXIT {
+      activeSpillNs_ = prevSpill;
+    };
     rv = adapter_->pack(rv, boltPool_);
   }
   // Load lazy columns before sizing slices; unloaded columns estimate as zero.
@@ -302,7 +306,12 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   if (shredder_ != nullptr) {
     return splitNested(std::move(rv));
   }
-  ExclusiveNanosecondTimer splitTimer(&metrics_.splitTime, &sealSpillNs_);
+  NanosecondTimer splitTimer(&splitWallNs_);
+  auto* prevSpill = activeSpillNs_;
+  activeSpillNs_ = &splitSpillNs_;
+  SCOPE_EXIT {
+    activeSpillNs_ = prevSpill;
+  };
   // Payload row counts are u32, independent of the reader's batch size.
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
@@ -380,10 +389,12 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
 }
 
 arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
-  // Shredding and sealing are disjoint metrics, both excluded from splitTime.
-  uint64_t shredNs = 0;
-  ExclusiveNanosecondTimer splitTimer(
-      &metrics_.splitTime, &sealSpillNs_, &shredNs);
+  NanosecondTimer splitTimer(&splitWallNs_);
+  auto* prevSpill = activeSpillNs_;
+  activeSpillNs_ = &splitSpillNs_;
+  SCOPE_EXIT {
+    activeSpillNs_ = prevSpill;
+  };
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
     sealWindow(SealReason::kPositionLimit);
@@ -421,8 +432,6 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   }
 
   maybeSeal();
-  shredNs = static_cast<uint64_t>(shredder_->takeShredTimeNs());
-  metrics_.flattenTime += static_cast<int64_t>(shredNs);
   return arrow::Status::OK();
 }
 
@@ -549,7 +558,11 @@ CellShuffleWriter::SealSpillTimer::SealSpillTimer(CellShuffleWriter& writer)
                                                            : nullptr) {
   if (writer_ != nullptr) {
     writer_->timingSealSpill_ = true;
-    timer_.emplace(&writer_->sealSpillNs_);
+    uint64_t* target =
+        writer_->shredder_ != nullptr && writer_->shredder_->isShredding()
+        ? &writer_->shredSpillNs_
+        : writer_->activeSpillNs_;
+    timer_.emplace(target);
   }
 }
 
@@ -836,7 +849,24 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.begin(),
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
-  metrics_.spillTime += static_cast<int64_t>(sealSpillNs_);
+  const uint64_t totalSpillNs =
+      convertSpillNs_ + shredSpillNs_ + splitSpillNs_ + otherSpillNs_;
+  const uint64_t convertNs =
+      convertWallNs_ > convertSpillNs_ ? convertWallNs_ - convertSpillNs_ : 0;
+  const uint64_t shredWallNs =
+      shredder_ != nullptr ? shredder_->shredWallNs() : 0;
+  const uint64_t wireWallNs =
+      shredder_ != nullptr ? shredder_->wireWallNs() : 0;
+  const uint64_t flattenExcludedNs = wireWallNs + shredSpillNs_;
+  const uint64_t flattenNs =
+      shredWallNs > flattenExcludedNs ? shredWallNs - flattenExcludedNs : 0;
+  const uint64_t splitExcludedNs = flattenNs + shredSpillNs_ + splitSpillNs_;
+  const uint64_t splitNs =
+      splitWallNs_ > splitExcludedNs ? splitWallNs_ - splitExcludedNs : 0;
+  metrics_.convertTime += static_cast<int64_t>(convertNs);
+  metrics_.flattenTime = static_cast<int64_t>(flattenNs);
+  metrics_.splitTime = static_cast<int64_t>(splitNs);
+  metrics_.spillTime += static_cast<int64_t>(totalSpillNs);
   if (isInitialized()) {
     logPressure();
   }
@@ -867,11 +897,13 @@ void CellShuffleWriter::logPressure() const {
         spillMemory_->flushes(),
         mb(spillMemory_->directBytes()));
   }
+  const uint64_t totalSealSpillNs =
+      convertSpillNs_ + shredSpillNs_ + splitSpillNs_ + otherSpillNs_;
   LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
             << fmt::format(
                    ", nullClassify={:.1f}ms, sealSpill={:.1f}ms",
                    nullClassifyNs_ / 1e6,
-                   sealSpillNs_ / 1e6)
+                   totalSealSpillNs / 1e6)
             << spillMemory;
 }
 

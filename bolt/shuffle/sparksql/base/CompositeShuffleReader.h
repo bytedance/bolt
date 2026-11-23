@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/base/ShuffleBlockReader.h"
@@ -60,7 +61,10 @@ class CompositeShuffleReader : public BlockShuffleReader {
   }
 
   uint64_t readTimeNs() const override {
-    return cursor_.readTimeNs();
+    const uint64_t decompress = decompressTimeNs();
+    return readAndDecompressTimeNs_ > decompress
+        ? readAndDecompressTimeNs_ - decompress
+        : 0;
   }
 
   uint64_t rowsRead() const override {
@@ -81,7 +85,9 @@ class CompositeShuffleReader : public BlockShuffleReader {
   /// collected.
   virtual RowVectorPtr nextNonComposite() = 0;
 
-  /// Advances across streams for the next block under cursor_.timeRead().
+  /// Advances across streams for the next block and meters block read +
+  /// decompression wall time; readTimeNs() subtracts decompressTimeNs() at
+  /// query time.
   /// - If a kCompositeRows block is encountered, decodes it into
   ///   compositeBlock_ and returns false so the caller flushes any pending
   ///   non-composite batch and lets next() emit the composite rows next.
@@ -90,9 +96,9 @@ class CompositeShuffleReader : public BlockShuffleReader {
   /// - Returns false at end of input.
   template <typename OnBlock>
   bool readNextBlock(OnBlock&& onBlock) {
-    // Opening streams and reading blocks is the input's share of the decode
-    // time, decompression aside. Timed per block, not per read.
-    auto timer = cursor_.timeRead();
+    // Opening streams and reading blocks is the input's share of decode time,
+    // decompression aside. Timed per block, not per read.
+    NanosecondTimer timer(&readAndDecompressTimeNs_);
     const auto kind = cursor_.nextBlockKind();
     if (!kind.has_value()) {
       return false;
@@ -152,6 +158,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
   RowBlock compositeBlock_;
   size_t nextCompositeRow_{0};
   uint64_t decodeTimeNs_{0};
+  uint64_t readAndDecompressTimeNs_{0};
   uint64_t rowsRead_{0};
   uint64_t payloadsRead_{0};
 };

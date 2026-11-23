@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -79,21 +78,21 @@ enum class RunLayout : uint8_t {
 ///
 ///   kind         u8   e.g. ShuffleBlockKind::kCompositeRows
 ///   rowCount     u32
-///   decodedSize  u64  body bytes before compression
-///   stored       u64  body bytes that follow
+///   rawBytes     u64  uncompressed body bytes
+///   storedBytes  u64  body bytes that follow
 ///   layout       u8   RunLayout::kCombined (compressed) or
 ///                     kCombinedUncompressed
 ///   body              rows back to back, each [size i32][size bytes]
 ///
-/// The reader requires rowCount in [1, kMaxBlockRows], decodedSize at least
+/// The reader requires rowCount in [1, kMaxBlockRows], rawBytes at least
 /// 4 * rowCount, a non-negative size per row, rows consuming the body
-/// exactly, stored = decodedSize for kCombinedUncompressed, and a codec for
+/// exactly, storedBytes = rawBytes for kCombinedUncompressed, and a codec for
 /// kCombined. The header size counts the kind byte.
 /// Wire header of a framed row block (packed, little-endian, no padding).
 struct __attribute__((packed)) RowBlockHeader {
   ShuffleBlockKind kind;
   uint32_t rowCount;
-  uint64_t decodedBytes;
+  uint64_t rawBytes;
   uint64_t storedBytes;
   RunLayout layout;
 };
@@ -111,55 +110,6 @@ inline int32_t framedRowSize(const void* row) {
 inline uint64_t framedRowBytes(const void* row) {
   return sizeof(int32_t) + static_cast<uint64_t>(framedRowSize(row));
 }
-
-/// Measures steady_clock wall time and adds the elapsed nanoseconds, minus the
-/// delta of up to two excluded nanosecond counters (e.g. nested spill,
-/// decompression, or shred timers), to `*target` on destruction.
-template <typename Target>
-class ExclusiveNanosecondTimer {
- public:
-  explicit ExclusiveNanosecondTimer(
-      Target* target,
-      const uint64_t* excluded1 = nullptr,
-      const uint64_t* excluded2 = nullptr)
-      : target_(target),
-        excluded1_(excluded1),
-        excluded2_(excluded2),
-        excluded1Start_(excluded1 != nullptr ? *excluded1 : 0),
-        excluded2Start_(excluded2 != nullptr ? *excluded2 : 0),
-        start_(std::chrono::steady_clock::now()) {}
-
-  ~ExclusiveNanosecondTimer() {
-    if (target_ == nullptr) {
-      return;
-    }
-    const auto elapsed = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start_)
-            .count());
-    uint64_t excluded = 0;
-    if (excluded1_ != nullptr && *excluded1_ > excluded1Start_) {
-      excluded += *excluded1_ - excluded1Start_;
-    }
-    if (excluded2_ != nullptr && *excluded2_ > excluded2Start_) {
-      excluded += *excluded2_ - excluded2Start_;
-    }
-    if (elapsed > excluded) {
-      *target_ += static_cast<Target>(elapsed - excluded);
-    }
-  }
-
-  ExclusiveNanosecondTimer(const ExclusiveNanosecondTimer&) = delete;
-  ExclusiveNanosecondTimer& operator=(const ExclusiveNanosecondTimer&) = delete;
-
- private:
-  Target* const target_;
-  const uint64_t* const excluded1_;
-  const uint64_t* const excluded2_;
-  const uint64_t excluded1Start_;
-  const uint64_t excluded2Start_;
-  const std::chrono::steady_clock::time_point start_;
-};
 
 /// Sets the size of `buffer`, allocating or growing it from `pool`, and
 /// returns its data. Keeps the bytes - growth copies them and doubles the

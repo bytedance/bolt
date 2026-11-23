@@ -36,7 +36,7 @@ CompositeShuffleReader::CompositeShuffleReader(
     : decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
-      cursor_(std::move(streams), arrowPool, decompressor_.get()),
+      cursor_(std::move(streams), arrowPool),
       rowBlockReader_(decompressor_.get(), pool),
       pool_(pool),
       batchSize_(batchSize),

@@ -23,6 +23,7 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -140,13 +141,11 @@ CellNestedShredder::CellNestedShredder(
     const CellNestedLayout& layout,
     CellSplitter& splitter,
     uint32_t numPartitions,
-    memory::MemoryPool& pool,
-    const uint64_t* excludedNs)
+    memory::MemoryPool& pool)
     : layout_(layout),
       splitter_(splitter),
       numPartitions_(numPartitions),
       pool_(pool),
-      excludedNs_(excludedNs),
       inputs_(layout.numNodes()),
       decoded_(layout.numNodes()),
       nullClass_(layout.numNodes(), NullClass::kAllNull),
@@ -216,7 +215,7 @@ void CellNestedShredder::followSeals() {
 }
 
 void CellNestedShredder::prepare(const RowVector& rv, uint32_t columnOffset) {
-  ExclusiveNanosecondTimer timer(&shredNs_, excludedNs_);
+  NanosecondTimer timer(&shredWallNs_);
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
@@ -501,10 +500,7 @@ void CellNestedShredder::split(
     std::span<const uint32_t> partition2RowCount) {
   BOLT_CHECK_EQ(row2Partition.size(), static_cast<size_t>(numRows_));
   BOLT_CHECK_EQ(partition2RowCount.size(), numPartitions_);
-  splitNs_ = 0;
-  // splitNs_ leaves out the excluded time inside the splitter's calls: all
-  // of the excluded time comes off here.
-  ExclusiveNanosecondTimer timer(&shredNs_, &splitNs_, excludedNs_);
+  NanosecondTimer timer(&shredWallNs_);
   busy_ = true;
   SCOPE_EXIT {
     busy_ = false;
@@ -782,7 +778,11 @@ NullClass CellNestedShredder::view(uint32_t col, const ElementBatch& elements) {
 }
 
 void CellNestedShredder::wireColumns(const SplitBatch& batch) {
-  ExclusiveNanosecondTimer timer(&splitNs_, excludedNs_);
+  NanosecondTimer timer(&wireWallNs_);
+  inWireColumns_ = true;
+  SCOPE_EXIT {
+    inWireColumns_ = false;
+  };
   splitter_.split(batch);
 }
 

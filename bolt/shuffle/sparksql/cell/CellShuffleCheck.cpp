@@ -199,6 +199,10 @@ void CellShuffleCheck::setColumnCache(
   BOLT_CHECK(
       checksColumn(col), "Cell shuffle check unsupported column {}", col);
   BOLT_CHECK_NOT_NULL(streamCacheBase);
+  BOLT_CHECK_NULL(
+      columns_[col].streamCache,
+      "Cell shuffle check cache already set for column {}",
+      col);
   columns_[col].streamCache = streamCacheBase;
 }
 

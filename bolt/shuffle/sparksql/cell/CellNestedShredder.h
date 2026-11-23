@@ -60,16 +60,11 @@ class CellNestedShredder {
   static constexpr uint32_t kElementBatchPositions = 64 << 10;
 
   /// `layout`, `splitter` and `pool` must outlive the shredder.
-  /// `excludedNs`, if not null, is a clock of time reported apart
-  /// - the writer's seal and spill time, which a reclaim reached from inside
-  /// the shredding or the splitter adds to - and must outlive the shredder:
-  /// what it gains while the shredder runs is not shred time.
   CellNestedShredder(
       const CellNestedLayout& layout,
       CellSplitter& splitter,
       uint32_t numPartitions,
-      memory::MemoryPool& pool,
-      const uint64_t* excludedNs = nullptr);
+      memory::MemoryPool& pool);
 
   /// Takes data columns starting at columnOffset: decodes them, classifies the
   /// nulls of the rows' columns and counts each space's positions in this
@@ -108,12 +103,22 @@ class CellNestedShredder {
       std::span<const uint32_t> row2Partition,
       std::span<const uint32_t> partition2RowCount);
 
-  /// Time spent shredding since the last call: the splitter's own, and the
-  /// excluded clock's, left out.
-  uint64_t takeShredTimeNs() {
-    const uint64_t ns = shredNs_;
-    shredNs_ = 0;
-    return ns;
+  /// Total wall time spent in prepare() and split(), including wireColumns()
+  /// and any nested reclaims.
+  uint64_t shredWallNs() const {
+    return shredWallNs_;
+  }
+
+  /// Total wall time spent in wireColumns() (the splitter portion of
+  /// shredWallNs()).
+  uint64_t wireWallNs() const {
+    return wireWallNs_;
+  }
+
+  /// True while inside prepare() or split(), excluding wireColumns(). Used so
+  /// nested reclaims attribute their spill time to the shredding phase.
+  bool isShredding() const {
+    return busy_ && !inWireColumns_;
   }
 
   /// Gives back the scratch kept across batches and returns the bytes the
@@ -242,7 +247,6 @@ class CellNestedShredder {
   CellSplitter& splitter_;
   const uint32_t numPartitions_;
   memory::MemoryPool& pool_;
-  const uint64_t* const excludedNs_;
 
   std::vector<NodeInput> inputs_;
   /// Per layout column: the rows' decoded column, or an element batch's view
@@ -284,9 +288,11 @@ class CellNestedShredder {
   BufferPtr identity_;
   /// Inside prepare() or split().
   bool busy_{false};
+  /// Inside wireColumns(), nested within split().
+  bool inWireColumns_{false};
 
-  uint64_t shredNs_{0};
-  uint64_t splitNs_{0};
+  uint64_t shredWallNs_{0};
+  uint64_t wireWallNs_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -198,13 +198,11 @@ TEST_F(ShuffleBlockTest, rowBlockAppendCombinesBlocksAcrossStreams) {
           {}, makeBlock(firstRows), {}, makeBlock(secondRows), {}});
 
   CodecDecompressor decompressor(lz4.get());
-  ShuffleStreamCursor cursor(
-      streams, arrow::default_memory_pool(), &decompressor);
+  ShuffleStreamCursor cursor(streams, arrow::default_memory_pool());
   RowBlockReader reader(&decompressor, pool_.get());
 
   RowBlock combined;
   while (true) {
-    auto timer = cursor.timeRead();
     const auto kind = cursor.nextBlockKind();
     if (!kind.has_value()) {
       break;
@@ -289,8 +287,8 @@ TEST_F(ShuffleBlockTest, rowBlockReaderRejectsMalformedInput) {
         "malformed row shuffle block: stored row block size mismatch");
   }
 
-  // Compressed block with stored == 0 and huge decodedBytes must fail before
-  // allocating decodedBytes.
+  // Compressed block with stored == 0 and huge rawBytes must fail before
+  // allocating rawBytes.
   {
     auto lz4 = createCodec(
         arrow::Compression::LZ4_FRAME,

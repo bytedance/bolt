@@ -151,7 +151,7 @@ void RowBlockReader::decodeBlock(
   }
   const auto header = memory::loadUnaligned<RowBlockHeader>(rawHeader);
   const uint32_t rowCount = header.rowCount;
-  const uint64_t decodedBytes = header.decodedBytes;
+  const uint64_t rawBytes = header.rawBytes;
   const uint64_t stored = header.storedBytes;
   const RunLayout layout = header.layout;
   if (rowCount == 0 || rowCount > kMaxBlockRows) {
@@ -160,14 +160,14 @@ void RowBlockReader::decodeBlock(
         blockLabel,
         blockLabel);
   }
-  if (decodedBytes < 4ull * rowCount) {
+  if (rawBytes < 4ull * rowCount) {
     BOLT_FAIL(
         "malformed {} shuffle block: {} block smaller than its row headers",
         blockLabel,
         blockLabel);
   }
   if (layout == RunLayout::kCombinedUncompressed) {
-    if (stored != decodedBytes) {
+    if (stored != rawBytes) {
       BOLT_FAIL(
           "malformed {} shuffle block: stored {} block size mismatch",
           blockLabel,
@@ -194,10 +194,10 @@ void RowBlockReader::decodeBlock(
           blockLabel,
           blockLabel);
     }
-    resetBuffer(blockBuffer, decodedBytes, pool_);
+    resetBuffer(blockBuffer, rawBytes, pool_);
     if (!decompressor_->decompress(
             {compressed_->as<uint8_t>(), stored},
-            {blockBuffer->asMutable<uint8_t>(), decodedBytes})) {
+            {blockBuffer->asMutable<uint8_t>(), rawBytes})) {
       BOLT_FAIL(
           "malformed {} shuffle block: {} block decompression failed",
           blockLabel,
@@ -226,7 +226,7 @@ void RowBlockReader::decodeBlock(
   rows.reserve(checkedPlus(prevRows, static_cast<size_t>(rowCount)));
   uint64_t pos = 0;
   for (uint32_t i = 0; i < rowCount; ++i) {
-    if (decodedBytes - pos < sizeof(int32_t)) {
+    if (rawBytes - pos < sizeof(int32_t)) {
       BOLT_FAIL(
           "malformed {} shuffle block: truncated {} row header",
           blockLabel,
@@ -234,7 +234,7 @@ void RowBlockReader::decodeBlock(
     }
     const int32_t size = framedRowSize(body + pos);
     pos += sizeof(int32_t);
-    if (size < 0 || static_cast<uint64_t>(size) > decodedBytes - pos) {
+    if (size < 0 || static_cast<uint64_t>(size) > rawBytes - pos) {
       BOLT_FAIL(
           "malformed {} shuffle block: {} row out of bounds",
           blockLabel,
@@ -244,7 +244,7 @@ void RowBlockReader::decodeBlock(
     rowBytes += static_cast<uint64_t>(size);
     pos += size;
   }
-  if (pos != decodedBytes) {
+  if (pos != rawBytes) {
     BOLT_FAIL(
         "malformed {} shuffle block: {} block length mismatch",
         blockLabel,
