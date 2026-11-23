@@ -412,12 +412,4 @@ uint64_t appendPayloadPrefix(
 /// Bytes of one partition's resident cells, all streams together.
 uint64_t residentBytes(const CellWindowInput& in, uint32_t pid);
 
-/// Writes a run header at `out`, which holds combinedRunHeaderBytes() of
-/// the decodedSizes.size() streams.
-void writeCombinedRunHeader(
-    char* out,
-    RunLayout layout,
-    uint64_t stored,
-    std::span<const uint64_t> decodedSizes);
-
 } // namespace bytedance::bolt::shuffle::sparksql::cell

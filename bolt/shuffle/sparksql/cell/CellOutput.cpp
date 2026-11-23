@@ -37,8 +37,8 @@ namespace {
 class SpillRunSink final : public RunSink {
  public:
   explicit SpillRunSink(ShuffleSpillFile& file) : file_(file) {}
-  uint64_t position() const override {
-    return file_.end();
+  uint64_t reserve(size_t bytes) override {
+    return file_.reserve(bytes);
   }
   void write(const void* data, size_t bytes) override {
     file_.append(data, bytes);
@@ -55,8 +55,8 @@ class SpillRunSink final : public RunSink {
 class DataRunSink final : public RunSink {
  public:
   explicit DataRunSink(DataFileWriter& file) : file_(file) {}
-  uint64_t position() const override {
-    return file_.position();
+  uint64_t reserve(size_t bytes) override {
+    return file_.reserve(bytes);
   }
   void write(const void* data, size_t bytes) override {
     file_.write(data, bytes);

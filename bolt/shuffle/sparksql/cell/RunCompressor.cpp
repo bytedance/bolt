@@ -22,6 +22,7 @@
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/MemoryCopy.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
@@ -37,7 +38,7 @@ constexpr int64_t kStreamPieceBytes = 256 << 10;
 /// The output buffer gathers a frame into sink writes of about this size,
 /// with room past it for the codec's bound on one piece of fresh input and
 /// the trailer. A call may still emit more - deflate also flushes a block
-/// carried over from earlier calls - which compressStaged copes with.
+/// carried over from earlier calls - which StreamFrameEncoder copes with.
 constexpr int64_t kStreamOutBytes = 512 << 10;
 constexpr int64_t kStreamOutSlackBytes = 64;
 /// Input after which a frame that has not shrunk the data is stored
@@ -53,18 +54,177 @@ bool doesNotShrink(uint64_t stored, uint64_t bytes) {
   return stored + stored / 32 >= bytes;
 }
 
-/// Adaptive: after a frame that does not shrink, one frame of its kind in
-/// this many is tried, the others stored without a codec call.
-constexpr uint32_t kAdaptiveRetryFrames = 10;
+void writeCombinedPrefix(char* out, RunLayout layout, uint64_t stored) {
+  out[0] = static_cast<char>(layout);
+  memory::storeUnaligned<uint64_t>(out + 1, stored);
+}
+
+/// Encodes one frame through a streaming compressor into `sink` using fixed
+/// staging and output buffers, optionally bailing out early if the probe block
+/// fails to shrink before any output has been flushed to `sink`.
+class StreamFrameEncoder {
+ public:
+  StreamFrameEncoder(
+      StreamCompressor& compressor,
+      RunSink& sink,
+      std::vector<uint8_t>& inputStage,
+      std::vector<uint8_t>& outputBuffer,
+      uint64_t* compressTimeNs,
+      bool probeEarly)
+      : compressor_(compressor),
+        sink_(sink),
+        inputStage_(inputStage),
+        outputBuffer_(outputBuffer),
+        compressTimeNs_(compressTimeNs),
+        probeEarly_(probeEarly),
+        outputCapacity_(static_cast<int64_t>(outputBuffer.size())),
+        minOutputRoom_(outputCapacity_ - kStreamOutBytes) {
+    compressor_.reset();
+  }
+
+  void feedInput(const char* data, uint32_t bytes) {
+    while (bytes > 0 && !abortedEarly_) {
+      const size_t copyBytes =
+          std::min<size_t>(bytes, inputStage_.size() - stagedInputBytes_);
+      ::memcpy(inputStage_.data() + stagedInputBytes_, data, copyBytes);
+      stagedInputBytes_ += copyBytes;
+      data += copyBytes;
+      bytes -= static_cast<uint32_t>(copyBytes);
+      if (stagedInputBytes_ == inputStage_.size()) {
+        compressStagedBlock();
+      }
+    }
+  }
+
+  uint64_t finish(uint64_t totalInputBytes) {
+    if (!abortedEarly_) {
+      compressStagedBlock();
+    }
+    if (abortedEarly_) {
+      return 0;
+    }
+    finishCompression();
+    if (!flushedToSink_ && doesNotShrink(totalOutputBytes_, totalInputBytes)) {
+      return 0;
+    }
+    if (pendingOutputBytes_ > 0) {
+      flushOutputToSink();
+    }
+    return totalOutputBytes_;
+  }
+
+  bool abortedEarly() const {
+    return abortedEarly_;
+  }
+
+ private:
+  void flushOutputToSink() {
+    sink_.write(outputBuffer_.data(), static_cast<size_t>(pendingOutputBytes_));
+    pendingOutputBytes_ = 0;
+    flushedToSink_ = true;
+  }
+
+  void ensureOutputRoom() {
+    if (outputCapacity_ - pendingOutputBytes_ < minOutputRoom_) {
+      flushOutputToSink();
+    }
+  }
+
+  void compressStagedBlock() {
+    if (stagedInputBytes_ == 0) {
+      return;
+    }
+    ensureOutputRoom();
+    // One call normally consumes the whole stage: minOutputRoom_ covers one
+    // block's bound. A codec may still stop short (e.g. deflate flushing a
+    // carried-over block), so flush buffered output and feed the remainder.
+    size_t consumed = 0;
+    while (consumed < stagedInputBytes_) {
+      StreamCompressResult result;
+      {
+        NanosecondTimer timer(compressTimeNs_);
+        result = compressor_.compress(
+            inputStage_.data() + consumed,
+            static_cast<int64_t>(stagedInputBytes_ - consumed),
+            outputBuffer_.data() + pendingOutputBytes_,
+            outputCapacity_ - pendingOutputBytes_);
+      }
+      BOLT_CHECK(
+          result.bytesRead > 0 || result.bytesWritten > 0 ||
+              pendingOutputBytes_ > 0,
+          "stream compressor made no progress");
+      pendingOutputBytes_ += result.bytesWritten;
+      totalOutputBytes_ += static_cast<uint64_t>(result.bytesWritten);
+      consumed += static_cast<size_t>(result.bytesRead);
+      if (consumed < stagedInputBytes_ && pendingOutputBytes_ > 0) {
+        flushOutputToSink();
+      }
+    }
+    inputBytesFed_ += stagedInputBytes_;
+    stagedInputBytes_ = 0;
+    if (probeEarly_ && !flushedToSink_ && inputBytesFed_ >= kStreamProbeBytes &&
+        doesNotShrink(totalOutputBytes_, inputBytesFed_)) {
+      abortedEarly_ = true;
+    }
+  }
+
+  void finishCompression() {
+    for (;;) {
+      ensureOutputRoom();
+      StreamEndResult end;
+      {
+        NanosecondTimer timer(compressTimeNs_);
+        end = compressor_.end(
+            outputBuffer_.data() + pendingOutputBytes_,
+            outputCapacity_ - pendingOutputBytes_);
+      }
+      pendingOutputBytes_ += end.bytesWritten;
+      totalOutputBytes_ += static_cast<uint64_t>(end.bytesWritten);
+      if (end.noMoreOutput) {
+        break;
+      }
+      BOLT_CHECK(
+          end.bytesWritten > 0 || pendingOutputBytes_ > 0,
+          "stream compressor end() made no progress");
+      if (pendingOutputBytes_ > 0) {
+        flushOutputToSink();
+      }
+    }
+  }
+
+  StreamCompressor& compressor_;
+  RunSink& sink_;
+  std::vector<uint8_t>& inputStage_;
+  std::vector<uint8_t>& outputBuffer_;
+  uint64_t* const compressTimeNs_;
+  const bool probeEarly_;
+  const int64_t outputCapacity_;
+  const int64_t minOutputRoom_;
+  size_t stagedInputBytes_{0};
+  int64_t pendingOutputBytes_{0};
+  uint64_t inputBytesFed_{0};
+  uint64_t totalOutputBytes_{0};
+  bool flushedToSink_{false};
+  bool abortedEarly_{false};
+};
 
 } // namespace
+
+uint64_t BufferRunSink::reserve(size_t bytes) {
+  const uint64_t start = buffer_ == nullptr ? 0 : buffer_->size();
+  if (bytes > 0) {
+    resizeBuffer(buffer_, start + bytes, pool_);
+    ::memset(buffer_->asMutable<char>() + start, 0, bytes);
+  }
+  return start;
+}
 
 void BufferRunSink::write(const void* data, size_t bytes) {
   appendBytes(buffer_, data, bytes, pool_);
 }
 
 void BufferRunSink::patch(uint64_t position, const void* data, size_t bytes) {
-  const uint64_t end = this->position();
+  const uint64_t end = buffer_ == nullptr ? 0 : buffer_->size();
   BOLT_CHECK(
       position <= end && bytes <= end - position, "run patch beyond its end");
   if (bytes == 0) {
@@ -76,11 +236,15 @@ void BufferRunSink::patch(uint64_t position, const void* data, size_t bytes) {
 RunCompressor::RunCompressor(
     const PartitionWriterOptions& options,
     const CellShuffleOptions& cellOptions,
-    uint64_t* compressTimeNs)
+    uint64_t* compressTimeNs,
+    std::unique_ptr<StreamCompressor> streamCompressor)
     : spillPool_(memory::spillMemoryPool()),
       compressTimeNs_(compressTimeNs),
-      adaptive_(cellOptions.adaptiveCompression) {
+      skipper_(cellOptions.adaptiveCompression) {
   if (options.compressionType == arrow::Compression::UNCOMPRESSED) {
+    BOLT_CHECK(
+        streamCompressor == nullptr,
+        "a stream compressor requires a compressed codec");
     return;
   }
   const CodecOptions codecOptions{
@@ -88,39 +252,25 @@ RunCompressor::RunCompressor(
       options.compressionLevel,
       options.checksumEnabled};
   codec_ = createCodec(options.compressionType, codecOptions);
-  if (!cellOptions.streamCompression) {
-    return;
+  if (streamCompressor == nullptr && cellOptions.streamCompression) {
+    const auto codecType = fromArrowCodecType(options.compressionType);
+    if (StreamCompressor::supports(codecType)) {
+      // Independent blocks: the stage is reused for every block, so a linked
+      // block would compress against a copied-aside dictionary.
+      auto streamOptions = codecOptions;
+      streamOptions.useIndependentBlocks = true;
+      streamOptions.blockSize = kStreamPieceBytes;
+      streamCompressor = StreamCompressor::create(codecType, streamOptions);
+    }
   }
-  std::unique_ptr<StreamCompressor> streamCompressor;
-  try {
-    // Independent blocks: the stage is reused for every block, so a linked
-    // block would compress against a copied-aside dictionary.
-    auto streamOptions = codecOptions;
-    streamOptions.useIndependentBlocks = true;
-    streamOptions.blockSize = kStreamPieceBytes;
-    streamCompressor = StreamCompressor::create(
-        fromArrowCodecType(options.compressionType), streamOptions);
-  } catch (const std::exception&) {
-    // No stream form for this codec or backend: one-shot it is.
-    return;
+  if (streamCompressor != nullptr) {
+    streamCompressor_ = std::move(streamCompressor);
+    streamInputStage_.resize(kStreamPieceBytes);
+    streamOutputBuffer_.resize(
+        kStreamOutBytes +
+        streamCompressor_->recommendedOutputSize(kStreamPieceBytes) +
+        kStreamOutSlackBytes);
   }
-  useStreamCompressor(std::move(streamCompressor));
-}
-
-void RunCompressor::useStreamCompressor(
-    std::unique_ptr<StreamCompressor> compressor) {
-  streamCompressor_ = std::move(compressor);
-  stage_.resize(kStreamPieceBytes);
-  out_.resize(
-      kStreamOutBytes +
-      streamCompressor_->recommendedOutputSize(kStreamPieceBytes) +
-      kStreamOutSlackBytes);
-}
-
-void RunCompressor::testingSetStreamCompressor(
-    std::unique_ptr<StreamCompressor> compressor) {
-  BOLT_CHECK_NOT_NULL(codec_, "a stream form needs a codec");
-  useStreamCompressor(std::move(compressor));
 }
 
 RunCompressor::~RunCompressor() = default;
@@ -141,7 +291,7 @@ void RunCompressor::write(
   }
   const std::span<const uint64_t> sizes = sizes_;
   if (codec_ == nullptr || total < kMinCompressBytes) {
-    storeRun(sink, sizes, total, visit);
+    storeUncompressed(sink, sizes, total, visit);
     ++stats_.storedRuns;
     if (codec_ != nullptr) {
       ++stats_.tinyFrames;
@@ -149,17 +299,13 @@ void RunCompressor::write(
     }
     return;
   }
-  if (streamSkips_.size() != numStreams) {
-    streamSkips_.assign(numStreams, 0);
-    combinedSkip_ = 0;
-  }
+  skipper_.prepareStreams(numStreams);
   if (streamStats_.size() < numStreams) {
     streamStats_.resize(numStreams);
   }
   if (total < kMinSeparateRunBytes) {
-    combinedHeader_.assign(combinedRunHeaderBytes(numStreams), 0);
-    const uint64_t headerAt = sink.position();
-    sink.write(combinedHeader_.data(), combinedHeader_.size());
+    const uint64_t headerAt = sink.reserve(kCombinedRunDecodedSizesOffset);
+    sink.write(sizes.data(), sizes.size_bytes());
     const auto visitAll = [&](RunPieceFn fn) {
       for (uint32_t s = 0; s < numStreams; ++s) {
         visit(s, fn);
@@ -167,35 +313,34 @@ void RunCompressor::write(
     };
     ++stats_.combinedRuns;
     uint64_t stored = 0;
-    const bool skipped = skipFrame(combinedSkip_);
+    const bool skipped = skipper_.shouldSkipCombined();
     if (!skipped) {
-      stored = writeFrame(sink, total, visitAll, /*judgeEarly=*/false);
-      recordOutcome(combinedSkip_, stored > 0);
+      stored = writeFrame(sink, total, visitAll, /*probeEarly=*/false);
+      skipper_.recordCombined(stored > 0);
     }
     countFrame(stored, total, skipped);
     if (stored == 0) {
       visitAll(
           [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
     }
-    writeCombinedRunHeader(
-        combinedHeader_.data(),
+    char prefix[kCombinedRunDecodedSizesOffset];
+    writeCombinedPrefix(
+        prefix,
         stored == 0 ? RunLayout::kCombinedUncompressed : RunLayout::kCombined,
-        stored == 0 ? total : stored,
-        sizes);
-    sink.patch(headerAt, combinedHeader_.data(), combinedHeader_.size());
+        stored == 0 ? total : stored);
+    sink.patch(headerAt, prefix, sizeof(prefix));
     return;
   }
   // kSeparate: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
   ++stats_.separateRuns;
-  separateHeader_.assign(2ull * numStreams, 0);
-  const uint64_t headerAt = sink.position();
   const auto layout = static_cast<uint8_t>(RunLayout::kSeparate);
   sink.write(&layout, 1);
-  sink.write(separateHeader_.data(), separateHeader_.size() * sizeof(uint64_t));
+  const uint64_t headerAt = sink.reserve(2ull * numStreams * sizeof(uint64_t));
+  std::vector<uint64_t> header(2ull * numStreams, 0);
   for (uint32_t s = 0; s < numStreams; ++s) {
     const uint64_t bytes = sizes[s];
-    separateHeader_[s] = bytes;
+    header[s] = bytes;
     if (bytes == 0) {
       continue;
     }
@@ -205,12 +350,12 @@ void RunCompressor::write(
     if (bytes < kMinCompressBytes) {
       ++stats_.tinyFrames;
       stats_.tinyBytes += bytes;
-    } else if (skipFrame(streamSkips_[s])) {
+    } else if (skipper_.shouldSkipStream(s)) {
       countFrame(0, bytes, /*skipped=*/true);
       ++streamStats.skipped;
     } else {
-      stored = writeFrame(sink, bytes, visitStream, /*judgeEarly=*/true);
-      recordOutcome(streamSkips_[s], stored > 0);
+      stored = writeFrame(sink, bytes, visitStream, /*probeEarly=*/true);
+      skipper_.recordStream(s, stored > 0);
       countFrame(stored, bytes, /*skipped=*/false);
       ++streamStats.tried;
       streamStats.compressed += stored > 0;
@@ -218,47 +363,29 @@ void RunCompressor::write(
       streamStats.outBytes += stored > 0 ? stored : bytes;
     }
     if (stored > 0) {
-      separateHeader_[s] = stored;
-      separateHeader_[numStreams + s] = bytes;
+      header[s] = stored;
+      header[numStreams + s] = bytes;
       continue;
     }
     visitStream([&](const char* data, uint32_t pieceBytes) {
       sink.write(data, pieceBytes);
     });
   }
-  sink.patch(
-      headerAt + 1,
-      separateHeader_.data(),
-      separateHeader_.size() * sizeof(uint64_t));
+  sink.patch(headerAt, header.data(), header.size() * sizeof(uint64_t));
 }
 
-void RunCompressor::storeRun(
+void RunCompressor::storeUncompressed(
     RunSink& sink,
     std::span<const uint64_t> sizes,
     uint64_t total,
     RunStreamVisitor visit) {
-  const auto numStreams = static_cast<uint32_t>(sizes.size());
-  combinedHeader_.resize(combinedRunHeaderBytes(numStreams));
-  writeCombinedRunHeader(
-      combinedHeader_.data(), RunLayout::kCombinedUncompressed, total, sizes);
-  sink.write(combinedHeader_.data(), combinedHeader_.size());
-  for (uint32_t s = 0; s < numStreams; ++s) {
+  char prefix[kCombinedRunDecodedSizesOffset];
+  writeCombinedPrefix(prefix, RunLayout::kCombinedUncompressed, total);
+  sink.write(prefix, sizeof(prefix));
+  sink.write(sizes.data(), sizes.size_bytes());
+  for (uint32_t s = 0; s < sizes.size(); ++s) {
     visit(
         s, [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
-  }
-}
-
-bool RunCompressor::skipFrame(uint32_t& skip) const {
-  if (!adaptive_ || skip == 0) {
-    return false;
-  }
-  --skip;
-  return true;
-}
-
-void RunCompressor::recordOutcome(uint32_t& skip, bool shrank) const {
-  if (adaptive_ && !shrank) {
-    skip = kAdaptiveRetryFrames - 1;
   }
 }
 
@@ -323,7 +450,7 @@ uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
     stats_.storedNullBytes += bytes;
     return 0;
   };
-  if (bytes < kMinCompressBytes || skipFrame(nullSkip_)) {
+  if (bytes < kMinCompressBytes || skipper_.shouldSkipNullBody()) {
     return stored();
   }
   resetBuffer(compressed_, codec_->maxCompressedLen(bytes), spillPool_);
@@ -341,7 +468,7 @@ uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
   // nulls spread at random, whose few saved bytes cost more codec time, on
   // both sides, than they are worth.
   const bool shrank = static_cast<uint64_t>(written) * 2 <= bytes;
-  recordOutcome(nullSkip_, shrank);
+  skipper_.recordNullBody(shrank);
   if (!shrank) {
     return stored();
   }
@@ -362,122 +489,33 @@ uint64_t RunCompressor::writeFrame(
     RunSink& sink,
     uint64_t bytes,
     FrameVisitor visit,
-    bool judgeEarly) {
+    bool probeEarly) {
   if (streamCompressor_ != nullptr) {
-    return streamFrame(sink, bytes, visit, judgeEarly);
+    return streamFrame(sink, bytes, visit, probeEarly);
   }
   return oneShotFrame(sink, bytes, visit);
 }
 
 uint64_t RunCompressor::streamFrame(
     RunSink& sink,
-    uint64_t bytes,
+    uint64_t totalInputBytes,
     FrameVisitor visit,
-    bool judgeEarly) {
-  auto& compressor = *streamCompressor_;
-  compressor.reset();
-  const int64_t outCapacity = static_cast<int64_t>(out_.size());
-  // Room left before each call: the codec's bound on one piece of fresh
-  // input, plus slack.
-  const int64_t pieceBound = outCapacity - kStreamOutBytes;
-  int64_t held = 0; // frame bytes in out_, not yet in the sink
-  bool reachedSink = false; // whether some of the frame is in the sink
-  uint64_t fed = 0;
-  uint64_t emitted = 0;
-  size_t staged = 0;
-  bool storedInstead = false;
-  const auto drain = [&]() {
-    sink.write(out_.data(), static_cast<size_t>(held));
-    held = 0;
-    reachedSink = true;
-  };
-  const auto makeRoom = [&]() {
-    if (outCapacity - held < pieceBound) {
-      drain();
-    }
-  };
-  const auto compressStaged = [&]() {
-    if (staged == 0) {
-      return;
-    }
-    makeRoom();
-    // One call normally takes the whole stage: pieceBound is the codec's
-    // bound for one piece. A codec may still stop short - deflate also
-    // flushes the block it carried over from earlier calls - so the output
-    // goes to the sink and the rest of the stage is fed again.
-    size_t consumed = 0;
-    while (consumed < staged) {
-      StreamCompressResult result;
-      {
-        NanosecondTimer timer(compressTimeNs_);
-        result = compressor.compress(
-            stage_.data() + consumed,
-            static_cast<int64_t>(staged - consumed),
-            out_.data() + held,
-            outCapacity - held);
-      }
-      BOLT_CHECK(
-          result.bytesRead > 0 || result.bytesWritten > 0 || held > 0,
-          "stream compressor made no progress");
-      held += result.bytesWritten;
-      emitted += static_cast<uint64_t>(result.bytesWritten);
-      consumed += static_cast<size_t>(result.bytesRead);
-      if (consumed < staged && held > 0) {
-        drain();
-      }
-    }
-    fed += staged;
-    staged = 0;
-    if (judgeEarly && !reachedSink && fed >= kStreamProbeBytes &&
-        doesNotShrink(emitted, fed)) {
-      storedInstead = true;
-    }
-  };
+    bool probeEarly) {
+  StreamFrameEncoder encoder(
+      *streamCompressor_,
+      sink,
+      streamInputStage_,
+      streamOutputBuffer_,
+      compressTimeNs_,
+      probeEarly);
   visit([&](const char* data, uint32_t bytes) {
-    while (bytes > 0 && !storedInstead) {
-      const size_t take = std::min<size_t>(bytes, stage_.size() - staged);
-      ::memcpy(stage_.data() + staged, data, take);
-      staged += take;
-      data += take;
-      bytes -= static_cast<uint32_t>(take);
-      if (staged == stage_.size()) {
-        compressStaged();
-      }
-    }
+    encoder.feedInput(data, bytes);
   });
-  if (!storedInstead) {
-    compressStaged();
-  }
-  if (storedInstead) {
+  const uint64_t compressedBytes = encoder.finish(totalInputBytes);
+  if (encoder.abortedEarly()) {
     ++stats_.earlyStoredFrames;
-    return 0;
   }
-  for (;;) {
-    makeRoom();
-    StreamEndResult end;
-    {
-      NanosecondTimer timer(compressTimeNs_);
-      end = compressor.end(out_.data() + held, outCapacity - held);
-    }
-    held += end.bytesWritten;
-    emitted += static_cast<uint64_t>(end.bytesWritten);
-    if (end.noMoreOutput) {
-      break;
-    }
-    BOLT_CHECK(
-        end.bytesWritten > 0 || held > 0,
-        "stream compressor end() made no progress");
-    if (held > 0) {
-      drain();
-    }
-  }
-  if (!reachedSink && doesNotShrink(emitted, bytes)) {
-    return 0;
-  }
-  if (held > 0) {
-    sink.write(out_.data(), static_cast<size_t>(held));
-  }
-  return emitted;
+  return compressedBytes;
 }
 
 uint64_t

@@ -32,18 +32,19 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// Where a run is written: a spill file, the data file or a payload in
 /// memory. A run's header precedes its frames, whose sizes are known only
-/// once they are written, so patch() fills them in. A sink may defer a
-/// patch, as long as the bytes are in place before anyone reads them.
+/// once they are written, so reserve() holds header space and patch() fills
+/// it in afterwards.
 class RunSink {
  public:
   virtual ~RunSink() = default;
 
-  /// Bytes written so far.
-  virtual uint64_t position() const = 0;
+  /// Reserves `bytes` placeholder bytes in the sink and returns their starting
+  /// offset for a later patch().
+  virtual uint64_t reserve(size_t bytes) = 0;
 
   virtual void write(const void* data, size_t bytes) = 0;
 
-  /// Overwrites `bytes` already written at `position`.
+  /// Overwrites `bytes` already written or reserved at `position`.
   virtual void patch(uint64_t position, const void* data, size_t bytes) = 0;
 };
 
@@ -53,9 +54,7 @@ class BufferRunSink final : public RunSink {
   BufferRunSink(BufferPtr& buffer, memory::MemoryPool* pool)
       : buffer_(buffer), pool_(pool) {}
 
-  uint64_t position() const override {
-    return buffer_ == nullptr ? 0 : buffer_->size();
-  }
+  uint64_t reserve(size_t bytes) override;
 
   void write(const void* data, size_t bytes) override;
 
@@ -64,6 +63,65 @@ class BufferRunSink final : public RunSink {
  private:
   BufferPtr& buffer_;
   memory::MemoryPool* const pool_;
+};
+
+/// Per-kind adaptive skip policy: after a frame fails to shrink, skips the
+/// next kRetryInterval - 1 frames of the same kind before probing again.
+class AdaptiveSkipper {
+ public:
+  explicit AdaptiveSkipper(bool enabled) : enabled_(enabled) {}
+
+  void prepareStreams(uint32_t numStreams) {
+    if (streamCounters_.size() != numStreams) {
+      streamCounters_.assign(numStreams, 0);
+      combinedCounter_ = 0;
+    }
+  }
+
+  bool shouldSkipStream(uint32_t stream) {
+    return consumeSkip(streamCounters_[stream]);
+  }
+  void recordStream(uint32_t stream, bool shrank) {
+    record(streamCounters_[stream], shrank);
+  }
+
+  bool shouldSkipCombined() {
+    return consumeSkip(combinedCounter_);
+  }
+  void recordCombined(bool shrank) {
+    record(combinedCounter_, shrank);
+  }
+
+  bool shouldSkipNullBody() {
+    return consumeSkip(nullBodyCounter_);
+  }
+  void recordNullBody(bool shrank) {
+    record(nullBodyCounter_, shrank);
+  }
+
+ private:
+  /// After a frame that does not shrink, one frame in this many is tried and
+  /// the others are stored without a codec call.
+  static constexpr uint32_t kRetryInterval = 10;
+
+  bool consumeSkip(uint32_t& remaining) const {
+    if (!enabled_ || remaining == 0) {
+      return false;
+    }
+    --remaining;
+    return true;
+  }
+
+  void record(uint32_t& remaining, bool shrank) const {
+    if (enabled_ && !shrank) {
+      remaining = kRetryInterval - 1;
+    }
+  }
+
+  const bool enabled_;
+  std::vector<uint32_t> streamCounters_;
+  uint32_t combinedCounter_{0};
+  uint32_t nullBodyCounter_{0};
 };
 
 /// Takes one piece of a stream.
@@ -108,10 +166,13 @@ class RunCompressor {
   /// Compresses with `options`' codec; stores everything when it is
   /// UNCOMPRESSED. `cellOptions` gives the mode (streamCompression,
   /// adaptiveCompression). Codec time is added to `*compressTimeNs`.
+  /// If `streamCompressor` is supplied, it is used as the stream form instead
+  /// of creating one from `options`.
   RunCompressor(
       const PartitionWriterOptions& options,
       const CellShuffleOptions& cellOptions,
-      uint64_t* compressTimeNs);
+      uint64_t* compressTimeNs,
+      std::unique_ptr<StreamCompressor> streamCompressor = nullptr);
 
   ~RunCompressor();
 
@@ -141,11 +202,6 @@ class RunCompressor {
 
   /// Gives the one-shot workspaces back to the spill pool.
   void releaseWorkspace();
-
-  /// Streams frames through `compressor` from now on, in place of the
-  /// codec's own stream form; it must write frames the codec reads. For
-  /// tests of codec behaviour the real codecs rarely show.
-  void testingSetStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
 
   /// What the compressor did, counted per run and per frame - never per
   /// byte - so the counting costs nothing measurable.
@@ -204,38 +260,27 @@ class RunCompressor {
  private:
   using FrameVisitor = folly::FunctionRef<void(RunPieceFn fn)>;
 
-  /// Takes `compressor` as the stream form and sizes its buffers.
-  void useStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
-
   /// Writes the `bytes` `visit` hands over as one compressed frame, unless
-  /// it does not shrink - judged early from its first blocks when `judgeEarly`,
+  /// it does not shrink - judged early from its first blocks when `probeEarly`,
   /// else on its whole size. Returns the compressed frame's size; 0 when it
   /// was not compressed, and nothing was written.
   uint64_t writeFrame(
       RunSink& sink,
       uint64_t bytes,
       FrameVisitor visit,
-      bool judgeEarly);
+      bool probeEarly);
 
   uint64_t streamFrame(
       RunSink& sink,
-      uint64_t bytes,
+      uint64_t totalInputBytes,
       FrameVisitor visit,
-      bool judgeEarly);
+      bool probeEarly);
 
   uint64_t oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit);
 
-  /// Whether a frame whose kind has `skip` frames left to store without a
-  /// try is stored so; counts it down if so.
-  bool skipFrame(uint32_t& skip) const;
-
-  /// Learns from a frame tried: one that did not shrink has the next ones
-  /// of its kind stored without a try.
-  void recordOutcome(uint32_t& skip, bool shrank) const;
-
   /// Writes the run of sizes.size() streams uncompressed:
   /// kCombinedUncompressed.
-  void storeRun(
+  void storeUncompressed(
       RunSink& sink,
       std::span<const uint64_t> sizes,
       uint64_t total,
@@ -247,13 +292,7 @@ class RunCompressor {
 
   memory::MemoryPool* const spillPool_;
   uint64_t* const compressTimeNs_;
-  const bool adaptive_;
-  /// Per stream, its kSeparate frames still to store without a try; reset
-  /// when a run comes with another number of streams.
-  std::vector<uint32_t> streamSkips_;
-  /// The same for kCombined frames, and for null bodies.
-  uint32_t combinedSkip_{0};
-  uint32_t nullSkip_{0};
+  AdaptiveSkipper skipper_;
   Stats stats_;
   std::vector<StreamStats> streamStats_;
   std::unique_ptr<Codec> codec_;
@@ -261,16 +300,14 @@ class RunCompressor {
   std::unique_ptr<StreamCompressor> streamCompressor_;
   /// streamCompressor_'s input staging and output buffers, fixed sizes for
   /// the compressor's life.
-  std::vector<uint8_t> stage_;
-  std::vector<uint8_t> out_;
+  std::vector<uint8_t> streamInputStage_;
+  std::vector<uint8_t> streamOutputBuffer_;
   /// One-shot workspaces: the gathered frame and its compressed form, or a
   /// null body's.
   BufferPtr frame_;
   BufferPtr compressed_;
-  /// write()'s stream sizes and reusable run header scratch buffers.
+  /// Reusable stream-size scratch for write().
   std::vector<uint64_t> sizes_;
-  std::vector<char> combinedHeader_;
-  std::vector<uint64_t> separateHeader_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

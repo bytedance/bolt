@@ -70,6 +70,10 @@ class BufferedFile {
   /// buffer and bypassing it for larger writes.
   void write(const void* data, size_t bytes, uint64_t& writeTimeNs);
 
+  /// Advances the file by `bytes` zero-initialized placeholder bytes and
+  /// returns the starting offset.
+  uint64_t reserve(size_t bytes, uint64_t& writeTimeNs);
+
   /// Overwrites `bytes` at `offset` (within [0, end())). Bytes still in the
   /// user-space buffer are patched in place; bytes already written to `fd_`
   /// are patched directly via pwrite().
@@ -184,6 +188,11 @@ class ShuffleSpillFile {
 
   /// Appends `bytes` and returns the offset they start at.
   uint64_t append(const void* data, size_t bytes);
+
+  /// Advances the spill file by `bytes` zero-initialized placeholder bytes
+  /// (e.g. a header patched after writing its body) and returns the starting
+  /// offset.
+  uint64_t reserve(size_t bytes);
 
   /// Makes every append visible to read(), which bypasses stdio buffering.
   void flush();
@@ -337,6 +346,10 @@ class DataFileWriter {
   void beginPartition(uint32_t pid);
 
   void write(const void* data, size_t bytes);
+
+  /// Advances the data file by `bytes` zero-initialized placeholder bytes and
+  /// returns the starting offset.
+  uint64_t reserve(size_t bytes);
 
   /// Bytes written so far: where the next write lands.
   uint64_t position() const {

@@ -37,8 +37,10 @@ namespace {
 /// A RunSink that appends to a string and patches it in place.
 class StringSink final : public RunSink {
  public:
-  uint64_t position() const override {
-    return bytes.size();
+  uint64_t reserve(size_t size) override {
+    const uint64_t start = bytes.size();
+    bytes.resize(start + size, '\0');
+    return start;
   }
   void write(const void* data, size_t size) override {
     bytes.append(static_cast<const char*>(data), size);
@@ -254,12 +256,14 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   const std::vector<std::string> streams = {mixed, repetitive(100 << 10)};
   for (const int64_t maxRead : {int64_t{1000}, int64_t{100} << 10}) {
     SCOPED_TRACE(maxRead);
-    RunCompressor compressor(
-        partitionOptions_, cellOptions(), &compressTimeNs_);
     auto shortReads =
         std::make_unique<ShortReadCompressor>(type, realStreamForm(), maxRead);
     auto* probe = shortReads.get();
-    compressor.testingSetStreamCompressor(std::move(shortReads));
+    RunCompressor compressor(
+        partitionOptions_,
+        cellOptions(),
+        &compressTimeNs_,
+        std::move(shortReads));
     const auto decoded =
         decodeRun(compressRun(compressor, streams), 2, compressor.codec());
     EXPECT_EQ(decoded.streams, streams);
@@ -267,8 +271,10 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
     EXPECT_GT(probe->shortReads, 0);
   }
 
-  RunCompressor stalled(partitionOptions_, cellOptions(), &compressTimeNs_);
-  stalled.testingSetStreamCompressor(
+  RunCompressor stalled(
+      partitionOptions_,
+      cellOptions(),
+      &compressTimeNs_,
       std::make_unique<ShortReadCompressor>(type, realStreamForm(), 0));
   BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
 }

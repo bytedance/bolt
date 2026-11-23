@@ -1751,17 +1751,4 @@ uint64_t residentBytes(const CellWindowInput& in, uint32_t pid) {
   return total;
 }
 
-void writeCombinedRunHeader(
-    char* out,
-    RunLayout layout,
-    uint64_t stored,
-    std::span<const uint64_t> decodedSizes) {
-  out[0] = static_cast<char>(layout);
-  memory::storeUnaligned<uint64_t>(out + 1, stored);
-  ::memcpy(
-      out + kCombinedRunDecodedSizesOffset,
-      decodedSizes.data(),
-      decodedSizes.size_bytes());
-}
-
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -62,6 +62,9 @@ class StreamCompressor {
 
   virtual int32_t defaultCompressionLevel() const = 0;
 
+  /// Returns true when StreamCompressor::create() supports `type`.
+  static bool supports(CodecType type);
+
   /// Create a streaming compressor for the specified codec type.
   /// Only ZSTD, GZIP, and LZ4_FRAME are supported.
   /// Throws exception for unsupported types.

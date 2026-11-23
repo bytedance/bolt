@@ -103,6 +103,31 @@ void BufferedFile::write(
   end_ += bytes;
 }
 
+uint64_t BufferedFile::reserve(size_t bytes, uint64_t& writeTimeNs) {
+  const uint64_t offset = end_;
+  if (bytes == 0) {
+    return offset;
+  }
+  if (bytes < kWriteBufferBytes) {
+    if (buffer_.size() + bytes > kWriteBufferBytes) {
+      flush(writeTimeNs);
+    }
+    if (buffer_.capacity() < kWriteBufferBytes) {
+      buffer_.reserve(kWriteBufferBytes);
+    }
+    buffer_.resize(buffer_.size() + bytes, '\0');
+    end_ += bytes;
+    return offset;
+  }
+  static constexpr char kZeros[4096]{};
+  while (bytes > 0) {
+    const size_t piece = std::min(bytes, sizeof(kZeros));
+    write(kZeros, piece, writeTimeNs);
+    bytes -= piece;
+  }
+  return offset;
+}
+
 void BufferedFile::patch(
     uint64_t offset,
     const void* data,
@@ -454,6 +479,18 @@ uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
   return offset;
 }
 
+uint64_t ShuffleSpillFile::reserve(size_t bytes) {
+  BOLT_CHECK(!frozen_, "shuffle spill file reserved after it was frozen");
+  const uint64_t offset = end_;
+  static constexpr char kZeros[4096]{};
+  while (bytes > 0) {
+    const size_t piece = std::min(bytes, sizeof(kZeros));
+    append(kZeros, piece);
+    bytes -= piece;
+  }
+  return offset;
+}
+
 void ShuffleSpillFile::appendToDisk(const void* data, size_t bytes) {
   // The bytes in memory always end the file: nothing goes to disk behind
   // them.
@@ -619,6 +656,12 @@ void DataFileWriter::write(const void* data, size_t bytes) {
   }
   file_.write(data, bytes, writeTimeNs_);
   lengths_[pid_] += static_cast<int64_t>(bytes);
+}
+
+uint64_t DataFileWriter::reserve(size_t bytes) {
+  const uint64_t offset = file_.reserve(bytes, writeTimeNs_);
+  lengths_[pid_] += static_cast<int64_t>(bytes);
+  return offset;
 }
 
 void DataFileWriter::patch(uint64_t position, const void* data, size_t bytes) {
