@@ -202,8 +202,8 @@ class CellSplitter {
     return sealCount_;
   }
 
-  int64_t nullMovedBytes() const {
-    return nulls_.movedCellBytes();
+  int64_t nullFlushedBytes() const {
+    return nulls_.flushedCellBytes();
   }
 
   /// All memory the null state holds; see NullCells::footprintBytes().

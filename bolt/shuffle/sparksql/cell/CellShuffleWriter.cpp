@@ -665,7 +665,7 @@ void CellShuffleWriter::maybeSeal() {
   const auto& cellOpts = options_.cellOptions;
   if (sealDeferred_) {
     sealWindow(SealReason::kMemoryPressure);
-  } else if (splitter_->nullMovedBytes() > cellOpts.nullMemLimitBytes) {
+  } else if (splitter_->nullFlushedBytes() > cellOpts.nullMemLimitBytes) {
     sealWindow(SealReason::kNullBitmapLimit);
   } else if (
       splitter_->maxPartitionBytes() >
@@ -757,7 +757,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   const auto maybeDeferNullSeal = [&]() {
     // Seal only when enough null state can be freed to justify closing
     // payloads.
-    if (splitter_->nullMovedBytes() >
+    if (splitter_->nullFlushedBytes() >
         options_.cellOptions.nullMemLimitBytes / 4) {
       sealDeferred_ = true;
     }

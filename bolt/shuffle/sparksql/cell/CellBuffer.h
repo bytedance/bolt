@@ -139,15 +139,10 @@ class ChunkAllocator {
     return 1u << cellsPerChunkShift_;
   }
 
-  /// Until endEvacuation(), allocForEvacuation() hands out cells only from
-  /// retained chunks whose `evacuating` entry is 0, and nothing grows.
-  void beginEvacuation(const std::vector<uint8_t>& evacuating);
-
-  /// A free cell outside the evacuating chunks; kInvalidCell when none is
-  /// left. Never calls reserveChunk or the pool.
-  uint32_t allocForEvacuation();
-
-  void endEvacuation();
+  /// Allocates a free cell from a retained chunk whose `excluded` entry is 0
+  /// (or absent); returns kInvalidCell when none is left. Never calls
+  /// reserveChunk or grows from the pool.
+  uint32_t allocCellExcluding(std::span<const uint8_t> excluded);
 
   /// Live chunks times chunk size: exactly the pool-visible footprint.
   int64_t allocatedBytes() const {
@@ -193,10 +188,6 @@ class ChunkAllocator {
   /// Lower bound on the smallest chunk index with a non-empty freelist, or
   /// kNoChunk when all freelists are empty.
   uint32_t lowestFreeChunk_{kNoChunk};
-
-  /// During an evacuation: non-zero entries mark chunks being emptied so
-  /// allocForEvacuation() skips them.
-  std::vector<uint8_t> evacuating_;
 
   /// Chunk currently served by bump allocation, or kNoChunk.
   uint32_t bumpChunk_{kNoChunk};
@@ -468,19 +459,21 @@ class NullCells {
   /// is kSomeNulls. `windowRows` gives each partition's rows before this
   /// batch: a column turning kSomeNulls after all-null rows records those
   /// as a null run per partition, once.
-  bool
-  observeBatch(uint32_t col, NullClass batchClass, const uint32_t* windowRows);
+  bool updateNullClass(
+      uint32_t col,
+      NullClass batchClass,
+      const uint32_t* windowRows);
 
   /// Marks rowInWindow (0-based since the partition's payload opened) of
   /// column col in partition pid as null. Only for a column that
-  /// observeBatch() found mixed. Rows are visited in strictly increasing
+  /// updateNullClass() found mixed. Rows are visited in strictly increasing
   /// order per partition.
   ///
   /// Forced inline: the split loops call it per null row, and the compiler
   /// otherwise keeps it out of line behind a PLT call. A null that lands in
   /// the cell's bitmap or extends its null run is recorded here, in the
-  /// partition's current cell alone; starting a run or a bitmap, moving a
-  /// full cell and opening the column stay out of line.
+  /// partition's current cell alone; starting a run or a bitmap, flushing a
+  /// full cell and initializing the column stay out of line.
   FOLLY_ALWAYS_INLINE void
   setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
     Column& column = columnFor(col);
@@ -524,7 +517,7 @@ class NullCells {
   /// kRawNull: their u32 count and the records.
   size_t recordsBytes(uint32_t pid, uint32_t col) const {
     return sizeof(uint32_t) +
-        kNullRecordBytes * (size_t{columns_[col].progress[pid].moved} + 1);
+        kNullRecordBytes * (size_t{columns_[col].progress[pid].flushed} + 1);
   }
 
   /// Writes the null records of partition pid's columns `cols`,
@@ -543,18 +536,18 @@ class NullCells {
   /// columns' states, which hold for the rows still to come, stay.
   void releasePartition(uint32_t pid);
 
-  /// Bytes of the partitions' moved cells; input to the
+  /// Bytes of the partitions' flushed cells; input to the
   /// SealReason::kNullBitmapLimit seal. Not in it, as they stay bounded
   /// whatever the window's size: the columns' cell arrays, 44 bytes per
   /// partition of a column with nulls recorded.
-  int64_t movedCellBytes() const {
-    return movedCells_.usedBytes();
+  int64_t flushedCellBytes() const {
+    return flushedCells_.usedBytes();
   }
 
   /// Every byte held from the pool: the cell arrays and the allocator's
   /// chunks, free cells included.
   int64_t footprintBytes() const {
-    return cellArrayBytes_ + movedCells_.allocatedBytes();
+    return cellArrayBytes_ + flushedCells_.allocatedBytes();
   }
 
  private:
@@ -562,7 +555,7 @@ class NullCells {
   /// bitmap's bits past `fill` are 1, not 0 as on the wire.
   struct Cell {
     /// In a partition's current cell, the rows recorded: the partition
-    /// holds rows [0, head). In a moved cell, the cell moved before it;
+    /// holds rows [0, head). In a flushed cell, the cell flushed before it;
     /// kInvalidCell for the first.
     uint32_t head;
     /// The run's rows, plus kNullRun when they are null.
@@ -584,14 +577,14 @@ class NullCells {
   static constexpr uint32_t kMaxRunRows = kNullRecordMaxRun;
   static constexpr uint32_t kCellBits = kNullRecordBits;
 
-  /// A partition's moved cells in a column, updated as a cell moves.
+  /// A partition's flushed cells in a column, updated as a cell is flushed.
   struct Progress {
-    /// The last cell moved, the head of the chain; kInvalidCell for none.
+    /// The last cell flushed, the head of the chain; kInvalidCell for none.
     uint32_t last;
-    /// The null rows in the moved cells.
+    /// The null rows in the flushed cells.
     uint32_t nulls;
-    /// The cells moved.
-    uint32_t moved;
+    /// The cells flushed.
+    uint32_t flushed;
   };
 
   /// A mixed column's storage, one current cell and one progress per
@@ -609,13 +602,13 @@ class NullCells {
         states_[col] == NullClass::kSomeNulls, "nulls of an unmixed column");
     Column& column = columns_[col];
     if (FOLLY_UNLIKELY(column.cells == nullptr)) {
-      openColumn(column);
+      initColumn(column);
     }
     return column;
   }
 
-  const Cell& movedCell(uint32_t id) const {
-    return *reinterpret_cast<const Cell*>(movedCells_.cellData(id));
+  const Cell& flushedCell(uint32_t id) const {
+    return *reinterpret_cast<const Cell*>(flushedCells_.cellData(id));
   }
 
   /// A cell holding no row, whose head is `head`.
@@ -623,14 +616,16 @@ class NullCells {
   /// The null rows `cell` records.
   static uint32_t cellNulls(const Cell& cell);
   size_t columnBlockBytes() const;
-  void openColumn(Column& column);
-  /// Records the non-null rows before `row`, then `count` null rows.
-  void appendNulls(Column& column, uint32_t pid, uint32_t row, uint32_t count);
-  /// Records the next `rows` rows of the partition, all null or all not.
-  void appendRows(Column& column, uint32_t pid, bool null, uint32_t rows);
-  /// Moves the partition's full current cell to the allocator, linked to
-  /// the cell moved before it, leaving an empty current cell.
-  void moveCell(Column& column, uint32_t pid);
+  void initColumn(Column& column);
+  /// Records non-null rows up to `startRow`, then `count` null rows.
+  void
+  appendNulls(Column& column, uint32_t pid, uint32_t startRow, uint32_t count);
+  /// Records `count` consecutive rows, all null (`isNull == true`) or all
+  /// non-null.
+  void append(Column& column, uint32_t pid, uint32_t count, bool isNull);
+  /// Flushes the partition's full current cell to the allocator, linked to
+  /// the cell flushed before it, leaving an empty current cell.
+  void flushCell(Column& column, uint32_t pid);
 
   memory::MemoryPool* const pool_;
   const uint32_t numPartitions_;
@@ -640,8 +635,8 @@ class NullCells {
   /// first batch. Only a kSomeNulls column stores anything.
   std::vector<std::optional<NullClass>> states_;
   std::vector<Column> columns_;
-  /// The moved cells of every column and partition.
-  ChunkAllocator movedCells_;
+  /// The flushed cells of every column and partition.
+  ChunkAllocator flushedCells_;
   int64_t cellArrayBytes_{0};
 };
 

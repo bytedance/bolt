@@ -519,7 +519,7 @@ void CellSplitter::split(const SplitBatch& batch) {
   for (uint32_t i = 0; i < numColumns; ++i) {
     const uint32_t col = batch.columns.has_value() ? (*batch.columns)[i] : i;
     const auto klass = batch.nullClass[col];
-    const bool recordNulls = nulls_.observeBatch(col, klass, positions);
+    const bool recordNulls = nulls_.updateNullClass(col, klass, positions);
     if (klass == NullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
       // vector whose scan came back all-null): values contribute nothing

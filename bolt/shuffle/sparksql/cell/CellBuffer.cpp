@@ -87,7 +87,6 @@ uint32_t ChunkAllocator::popFreeCell() {
 }
 
 uint32_t ChunkAllocator::allocCell() {
-  BOLT_DCHECK(evacuating_.empty(), "allocCell during chunk evacuation");
   if (const uint32_t id = popFreeCell(); id != kInvalidCell) {
     return id;
   }
@@ -159,15 +158,12 @@ int64_t ChunkAllocator::shrink() {
   return released;
 }
 
-void ChunkAllocator::beginEvacuation(const std::vector<uint8_t>& evacuating) {
-  BOLT_CHECK(evacuating_.empty(), "nested chunk evacuation");
-  evacuating_ = evacuating;
-  evacuating_.resize(chunks_.size(), 0);
-}
-
-uint32_t ChunkAllocator::allocForEvacuation() {
+uint32_t ChunkAllocator::allocCellExcluding(std::span<const uint8_t> excluded) {
+  const auto isExcluded = [&](uint32_t chunk) {
+    return chunk < excluded.size() && excluded[chunk] != 0;
+  };
   for (uint32_t chunk = 0; chunk < chunks_.size(); ++chunk) {
-    if (chunks_[chunk].empty() || evacuating_[chunk] != 0) {
+    if (chunks_[chunk].empty() || isExcluded(chunk)) {
       continue;
     }
     auto& list = chunkFreeLists_[chunk];
@@ -180,7 +176,7 @@ uint32_t ChunkAllocator::allocForEvacuation() {
     }
   }
   for (uint32_t chunk = 0; chunk < chunks_.size(); ++chunk) {
-    if (chunks_[chunk].empty() || evacuating_[chunk] != 0 ||
+    if (chunks_[chunk].empty() || isExcluded(chunk) ||
         chunkBump_[chunk] == cellsPerChunk()) {
       continue;
     }
@@ -193,10 +189,6 @@ uint32_t ChunkAllocator::allocForEvacuation() {
     return id;
   }
   return kInvalidCell;
-}
-
-void ChunkAllocator::endEvacuation() {
-  evacuating_.clear();
 }
 
 void ChunkAllocator::growChunk() {
@@ -467,10 +459,6 @@ uint64_t DataCells::compact(uint64_t targetBytes) {
     return 0;
   }
   const uint32_t cellBytes = allocator_->cellBytes();
-  allocator_->beginEvacuation(excluded);
-  SCOPE_EXIT {
-    allocator_->endEvacuation();
-  };
   for (size_t c = 0; c < numChains; ++c) {
     auto& info = infos_[c];
     uint32_t prev = ChunkAllocator::kInvalidCell;
@@ -478,7 +466,7 @@ uint64_t DataCells::compact(uint64_t targetBytes) {
     for (uint32_t i = 0; i < info.numCells; ++i) {
       const uint32_t following = next_[id];
       if (excluded[allocator_->chunkOf(id)] == kToEmpty) {
-        const uint32_t moved = allocator_->allocForEvacuation();
+        const uint32_t moved = allocator_->allocCellExcluding(excluded);
         BOLT_CHECK_NE(
             moved,
             ChunkAllocator::kInvalidCell,
@@ -554,13 +542,13 @@ NullCells::NullCells(
       numColumns_(numColumns),
       states_(numColumns),
       columns_(numColumns),
-      movedCells_(pool, kNullChunkBytes, sizeof(Cell)) {}
+      flushedCells_(pool, kNullChunkBytes, sizeof(Cell)) {}
 
 NullCells::~NullCells() {
   reset();
 }
 
-bool NullCells::observeBatch(
+bool NullCells::updateNullClass(
     uint32_t col,
     NullClass batchClass,
     const uint32_t* windowRows) {
@@ -584,7 +572,7 @@ bool NullCells::observeBatch(
   if (nullSoFar) {
     Column& column = columnFor(col);
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      appendRows(column, pid, true, windowRows[pid]);
+      append(column, pid, windowRows[pid], /*isNull=*/true);
     }
   }
   return true;
@@ -622,7 +610,7 @@ size_t NullCells::columnBlockBytes() const {
   return sizeof(Cell) + (sizeof(Cell) + sizeof(Progress)) * numPartitions_;
 }
 
-void NullCells::openColumn(Column& column) {
+void NullCells::initColumn(Column& column) {
   const size_t bytes = columnBlockBytes();
   void* block = pool_->allocate(bytes);
   auto* cells = reinterpret_cast<Cell*>(
@@ -641,59 +629,60 @@ void NullCells::openColumn(Column& column) {
 void NullCells::appendNulls(
     Column& column,
     uint32_t pid,
-    uint32_t row,
+    uint32_t startRow,
     uint32_t count) {
-  const uint32_t end = column.cells[pid].head;
-  BOLT_DCHECK_GE(row, end, "null rows out of order");
-  appendRows(column, pid, false, row - end);
-  appendRows(column, pid, true, count);
+  const uint32_t recorded = column.cells[pid].head;
+  BOLT_DCHECK_GE(startRow, recorded, "null rows out of order");
+  append(column, pid, startRow - recorded, /*isNull=*/false);
+  append(column, pid, count, /*isNull=*/true);
 }
 
-void NullCells::appendRows(
+void NullCells::append(
     Column& column,
     uint32_t pid,
-    bool null,
-    uint32_t rows) {
-  while (rows > 0) {
+    uint32_t count,
+    bool isNull) {
+  while (count > 0) {
     Cell& cell = column.cells[pid];
     const uint32_t runRows = cell.run & kMaxRunRows;
     const bool runNull = (cell.run & kNullRun) != 0;
     uint32_t taken;
     if (cell.fill == 0 &&
-        (runRows == 0 || (runNull == null && runRows < kMaxRunRows))) {
+        (runRows == 0 || (runNull == isNull && runRows < kMaxRunRows))) {
       // The rows start or extend the cell's run.
-      taken = std::min(rows, kMaxRunRows - runRows);
+      taken = std::min(count, kMaxRunRows - runRows);
       cell.run =
-          static_cast<uint16_t>((null ? kNullRun : 0) | (runRows + taken));
+          static_cast<uint16_t>((isNull ? kNullRun : 0) | (runRows + taken));
     } else if (
-        (cell.fill != 0 || runNull != null) && rows <= kCellBits - cell.fill) {
+        (cell.fill != 0 || runNull != isNull) &&
+        count <= kCellBits - cell.fill) {
       // They fit the bitmap, whose bits past `fill` are already non-null.
-      taken = rows;
-      if (null) {
+      taken = count;
+      if (isNull) {
         clearBitRange(cell.bits, cell.fill, cell.fill + taken);
       }
       cell.fill = static_cast<uint8_t>(cell.fill + taken);
     } else {
       // A full run, or more rows than the bitmap can take: they start the
       // next cell.
-      moveCell(column, pid);
+      flushCell(column, pid);
       continue;
     }
-    rows -= taken;
+    count -= taken;
     cell.head += taken;
   }
 }
 
-void NullCells::moveCell(Column& column, uint32_t pid) {
-  const uint32_t id = movedCells_.allocCell();
+void NullCells::flushCell(Column& column, uint32_t pid) {
+  const uint32_t id = flushedCells_.allocCell();
   Cell& cell = column.cells[pid];
   Progress& progress = column.progress[pid];
-  auto* moved = reinterpret_cast<Cell*>(movedCells_.cellData(id));
-  moved->head = progress.last;
-  ::memcpy(&moved->run, &cell.run, kNullRecordBytes);
+  auto* flushed = reinterpret_cast<Cell*>(flushedCells_.cellData(id));
+  flushed->head = progress.last;
+  ::memcpy(&flushed->run, &cell.run, kNullRecordBytes);
   progress.last = id;
   progress.nulls += cellNulls(cell);
-  ++progress.moved;
+  ++progress.flushed;
   cell = emptyCell(cell.head);
 }
 
@@ -732,13 +721,13 @@ void NullCells::emitRecords(
     std::span<const uint32_t> cols,
     uint8_t* out) const {
   // The current cell's record last, then the chain read from its last
-  // moved cell back, each cell written as a record just before the one
+  // flushed cell back, each cell written as a record just before the one
   // after it.
   struct Walk {
     const Cell* cell;
     uint8_t* record;
     /// For the current cell, whose head counts rows, the cell before it:
-    /// the partition's last moved cell. A moved cell's head links it.
+    /// the partition's last flushed cell. A flushed cell's head links it.
     uint32_t currentPrev;
     bool current;
   };
@@ -753,7 +742,7 @@ void NullCells::emitRecords(
         const uint32_t prevId = walk.current ? walk.currentPrev : cell.head;
         const Cell* prev = prevId == ChunkAllocator::kInvalidCell
             ? nullptr
-            : &movedCell(prevId);
+            : &flushedCell(prevId);
         if (prev != nullptr) {
           __builtin_prefetch(prev);
         }
@@ -782,7 +771,7 @@ void NullCells::emitRecords(
     const Column& column = columns_[col];
     BOLT_CHECK(column.cells != nullptr, "records of a column without nulls");
     const Progress& progress = column.progress[pid];
-    const uint32_t records = progress.moved + 1;
+    const uint32_t records = progress.flushed + 1;
     memory::storeUnaligned<uint32_t>(out, records);
     out += sizeof(records);
     // The current cell's record goes last.
@@ -808,8 +797,8 @@ void NullCells::reset() {
     }
     states_[col].reset();
   }
-  movedCells_.resetAll();
-  movedCells_.shrink();
+  flushedCells_.resetAll();
+  flushedCells_.shrink();
   cellArrayBytes_ = 0;
 }
 
@@ -821,8 +810,8 @@ void NullCells::releasePartition(uint32_t pid) {
     }
     uint32_t id = column.progress[pid].last;
     while (id != ChunkAllocator::kInvalidCell) {
-      const uint32_t prev = movedCell(id).head;
-      movedCells_.recycle(id);
+      const uint32_t prev = flushedCell(id).head;
+      flushedCells_.recycle(id);
       id = prev;
     }
     column.cells[pid] = emptyCell(0);
