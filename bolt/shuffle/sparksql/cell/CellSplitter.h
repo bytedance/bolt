@@ -138,17 +138,17 @@ class CellSplitter {
   /// Borrowed through finish; selected tasks check all partitions and batches.
   void setStreamCheck(CellShuffleCheck* check);
 
-  /// Writes and recycles the linked cells, retaining caches and window state.
+  /// Writes and recycles all linked cells, retaining caches and window state.
   /// Safe during a split or cache flush; nested output calls are suppressed.
-  void spillRun();
+  void spillAll();
 
-  /// spillRun() of the largest partitions only, enough of them to cover
-  /// `targetBytes` of cell data; every partition when that is all of it.
-  /// The rest stay resident for the merge to write directly. Returns the
-  /// cell bytes written.
-  uint64_t spillPartitions(uint64_t targetBytes);
+  /// Spills the largest partitions' linked cells, enough to cover at least
+  /// `targetBytes` of cell data (all partitions when `targetBytes` covers
+  /// everything). The rest stay resident for the merge to write directly.
+  /// Returns the cell bytes written.
+  uint64_t spill(uint64_t targetBytes);
 
-  /// The data bytes the cells hold, every partition's: what spillRun()
+  /// The data bytes the cells hold across every partition: what spillAll()
   /// writes.
   uint64_t cellDataBytes() const {
     return cells_.totalBytes();
@@ -232,10 +232,13 @@ class CellSplitter {
   /// resetWindow() of the partitions `partitionMask` marks.
   void resetPartitions(const uint8_t* partitionMask);
 
-  /// The Run step of spillRun()/spillPartitions(): writes the marked
-  /// partitions' cells (every partition's when `partitionMask` is null) and
-  /// recycles them.
+  /// The Run step of spillAll()/spill(): writes the marked partitions' cells
+  /// (every partition's when `partitionMask` is null) and recycles them.
   void drainCells(const uint8_t* partitionMask);
+
+  /// Recycles cells for the marked partitions (all when null) and clears
+  /// their resident byte counts in lockstep.
+  void releaseCells(const uint8_t* partitionMask);
 
   /// The seal of the marked partitions (every partition when null).
   void seal(const uint8_t* partitionMask, ColumnPositionCounts positions);
@@ -298,9 +301,11 @@ class CellSplitter {
       uint8_t* cur);
 
   void bumpPartitionBytes(uint32_t pid, uint64_t bytes) {
-    partitionBytes_[pid] += bytes;
-    if (partitionBytes_[pid] > maxPartitionBytes_) {
-      maxPartitionBytes_ = partitionBytes_[pid];
+    auto& entry = partitionBytes_[pid];
+    entry.payload += bytes;
+    entry.resident += bytes;
+    if (entry.payload > maxPartitionBytes_) {
+      maxPartitionBytes_ = entry.payload;
     }
   }
 
@@ -424,7 +429,15 @@ class CellSplitter {
   char* cacheBase_{nullptr};
   uint8_t* cursors_{nullptr};
 
-  std::vector<uint64_t> partitionBytes_;
+  /// Per-partition byte counters kept together in one cache line.
+  struct PartitionBytes {
+    /// Cumulative bytes of the partition's open payload (cleared on seal).
+    uint64_t payload{0};
+    /// Bytes currently buffered in DataCells (cleared on drain/release).
+    uint64_t resident{0};
+  };
+
+  std::vector<PartitionBytes> partitionBytes_;
   std::vector<uint64_t> variableBytes_;
   uint64_t maxPartitionBytes_{0};
 

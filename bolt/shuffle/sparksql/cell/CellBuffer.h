@@ -100,13 +100,9 @@ class ChunkAllocator {
     return static_cast<uint32_t>(chunks_.size()) << cellsPerChunkShift_;
   }
 
-  /// Sorts the freelist so reuse consumes cells chunk by chunk (lowest
-  /// chunk first). Called after cells are recycled, so refills pack the
-  /// lowest chunks and shrink() can return the trailing ones.
-  void packFreelist();
-
-  /// Returns a cell to the freelist for reuse. The chunk stays with the
-  /// allocator until shrink().
+  /// Returns a cell to its chunk's freelist for reuse (lowest chunk first on
+  /// subsequent allocations). The chunk stays with the allocator until
+  /// shrink().
   void recycle(uint32_t cellId);
 
   /// Logically frees every cell and invalidates all outstanding ids; chunks
@@ -165,6 +161,10 @@ class ChunkAllocator {
  private:
   static constexpr uint32_t kNoChunk = 0xFFFFFFFFu;
 
+  /// Pops a recycled cell from the lowest non-empty chunk freelist, or returns
+  /// kInvalidCell when all chunk freelists are empty.
+  uint32_t popFreeCell();
+
   /// Allocates a chunk from the pool into a hole slot or a new slot and makes
   /// it the current bump chunk.
   void growChunk();
@@ -187,13 +187,16 @@ class ChunkAllocator {
   std::vector<uint32_t> chunkBump_;
   /// Live (handed, not recycled) cells per chunk.
   std::vector<uint32_t> chunkLiveCells_;
-  /// Cells handed back by recycle(), LIFO.
-  std::vector<uint32_t> freeList_;
+  /// Recycled cell ids per chunk, LIFO within each chunk so allocations drain
+  /// the lowest chunk first without sorting.
+  std::vector<std::vector<uint32_t>> chunkFreeLists_;
+  /// Lower bound on the smallest chunk index with a non-empty freelist, or
+  /// kNoChunk when all freelists are empty.
+  uint32_t lowestFreeChunk_{kNoChunk};
 
-  /// During an evacuation: the chunks being emptied, and the freelist
-  /// entries inside them, set aside until endEvacuation().
+  /// During an evacuation: non-zero entries mark chunks being emptied so
+  /// allocForEvacuation() skips them.
   std::vector<uint8_t> evacuating_;
-  std::vector<uint32_t> parkedFree_;
 
   /// Chunk currently served by bump allocation, or kNoChunk.
   uint32_t bumpChunk_{kNoChunk};
@@ -312,9 +315,13 @@ class DataCells {
     totalBytes_ += bytes;
   }
 
+  /// Recycles cells back to the allocator: all partitions when `partitionMask`
+  /// is nullptr, otherwise every partition with `partitionMask[pid] != 0`.
+  /// Unlike ChunkAllocator::resetAll, ids not owned by any chain survive.
+  void release(const uint8_t* partitionMask);
+
   /// Recycles every chain's cells back to the allocator (the Run drain's
-  /// release step). Unlike ChunkAllocator::resetAll, ids not owned by any
-  /// chain survive.
+  /// release step).
   void releaseAll();
 
   /// Total bytes buffered for (pid, stream).

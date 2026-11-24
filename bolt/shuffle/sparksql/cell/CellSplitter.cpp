@@ -85,7 +85,7 @@ CellSplitter::CellSplitter(
       windowRowCounts_(numPartitions_, 0),
       encodingTags_((layout.numColumns() + 7) / 8, 0),
       arena_(&pool),
-      partitionBytes_(numPartitions_, 0),
+      partitionBytes_(numPartitions_),
       variableBytes_(numPartitions_, 0),
       dictEnabled_(layout.numColumns(), 0),
       dictStates_(layout.numColumns()),
@@ -632,11 +632,26 @@ CellWindowInput CellSplitter::windowInput(
   return in;
 }
 
-void CellSplitter::spillRun() {
+void CellSplitter::spillAll() {
   if (writingOutput_ || cells_.totalBytes() == 0) {
     return;
   }
   drainCells(nullptr);
+}
+
+void CellSplitter::releaseCells(const uint8_t* partitionMask) {
+  cells_.release(partitionMask);
+  if (partitionMask == nullptr) {
+    for (auto& entry : partitionBytes_) {
+      entry.resident = 0;
+    }
+  } else {
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      if (partitionMask[pid] != 0) {
+        partitionBytes_[pid].resident = 0;
+      }
+    }
+  }
 }
 
 void CellSplitter::drainCells(const uint8_t* partitionMask) {
@@ -648,40 +663,33 @@ void CellSplitter::drainCells(const uint8_t* partitionMask) {
   auto in = windowInput({});
   in.runPartitions = partitionMask;
   output_.spillRun(in);
-  if (partitionMask == nullptr) {
-    cells_.releaseAll();
-  } else {
-    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      if (partitionMask[pid] != 0) {
-        cells_.releasePartition(pid);
-      }
-    }
-  }
-  // Refill the lowest chunks first so later reclaim can release idle tails.
-  allocator_.packFreelist();
+  releaseCells(partitionMask);
 }
 
-uint64_t CellSplitter::spillPartitions(uint64_t targetBytes) {
+uint64_t CellSplitter::spill(uint64_t targetBytes) {
   const uint64_t total = cells_.totalBytes();
   if (writingOutput_ || total == 0) {
     return 0;
   }
   if (targetBytes >= total) {
-    spillRun();
+    spillAll();
     return total;
   }
-  const uint32_t numStreams = layout_.numStreams();
-  // (bytes, pid) of every partition holding cells.
+  // (bytes, pid) of every partition holding resident cells.
   std::vector<std::pair<uint64_t, uint32_t>> spillOrder;
+#ifndef NDEBUG
+  uint64_t residentSum = 0;
+#endif
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    uint64_t bytes = 0;
-    for (uint32_t s = 0; s < numStreams; ++s) {
-      bytes += cells_.bytes(pid, s);
-    }
+    const uint64_t bytes = partitionBytes_[pid].resident;
     if (bytes > 0) {
+#ifndef NDEBUG
+      residentSum += bytes;
+#endif
       spillOrder.emplace_back(bytes, pid);
     }
   }
+  BOLT_DCHECK_EQ(residentSum, total, "resident byte count mismatch");
   // Largest first: the fewest partitions, and the fewest run segments, for
   // the bytes freed.
   std::sort(spillOrder.begin(), spillOrder.end(), std::greater<>());
@@ -720,7 +728,7 @@ uint32_t CellSplitter::sealPartitionsOver(
   std::vector<uint8_t> sealPartitions(numPartitions_, 0);
   uint32_t sealed = 0;
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    if (partitionBytes_[pid] > maxBytes && windowRowCounts_[pid] > 0) {
+    if (partitionBytes_[pid].payload > maxBytes && windowRowCounts_[pid] > 0) {
       sealPartitions[pid] = 1;
       ++sealed;
     }
@@ -751,16 +759,7 @@ void CellSplitter::seal(
     output_.sealWindow(in);
   }
   if (sealsResident) {
-    if (partitionMask == nullptr) {
-      cells_.releaseAll();
-    } else {
-      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-        if (partitionMask[pid] != 0) {
-          cells_.releasePartition(pid);
-        }
-      }
-    }
-    allocator_.packFreelist();
+    releaseCells(partitionMask);
   }
   if (partitionMask == nullptr) {
     resetWindow();
@@ -813,7 +812,7 @@ void CellSplitter::finish(
               << stats.matchedRows << " of " << rows << " rows ("
               << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
   }
-  cells_.releaseAll();
+  releaseCells(nullptr);
   resetWindow();
 }
 
@@ -901,7 +900,7 @@ void CellSplitter::resetWindow() {
   nulls_.reset();
   std::fill(windowRowCounts_.begin(), windowRowCounts_.end(), 0);
   maxWindowRows_ = 0;
-  std::fill(partitionBytes_.begin(), partitionBytes_.end(), 0);
+  std::fill(partitionBytes_.begin(), partitionBytes_.end(), PartitionBytes{});
   std::fill(variableBytes_.begin(), variableBytes_.end(), 0);
   maxPartitionBytes_ = 0;
   // A payload is self-contained: every partition re-enters dictionary mode
@@ -926,7 +925,7 @@ void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
     }
     nulls_.releasePartition(pid);
     windowRowCounts_[pid] = 0;
-    partitionBytes_[pid] = 0;
+    partitionBytes_[pid] = {};
     variableBytes_[pid] = 0;
     // A payload is self-contained: the partition re-enters dictionary mode
     // with an empty open segment for its next payload.
@@ -944,9 +943,12 @@ void CellSplitter::resetPartitions(const uint8_t* partitionMask) {
   maxWindowRows_ = windowRowCounts_.empty()
       ? 0
       : *std::max_element(windowRowCounts_.begin(), windowRowCounts_.end());
-  maxPartitionBytes_ = partitionBytes_.empty()
-      ? 0
-      : *std::max_element(partitionBytes_.begin(), partitionBytes_.end());
+  maxPartitionBytes_ = 0;
+  for (const auto& entry : partitionBytes_) {
+    if (entry.payload > maxPartitionBytes_) {
+      maxPartitionBytes_ = entry.payload;
+    }
+  }
 }
 
 void CellSplitter::enableDictionary(uint32_t col) {
@@ -1301,8 +1303,5 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
     appendStringFallback(col, pid, view);
   }
 }
-
-// The fixed-width split templates are only referenced from this translation
-// unit; no explicit instantiation is needed.
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

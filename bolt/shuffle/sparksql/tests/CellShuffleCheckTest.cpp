@@ -260,7 +260,7 @@ TEST_F(CellShuffleCheckTest, streamingSplitterSealsAndMappedNulls) {
     } else if (i == 1) {
       EXPECT_GT(splitter.sealPartitionsOver(1, {}), 0);
     } else if (i == 2) {
-      splitter.spillRun(); // Spill leaves pending cache bytes untouched.
+      splitter.spillAll(); // Spill leaves pending cache bytes untouched.
     }
   }
   ShuffleWriterMetrics metrics;
@@ -971,7 +971,7 @@ TEST_F(CellShuffleCheckTest, sampledSplitterAcrossMappingsAndSeals) {
         } else if (b == 1) {
           splitter.sealPartitionsOver(1, {});
         } else if (b == 2) {
-          splitter.spillRun();
+          splitter.spillAll();
         }
       }
       ShuffleWriterMetrics metrics;

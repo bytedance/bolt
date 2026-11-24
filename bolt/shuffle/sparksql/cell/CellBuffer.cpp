@@ -67,12 +67,28 @@ ChunkAllocator::~ChunkAllocator() {
   }
 }
 
+uint32_t ChunkAllocator::popFreeCell() {
+  while (lowestFreeChunk_ < chunkFreeLists_.size()) {
+    auto& list = chunkFreeLists_[lowestFreeChunk_];
+    if (!list.empty()) {
+      const uint32_t id = list.back();
+      list.pop_back();
+      if (list.empty()) {
+        ++lowestFreeChunk_;
+      }
+      ++chunkLiveCells_[id >> cellsPerChunkShift_];
+      ++usedCells_;
+      return id;
+    }
+    ++lowestFreeChunk_;
+  }
+  lowestFreeChunk_ = kNoChunk;
+  return kInvalidCell;
+}
+
 uint32_t ChunkAllocator::allocCell() {
-  if (FOLLY_LIKELY(!freeList_.empty())) {
-    const uint32_t id = freeList_.back();
-    freeList_.pop_back();
-    ++chunkLiveCells_[id >> cellsPerChunkShift_];
-    ++usedCells_;
+  BOLT_DCHECK(evacuating_.empty(), "allocCell during chunk evacuation");
+  if (const uint32_t id = popFreeCell(); id != kInvalidCell) {
     return id;
   }
   if (bumpChunk_ == kNoChunk) {
@@ -82,11 +98,7 @@ uint32_t ChunkAllocator::allocCell() {
     if (reserveChunk_) {
       reserveChunk_();
       // reserveChunk may have spilled and recycled cells.
-      if (!freeList_.empty()) {
-        const uint32_t id = freeList_.back();
-        freeList_.pop_back();
-        ++chunkLiveCells_[id >> cellsPerChunkShift_];
-        ++usedCells_;
+      if (const uint32_t id = popFreeCell(); id != kInvalidCell) {
         return id;
       }
       findBumpChunk();
@@ -105,29 +117,23 @@ uint32_t ChunkAllocator::allocCell() {
   return id;
 }
 
-void ChunkAllocator::packFreelist() {
-  // Descending ids: allocation pops from the back, so the lowest chunks
-  // are consumed first and refills stay dense.
-  std::sort(freeList_.begin(), freeList_.end(), std::greater<uint32_t>());
-}
-
 void ChunkAllocator::recycle(uint32_t cellId) {
-  BOLT_CHECK_LT(cellId >> cellsPerChunkShift_, chunks_.size());
-  BOLT_CHECK_GT(chunkLiveCells_[cellId >> cellsPerChunkShift_], 0);
-  // A cell recycled out of a chunk being evacuated must not be handed out
-  // again by the evacuation itself.
-  if (FOLLY_UNLIKELY(!evacuating_.empty()) &&
-      evacuating_[cellId >> cellsPerChunkShift_] != 0) {
-    parkedFree_.push_back(cellId);
-  } else {
-    freeList_.push_back(cellId);
+  const uint32_t chunk = cellId >> cellsPerChunkShift_;
+  BOLT_CHECK_LT(chunk, chunks_.size());
+  BOLT_CHECK_GT(chunkLiveCells_[chunk], 0);
+  chunkFreeLists_[chunk].push_back(cellId);
+  if (chunk < lowestFreeChunk_) {
+    lowestFreeChunk_ = chunk;
   }
-  --chunkLiveCells_[cellId >> cellsPerChunkShift_];
+  --chunkLiveCells_[chunk];
   --usedCells_;
 }
 
 void ChunkAllocator::resetAll() {
-  freeList_.clear();
+  for (auto& list : chunkFreeLists_) {
+    list.clear();
+  }
+  lowestFreeChunk_ = kNoChunk;
   std::fill(chunkBump_.begin(), chunkBump_.end(), 0);
   std::fill(chunkLiveCells_.begin(), chunkLiveCells_.end(), 0);
   usedCells_ = 0;
@@ -137,29 +143,18 @@ void ChunkAllocator::resetAll() {
 
 int64_t ChunkAllocator::shrink() {
   int64_t released = 0;
-  bool anyReleased = false;
   for (uint32_t i = 0; i < chunks_.size(); ++i) {
     if (chunks_[i].empty() || chunkLiveCells_[i] != 0) {
       continue;
     }
     pool_->freeContiguous(chunks_[i]);
+    chunkFreeLists_[i].clear();
     chunkBump_[i] = 0;
     --liveChunks_;
     released += chunkBytes_;
-    anyReleased = true;
     if (bumpChunk_ == i) {
       bumpChunk_ = kNoChunk;
     }
-  }
-  if (anyReleased && !freeList_.empty()) {
-    // Drop freelist entries that lived in released chunks.
-    size_t kept = 0;
-    for (const uint32_t id : freeList_) {
-      if (!chunks_[id >> cellsPerChunkShift_].empty()) {
-        freeList_[kept++] = id;
-      }
-    }
-    freeList_.resize(kept);
   }
   return released;
 }
@@ -168,24 +163,21 @@ void ChunkAllocator::beginEvacuation(const std::vector<uint8_t>& evacuating) {
   BOLT_CHECK(evacuating_.empty(), "nested chunk evacuation");
   evacuating_ = evacuating;
   evacuating_.resize(chunks_.size(), 0);
-  size_t kept = 0;
-  for (const uint32_t id : freeList_) {
-    if (evacuating_[id >> cellsPerChunkShift_] != 0) {
-      parkedFree_.push_back(id);
-    } else {
-      freeList_[kept++] = id;
-    }
-  }
-  freeList_.resize(kept);
 }
 
 uint32_t ChunkAllocator::allocForEvacuation() {
-  if (!freeList_.empty()) {
-    const uint32_t id = freeList_.back();
-    freeList_.pop_back();
-    ++chunkLiveCells_[id >> cellsPerChunkShift_];
-    ++usedCells_;
-    return id;
+  for (uint32_t chunk = 0; chunk < chunks_.size(); ++chunk) {
+    if (chunks_[chunk].empty() || evacuating_[chunk] != 0) {
+      continue;
+    }
+    auto& list = chunkFreeLists_[chunk];
+    if (!list.empty()) {
+      const uint32_t id = list.back();
+      list.pop_back();
+      ++chunkLiveCells_[chunk];
+      ++usedCells_;
+      return id;
+    }
   }
   for (uint32_t chunk = 0; chunk < chunks_.size(); ++chunk) {
     if (chunks_[chunk].empty() || evacuating_[chunk] != 0 ||
@@ -204,8 +196,6 @@ uint32_t ChunkAllocator::allocForEvacuation() {
 }
 
 void ChunkAllocator::endEvacuation() {
-  freeList_.insert(freeList_.end(), parkedFree_.begin(), parkedFree_.end());
-  parkedFree_.clear();
   evacuating_.clear();
 }
 
@@ -221,6 +211,7 @@ void ChunkAllocator::growChunk() {
     chunks_.emplace_back();
     chunkBump_.push_back(0);
     chunkLiveCells_.push_back(0);
+    chunkFreeLists_.emplace_back();
     slot = static_cast<uint32_t>(chunks_.size() - 1);
   }
   pool_->allocateContiguous(
@@ -382,10 +373,32 @@ void DataCells::appendWithAllocation(
   }
 }
 
-void DataCells::releaseAll() {
-  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    releasePartition(pid);
+void DataCells::release(const uint8_t* partitionMask) {
+  if (partitionMask == nullptr) {
+    releaseAll();
+    return;
   }
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    if (partitionMask[pid] != 0) {
+      releasePartition(pid);
+    }
+  }
+}
+
+void DataCells::releaseAll() {
+  // Stream-major order matches infos_'s memory layout.
+  const size_t numChains = static_cast<size_t>(numStreams_) * numPartitions_;
+  for (size_t idx = 0; idx < numChains; ++idx) {
+    auto& info = infos_[idx];
+    uint32_t id = info.firstCell;
+    while (id != ChunkAllocator::kInvalidCell) {
+      const uint32_t following = next_[id];
+      allocator_->recycle(id);
+      id = following;
+    }
+    info = ChainInfo{};
+  }
+  totalBytes_ = 0;
 }
 
 uint64_t DataCells::compact(uint64_t targetBytes) {

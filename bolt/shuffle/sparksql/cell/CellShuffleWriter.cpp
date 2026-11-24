@@ -613,7 +613,7 @@ void CellShuffleWriter::prepareChunkGrowth() {
       return;
     }
     // Growth retries the freed cells before allocating another chunk.
-    const uint64_t spilled = splitter_->spillPartitions(
+    const uint64_t spilled = splitter_->spill(
         static_cast<uint64_t>(allocator_->usedBytes()) / kPartialSpillDivisor);
     if (spilled > 0) {
       ++pressure_.growthPartialRuns;
@@ -688,7 +688,7 @@ void CellShuffleWriter::maybeSeal() {
     // Spill the largest partitions down to half the data threshold.
     SealSpillTimer timer(*this);
     const uint64_t spilled =
-        splitter_->spillPartitions(cellData - cellSpillThresholdBytes_ / 2);
+        splitter_->spill(cellData - cellSpillThresholdBytes_ / 2);
     if (spilled > 0) {
       ++pressure_.thresholdRuns;
       pressure_.thresholdRunBytes += spilled;
@@ -782,7 +782,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // Spill large partitions, then compact to free whole chunks. Fall back to
   // a full run only if the request remains unmet.
   if (size > 0) {
-    const uint64_t spilled = splitter_->spillPartitions(
+    const uint64_t spilled = splitter_->spill(
         static_cast<uint64_t>(std::max(size - *actual, kMinReclaimRunBytes)));
     if (spilled > 0) {
       ++pressure_.reclaimPartialRuns;
@@ -802,7 +802,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   }
   if (size <= 0 || *actual < size) {
     ++pressure_.fullRuns;
-    splitter_->spillRun();
+    splitter_->spillAll();
     const int64_t freed = allocator_->shrink();
     pressure_.freedByRun += freed;
     *actual += freed;
