@@ -212,11 +212,10 @@ class ShuffleSpillFile {
       uint64_t bytes,
       const std::function<void(const char* data, size_t bytes)>& out) const;
 
-  /// Records one spill run if `begin`, the spill end before it, has moved.
-  void recordSpillRun(uint64_t begin);
-
-  /// Number of recorded spill runs whose bytes actually reached disk.
-  int64_t spilledRuns() const;
+  /// Number of physical spill files created on disk.
+  int64_t numFiles() const {
+    return numFiles_;
+  }
 
   /// The offset the next append starts at.
   uint64_t end() const {
@@ -331,8 +330,7 @@ class ShuffleSpillFile {
   bool appending_{false};
   std::atomic<const void*> activeWriter_{nullptr};
   uint64_t writeTimeNs_{0};
-  /// Start offsets of non-empty spill runs in this file, ascending.
-  std::vector<uint64_t> spillStarts_;
+  int64_t numFiles_{0};
 };
 
 /// The task's final data file, written once, partition by partition.
@@ -389,10 +387,8 @@ class PartialSpiller {
   /// nothing may be appended behind the merge, and a spill file is merged once
   /// only - and removes it afterwards, freeing its memory. Fills
   /// partitionLengths, totalBytesWritten, totalBytesEvicted - the bytes that
-  /// reached disk - and the write and evict times, and totalSpillFiles with
-  /// the spill runs that put bytes on disk: every run goes into the one spill
-  /// file, so a run whose bytes reached disk is what the local partition
-  /// writer's file per spill corresponds to.
+  /// reached disk - totalSpillFiles - the number of physical spill files
+  /// created - and the write and evict times.
   static void mergeToDataFile(
       const PartitionWriterOptions& options,
       ShuffleSpillFile& spill,
@@ -420,11 +416,6 @@ class PartialSpiller {
   /// Partition `pid`'s share of the data file. Called by mergeToDataFile()
   /// only, for partition 0, 1, ..., with the spill file frozen.
   virtual void writePartitionShare(uint32_t pid, DataFileWriter& out) = 0;
-
-  /// Records one spill run if `begin`, the spill end before it, has moved.
-  void countSpill(uint64_t begin) {
-    spill_.recordSpillRun(begin);
-  }
 
   ShuffleSpillFile& spill_;
 };

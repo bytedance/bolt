@@ -393,21 +393,6 @@ int64_t ShuffleSpillFile::releaseAll() {
   return freed;
 }
 
-void ShuffleSpillFile::recordSpillRun(uint64_t begin) {
-  if (end_ > begin) {
-    BOLT_CHECK(
-        spillStarts_.empty() || begin >= spillStarts_.back(),
-        "overlapping spill runs in ShuffleSpillFile");
-    spillStarts_.push_back(begin);
-  }
-}
-
-int64_t ShuffleSpillFile::spilledRuns() const {
-  return static_cast<int64_t>(
-      std::lower_bound(spillStarts_.begin(), spillStarts_.end(), diskEnd_) -
-      spillStarts_.begin());
-}
-
 void ShuffleSpillFile::freeze() {
   BOLT_CHECK(
       activeWriter_.load(std::memory_order_acquire) == nullptr,
@@ -436,6 +421,7 @@ void ShuffleSpillFile::openFile() {
     path_ = options_.dataFile + "." + name_ + ".spill";
   }
   file_.open(path_, O_RDWR | O_CREAT | O_TRUNC);
+  ++numFiles_;
 }
 
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
@@ -737,7 +723,7 @@ void PartialSpiller::mergeToDataFile(
   out.close(metrics);
   spill.remove();
   metrics.totalBytesEvicted = spill.bytesWritten();
-  metrics.totalSpillFiles = spill.spilledRuns();
+  metrics.totalSpillFiles = spill.numFiles();
   metrics.totalEvictTime = static_cast<int64_t>(spill.writeTimeNs());
 }
 
@@ -761,7 +747,6 @@ void LocalBlockOutput::writeBlocks(const BlockSource& next) {
     }
     ends[pid + 1] = spill_.end();
   }
-  countSpill(ends[0]);
   spill_.flush();
   spillOffsets_.push_back(std::move(ends));
 }

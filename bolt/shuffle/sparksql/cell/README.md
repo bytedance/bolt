@@ -279,9 +279,9 @@ spill-block reservations also end growth. Flushing completed blocks is
 safe while output is writing; a file asks for another only after filling
 its last block. Reclaim is disabled during the final merge.
 
-`totalBytesEvicted` and `totalSpillFiles` count only bytes and runs that
-reached disk. The pressure log reports spill-memory peak, flushed bytes and
-blocks, and direct disk appends.
+`totalBytesEvicted` counts bytes written to disk and `totalSpillFiles` counts
+physical temporary spill files created on disk. The pressure log reports
+spill-memory peak, flushed bytes and blocks, and direct disk appends.
 
 ### Reclaim policy (local)
 

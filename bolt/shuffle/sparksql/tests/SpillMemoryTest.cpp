@@ -298,11 +298,10 @@ TEST_F(SpillMemoryTest, nothingIsReleasedDuringTheMerge) {
   BOLT_ASSERT_THROW(file.release(1), "released during the merge");
 }
 
-TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
-  // totalSpillFiles counts only runs whose bytes actually reached disk: runs
-  // that stay wholly in memory are not counted, a run starting right at the
-  // disk/memory boundary is not counted, a run straddling it is, and empty
-  // runs are never counted.
+TEST_F(SpillMemoryTest, spillFilesCountCreatedPhysicalFiles) {
+  // totalSpillFiles counts physical temporary spill files created on disk:
+  // runs that stay wholly in memory create no file, while multiple runs
+  // flushed into the same shared ShuffleSpillFile still create one file.
   const auto writeRun = [&](LocalBlockOutput& output, size_t bytes) {
     bool emitted = false;
     output.writeBlocks([&](uint32_t pid, BufferPtr& block) {
@@ -320,7 +319,7 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     return opts;
   };
 
-  // All runs stay in memory.
+  // All runs stay in memory: no physical spill file is created.
   {
     const auto opts = makeOptions();
     ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
@@ -334,15 +333,14 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     EXPECT_EQ(metrics.totalSpillFiles, 0);
   }
 
-  // Exact boundary: run 0 is [0, kBlock), run 1 starts at kBlock (in memory).
+  // Partial flush to disk creates one physical spill file.
   {
     const auto opts = makeOptions();
     ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
     LocalBlockOutput output(opts, spill);
-    writeRun(output, kBlock);
-    writeRun(output, 0);
-    writeRun(output, kBlock);
     writeRun(output, kBlock / 2);
+    writeRun(output, kBlock);
+    writeRun(output, kBlock);
     ASSERT_EQ(spill.release(1), kBlock);
     ShuffleWriterMetrics metrics;
     output.finish(metrics);
@@ -350,24 +348,7 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     EXPECT_EQ(metrics.totalSpillFiles, 1);
   }
 
-  // Straddling boundary: run 0 is [0, kBlock/2), run 1 is [kBlock/2,
-  // 3*kBlock/2) so half of run 1 reaches disk; run 2 starts at 3*kBlock/2 (in
-  // memory).
-  {
-    const auto opts = makeOptions();
-    ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
-    LocalBlockOutput output(opts, spill);
-    writeRun(output, kBlock / 2);
-    writeRun(output, kBlock);
-    writeRun(output, kBlock);
-    ASSERT_EQ(spill.release(1), kBlock);
-    ShuffleWriterMetrics metrics;
-    output.finish(metrics);
-    EXPECT_EQ(metrics.totalBytesEvicted, kBlock);
-    EXPECT_EQ(metrics.totalSpillFiles, 2);
-  }
-
-  // All runs flushed to disk.
+  // Multiple runs flushed to disk still share the single physical spill file.
   {
     const auto opts = makeOptions();
     ShuffleSpillFile spill(opts, "runs", pool_.get(), kCap);
@@ -380,7 +361,7 @@ TEST_F(SpillMemoryTest, spillFilesCountOnlyRunsThatReachDisk) {
     ShuffleWriterMetrics metrics;
     output.finish(metrics);
     EXPECT_EQ(metrics.totalBytesEvicted, 2 * kBlock);
-    EXPECT_EQ(metrics.totalSpillFiles, 3);
+    EXPECT_EQ(metrics.totalSpillFiles, 1);
   }
 }
 
@@ -390,6 +371,7 @@ TEST_F(SpillMemoryTest, zeroByteAppendCreatesNoSpillFile) {
   EXPECT_EQ(spill.append(nullptr, 0), 0u);
   EXPECT_EQ(spill.end(), 0u);
   EXPECT_EQ(spill.bytesWritten(), 0);
+  EXPECT_EQ(spill.numFiles(), 0);
   EXPECT_FALSE(std::filesystem::exists(opts.dataFile + ".zero.spill"));
 }
 
