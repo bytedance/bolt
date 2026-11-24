@@ -60,8 +60,8 @@ void CellNestedAssembler::beginPayload(ShuffleByteSource& in) {
         payloadDecoder_,
         group.columns,
         static_cast<uint32_t>(payloadPositions_[g]));
-    for (const uint32_t x : group.containers) {
-      countPositions(x);
+    for (const auto& [container, elementGroup] : group.expansions) {
+      payloadPositions_[elementGroup] = countElements(container);
     }
   }
   // Every column group's fixed bytes and string data, per row.
@@ -81,8 +81,8 @@ void CellNestedAssembler::beginPayload(ShuffleByteSource& in) {
       1, (bytes + strings) / std::max<uint32_t>(1, rowCount));
 }
 
-void CellNestedAssembler::countPositions(uint32_t x) {
-  const auto& node = layout_.node(x);
+uint64_t CellNestedAssembler::countElements(uint32_t container) const {
+  const auto& node = layout_.node(container);
   const auto& decoder = *decoders_[node.group];
   const uint32_t col = node.groupColumn;
   const auto bytes = decoder.streamBytes(decoder.layout().firstStream(col));
@@ -114,7 +114,7 @@ void CellNestedAssembler::countPositions(uint32_t x) {
   if (!cursor.finished()) {
     failMalformedPayload("malformed container length stream");
   }
-  payloadPositions_[node.ownedGroup] = total;
+  return total;
 }
 
 bool CellNestedAssembler::takesPayload() const {
@@ -198,13 +198,13 @@ void CellNestedAssembler::appendGroup(
     left -= piece;
   } while (left > 0);
 
-  for (const uint32_t x : group.containers) {
-    const auto& node = layout_.node(x);
-    auto& elements = *decoders_[node.ownedGroup];
+  for (const auto& [container, elementGroup] : group.expansions) {
+    const auto& node = layout_.node(container);
+    const auto& elements = *decoders_[elementGroup];
     // A null entry's length reads 0.
     const auto* lengths =
         decoder.batchValues(node.groupColumn)->as<int32_t>() + at;
-    vector_size_t* entryOffsets = offsets(x, at + positions);
+    vector_size_t* entryOffsets = offsets(container, at + positions);
     const uint64_t base = elements.batchRows();
     uint64_t total = 0;
     for (uint64_t i = 0; i < positions; ++i) {
@@ -216,7 +216,7 @@ void CellNestedAssembler::appendGroup(
         total,
         elements.payloadRowsLeft(),
         "malformed cell shuffle payload: container lengths past their elements");
-    appendGroup(node.ownedGroup, total, capacity);
+    appendGroup(elementGroup, total, capacity);
   }
 }
 

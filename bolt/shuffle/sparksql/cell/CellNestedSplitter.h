@@ -25,35 +25,9 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// The writer side of a nested layout: splits a batch's rows, then the
-/// elements of its containers column group by column group, through the
-/// splitter's column subsets. The splitter counts the window's rows itself;
-/// for every other column group the shredder counts each partition's committed
-/// positions and hands them to the splitter as the columns' position bases.
-///
-/// A ROW is read as columns at its own positions: its presence, 1 at each
-/// non-null struct, and its fields with the structs' nulls folded in, so
-/// that every column below a null struct is null there and every container
-/// below it holds no element. A flat field of flat structs keeps its
-/// values under its nulls and theirs, a field of a constant struct is a
-/// constant, and any other field - a field shorter than its structs, which
-/// it may be where every struct past its end is null, included - takes the
-/// structs' indices and nulls through a dictionary.
-///
-/// A container column group is split in element batches of up to
-/// kElementBatchPositions elements, in the order of the entries holding
-/// them, and each batch's counts are committed before the group's next
-/// batch is split, and before the elements of the batch's own containers
-/// are. An element batch's columns are views
-/// of the input: a slice where its elements lie in a row in a flat vector,
-/// else a dictionary over the decoded base. After a seal the counts of the
-/// partitions it emptied restart at zero.
-///
-/// Scratch comes from the writer's pool. What a batch takes past the larger
-/// of its rows and an element batch - a ROW below a container takes it per
-/// element -
-/// goes back with the batch; the rest is kept across batches until
-/// releaseScratch().
+/// Writes root rows and bounded blocks of ARRAY/MAP elements through the
+/// ordinary splitter. Each element inherits its parent partition. ROW fields
+/// share the parent's positions and inherit its nulls.
 class CellNestedSplitter {
  public:
   /// Elements one split of a container column group covers at most.
@@ -102,20 +76,20 @@ class CellNestedSplitter {
       std::span<const uint32_t> row2Partition,
       std::span<const uint32_t> partition2RowCount);
 
-  /// Total wall time spent in prepare() and split(), including wireColumns()
-  /// and any nested reclaims.
+  /// Total wall time spent in prepare() and split(), including the ordinary
+  /// splitter and any nested reclaims.
   uint64_t shredWallNs() const {
     return shredWallNs_;
   }
 
-  /// Total wall time spent in wireColumns() (the splitter portion of
+  /// Total wall time spent in the ordinary splitter (the splitter portion of
   /// shredWallNs()).
   uint64_t wireWallNs() const {
     return wireWallNs_;
   }
 
-  /// True while inside prepare() or split(), excluding wireColumns(). Used so
-  /// nested reclaims attribute their spill time to the shredding phase.
+  /// True while inside prepare() or split(), excluding ordinary column writes.
+  /// Used so nested reclaims attribute their spill time to the shredding phase.
   bool isShredding() const {
     return busy_ && !inWireColumns_;
   }
@@ -127,63 +101,56 @@ class CellNestedSplitter {
   int64_t releaseScratch();
 
  private:
-  /// What a node's column reads in the current batch.
-  struct NodeInput {
-    /// The vector the node's entries index: a top-level column, an element,
-    /// key or value vector of its parent's base, or a field of its parent
-    /// ROW's, the structs' nulls folded in; a ROW's presence. Null when the
-    /// parent holds no element in this batch.
-    VectorPtr vector;
-    DecodedVector decoded;
-    /// What a view of the column wraps: a leaf's or a ROW's decoded base; a
-    /// container's lengths, an Integer vector over its base's sizes.
-    VectorPtr viewBase;
-    /// A container's base offsets and sizes.
+  using ContainerExpansion = CellNestedLayout::ContainerExpansion;
+
+  struct PreparedNode {
+    /// Keeps the source vector and its decoded base alive for this batch.
+    VectorPtr source;
+    DecodedVector sourceMapping;
+    /// Value, ROW presence, or container length indexed by the decoded
+    /// position.
+    VectorPtr physicalValueBase;
     const vector_size_t* offsets{nullptr};
     const vector_size_t* sizes{nullptr};
-    /// Every entry null, so no view is needed.
     bool allNull{false};
-    /// A field's nulls and its structs', combined, where the field stays
-    /// flat; a ROW's structs' nulls and indices, where its fields index
-    /// them through a dictionary.
     BufferPtr fieldNulls;
     BufferPtr structNulls;
     BufferPtr structIndices;
   };
 
-  /// The entries of a column group being split: the rows, or an element batch.
-  struct Entries {
-    /// The partition of each entry.
-    const uint32_t* pid;
-    /// Entry k's index into the vectors of the group's nodes: indices[k], or
-    /// start + k when indices is null.
-    const vector_size_t* indices;
-    vector_size_t start;
-    uint32_t size;
-    /// The depth of the entries' column group; elementBatches_[depth + 1]
-    /// takes their elements.
-    uint32_t depth;
+  /// Selects input positions in output order and assigns each one a partition.
+  /// A null index buffer represents consecutive positions starting at first.
+  struct ElementSelection {
+    std::span<const uint32_t> partitionIds;
+    vector_size_t first{0};
+    BufferPtr sourceIndices{nullptr};
 
-    vector_size_t index(uint32_t k) const {
-      return indices != nullptr ? indices[k]
-                                : start + static_cast<vector_size_t>(k);
+    vector_size_t sourcePosition(uint32_t k) const {
+      return sourceIndices ? sourceIndices->as<vector_size_t>()[k]
+                           : first + static_cast<vector_size_t>(k);
     }
   };
 
-  /// One element batch of a column group at some depth.
-  struct ElementBatch {
-    BufferPtr pids;
-    BufferPtr rowIndexInPid;
-    BufferPtr indices;
-    uint32_t size{0};
-    /// The elements lie in a row from `start`; `indices` is unwritten then.
-    bool contiguous{true};
-    vector_size_t start{0};
+  /// Child writes borrow a separate pair of buffers at the next depth.
+  struct ElementBuffers {
+    BufferPtr partitionIds;
+    BufferPtr sourceIndices;
+  };
 
-    /// The elements' indices, as Entries::indices takes them.
-    const vector_size_t* indicesOrNull() const {
-      return contiguous ? nullptr : indices->as<vector_size_t>();
-    }
+  /// Builds one selection at a time in the current depth's buffers.
+  struct ElementBlock {
+    explicit ElementBlock(ElementBuffers& buffers);
+    void appendRange(vector_size_t offset, uint32_t count, uint32_t pid);
+    ElementSelection takeSelection();
+
+    uint32_t size{0};
+
+   private:
+    uint32_t* const partitionIds_;
+    vector_size_t* const indices_;
+    const BufferPtr& indexBuffer_;
+    bool contiguous_{true};
+    vector_size_t first_{0};
   };
 
   /// Re-reads the seals: a sealed partition's counts restart at zero.
@@ -206,32 +173,34 @@ class CellNestedSplitter {
   /// Marks node n and below as holding no entry this batch.
   void clearNode(uint32_t n);
 
-  /// Adds to each column group below `container` the positions of its entries
-  /// at [begin, end) of its vector; throws once some group passes
-  /// kMaxPositions.
-  void countRange(uint32_t container, vector_size_t begin, vector_size_t end);
+  void countRange(
+      const ContainerExpansion& expansion,
+      vector_size_t begin,
+      vector_size_t end);
 
-  /// Splits the elements of `container`'s non-null entries among
-  /// `parent`'s.
-  BOLT_CELL_KERNEL void splitElements(
-      uint32_t container,
-      const Entries& parent);
+  BOLT_CELL_KERNEL void expandContainer(
+      const ContainerExpansion& expansion,
+      const ElementSelection& parents);
 
-  /// Splits a full or last element batch of column group `groupIndex`,
-  /// commits it, then its containers' elements.
-  BOLT_CELL_KERNEL void splitElementBatch(
-      uint32_t groupIndex,
-      ElementBatch& elements,
-      uint32_t depth);
+  BOLT_CELL_KERNEL void writeElementBlock(
+      uint32_t groupId,
+      const ElementSelection& elements);
 
-  /// Builds and decodes the view of the rows in column col, a container's
-  /// lengths.
   NullClass viewRows(uint32_t col);
+  NullClass prepareElementColumn(
+      uint32_t col,
+      const ElementSelection& elements);
 
-  /// Builds and decodes the view of `elements` in column col.
-  NullClass view(uint32_t col, const ElementBatch& elements);
+  void writeGroupColumns(
+      uint32_t groupId,
+      std::span<const uint32_t> partitionIds,
+      std::span<const uint32_t> positionsPerPartition);
 
-  void wireColumns(const SplitBatch& batch);
+  std::span<const uint32_t> indicesInPartition(
+      std::span<const uint32_t> partitionIds,
+      bool rootGroup);
+
+  void commitElementCounts(uint32_t groupId);
 
   /// `n` elements of a pool buffer kept across batches.
   template <typename T>
@@ -246,7 +215,7 @@ class CellNestedSplitter {
   const uint32_t numPartitions_;
   memory::MemoryPool& pool_;
 
-  std::vector<NodeInput> inputs_;
+  std::vector<PreparedNode> preparedNodes_;
   /// Per layout column: the rows' decoded column, or an element batch's view
   /// decoded.
   std::vector<DecodedVector> decoded_;
@@ -274,18 +243,18 @@ class CellNestedSplitter {
   /// the column groups below it split. Per partition, the current batch's
   /// positions and an element's running index; `touched_` lists the partitions
   /// the batch holds.
-  std::vector<ElementBatch> elementBatches_;
+  std::vector<ElementBuffers> buffersByDepth_;
   BufferPtr elementCounts_;
   BufferPtr runningIndex_;
   std::vector<uint32_t> touched_;
-  /// The rows' index within their partition, when a column needs it.
+  /// Shared by root rows and element blocks during synchronous column writes.
   BufferPtr rowIndex_;
   /// The presence columns' values, and the identity indices.
   BufferPtr ones_;
   BufferPtr identity_;
   /// Inside prepare() or split().
   bool busy_{false};
-  /// Inside wireColumns(), nested within split().
+  /// Inside the ordinary splitter, nested within split().
   bool inWireColumns_{false};
 
   uint64_t shredWallNs_{0};

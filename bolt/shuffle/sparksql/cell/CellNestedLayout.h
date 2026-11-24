@@ -25,7 +25,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// The nested layout (CellFormat.h) of a row type with ARRAY, MAP or ROW
 /// columns: its type tree shredded in pre-order into one plain Cell column
-/// per node, node n being column n of layout() (UNKNOWN leaves omitted).
+/// per node except UNKNOWN leaves, which have no physical column.
 /// A leaf is a column of its own type; an ARRAY or MAP an Integer column of
 /// each value's length, null where the value is; a ROW a SmallInt presence
 /// column, 1 at each non-null struct.
@@ -54,9 +54,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 ///
 ///   ColumnGroups (sibling ARRAYs share depth=1 but have separate groups
 ///   because their element counts M1 and M2 are independent):
-///     Group 0 (depth=0, N rows): columns=[c0, c1, c3], containers=[n1, n3]
+///     Group 0 (depth=0, N rows): columns=[c0, c1, c3]
 ///       |- sum(c1) = M1 -> Group 1 (depth=1): columns=[c2]
-///       `- sum(c3) = M2 -> Group 2 (depth=1): columns=[c4, c5, c6], [n6]
+///       `- sum(c3) = M2 -> Group 2 (depth=1): columns=[c4, c5, c6]
 ///                            `- sum(c6) = M3 -> Group 3 (depth=2): [c7, c8]
 ///
 /// Describes the shredding only: no data passes through here.
@@ -86,10 +86,14 @@ class CellNestedLayout {
     uint32_t layoutColumn{kNone};
     /// The column's index among its group's columns, or kNone for UNKNOWN.
     uint32_t groupColumn{kNone};
-    /// A container's child column group; kNone for a leaf or a ROW.
-    uint32_t ownedGroup{kNone};
     /// An ARRAY's element; a MAP's key, then its value; a ROW's fields.
     std::vector<uint32_t> children;
+  };
+
+  /// An ARRAY or MAP node and the group containing its elements.
+  struct ContainerExpansion {
+    uint32_t container;
+    uint32_t elementGroup;
   };
 
   /// Columns sharing one row/element position count and decoded by one
@@ -100,8 +104,8 @@ class CellNestedLayout {
     /// The layout() columns at this group's positions, ascending (UNKNOWN
     /// leaves omitted).
     std::vector<uint32_t> columns;
-    /// The containers among this group's nodes, in node order.
-    std::vector<uint32_t> containers;
+    /// Expansions from this group to its element groups, in node order.
+    std::vector<ContainerExpansion> expansions;
     /// The row type of `columns`, a decoder's for this group.
     RowTypePtr rowType;
   };

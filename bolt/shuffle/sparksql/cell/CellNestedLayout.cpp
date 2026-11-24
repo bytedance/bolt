@@ -124,16 +124,14 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t group) {
   node.kind = kindOf(type);
   node.type = type;
   node.group = group;
+  uint32_t childGroup = group;
   if (node.kind == Kind::kArray || node.kind == Kind::kMap) {
-    node.ownedGroup = static_cast<uint32_t>(groups_.size());
-    groups_[group].containers.push_back(id);
+    childGroup = static_cast<uint32_t>(groups_.size());
+    groups_[group].expansions.push_back({id, childGroup});
     const uint32_t depth = groups_[group].depth + 1;
     maxDepth_ = std::max(maxDepth_, depth);
     groups_.push_back(ColumnGroup{depth, {}, {}, nullptr});
   }
-  // A ROW's fields have its positions, a container's children those of its
-  // owned column group.
-  const uint32_t childGroup = node.kind == Kind::kRow ? group : node.ownedGroup;
   nodes_.push_back(std::move(node));
   for (uint32_t i = 0; i < type->size(); ++i) {
     // Adding the child may reallocate nodes_.

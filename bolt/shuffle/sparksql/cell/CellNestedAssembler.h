@@ -64,9 +64,8 @@ class CellNestedAssembler {
       const std::function<bool()>& nextPayload);
 
  private:
-  /// The positions of container x's column group: its lengths in the payload
-  /// just opened, added up.
-  void countPositions(uint32_t x);
+  /// Sum of the container's non-null lengths in the current payload.
+  uint64_t countElements(uint32_t container) const;
 
   /// Whether the batch takes the payload just begun as well: every column
   /// group's positions.

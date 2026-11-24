@@ -128,6 +128,18 @@ VectorPtr withNulls(
   }
 }
 
+/// Keep short fields under trailing null ROWs intact until foldStructNulls().
+VectorPtr visiblePrefix(const VectorPtr& vector, vector_size_t size) {
+  if (vector->size() <= size) {
+    return vector;
+  }
+  const auto& loaded = BaseVector::loadedVectorShared(vector);
+  if (loaded->encoding() == VectorEncoding::Simple::ROW) {
+    return withNulls(*loaded, loaded->nulls(), size, loaded->pool());
+  }
+  return loaded->slice(0, size);
+}
+
 /// Lets go of `buffer` when it was last sized past `bytes`.
 void releaseOver(BufferPtr& buffer, size_t bytes) {
   if (buffer != nullptr && buffer->size() > bytes) {
@@ -146,7 +158,7 @@ CellNestedSplitter::CellNestedSplitter(
       splitter_(splitter),
       numPartitions_(numPartitions),
       pool_(pool),
-      inputs_(layout.numNodes()),
+      preparedNodes_(layout.numNodes()),
       decoded_(layout.layout().numColumns()),
       nullClass_(layout.layout().numColumns(), NullClass::kAllNull),
       views_(layout.layout().numColumns()),
@@ -157,7 +169,7 @@ CellNestedSplitter::CellNestedSplitter(
       totals_(layout.numGroups(), 0),
       committed_(layout.numGroups(), 0),
       seals_(splitter.sealCount()),
-      elementBatches_(layout.maxDepth() + 1) {
+      buffersByDepth_(layout.maxDepth() + 1) {
   const size_t numCounts =
       static_cast<size_t>(layout.numGroups() - 1) * numPartitions_;
   auto* counts = scratch<uint32_t>(countsBuffer_, numCounts);
@@ -229,10 +241,7 @@ void CellNestedSplitter::prepare(const RowVector& rv, uint32_t columnOffset) {
     BOLT_DCHECK(
         child->type()->equivalent(*layout_.node(topNodes[i]).type),
         "Cell input schema changed");
-    if (child->size() > numRows_) {
-      child = child->slice(0, numRows_);
-    }
-    decodeNode(topNodes[i], child);
+    decodeNode(topNodes[i], visiblePrefix(child, numRows_));
   }
 
   // The rows' columns: a leaf as it comes, a ROW as its presence, a
@@ -241,7 +250,7 @@ void CellNestedSplitter::prepare(const RowVector& rv, uint32_t columnOffset) {
     const uint32_t n = layout_.nodeIndexOfColumn(col);
     const auto& node = layout_.node(n);
     auto& klass = nullClass_[col];
-    auto& input = inputs_[n];
+    auto& input = preparedNodes_[n];
     if (input.allNull) {
       klass = NullClass::kAllNull;
       continue;
@@ -253,21 +262,21 @@ void CellNestedSplitter::prepare(const RowVector& rv, uint32_t columnOffset) {
     klass = viewRows(col);
   }
 
-  for (const uint32_t container : layout_.group(0).containers) {
-    countRange(container, 0, numRows_);
+  for (const auto& expansion : layout_.group(0).expansions) {
+    countRange(expansion, 0, numRows_);
   }
 }
 
 NullClass CellNestedSplitter::viewRows(uint32_t col) {
-  auto& input = inputs_[layout_.nodeIndexOfColumn(col)];
-  auto& decoded = input.decoded;
+  auto& input = preparedNodes_[layout_.nodeIndexOfColumn(col)];
+  auto& decoded = input.sourceMapping;
   auto& view = views_[col];
   view.reset();
   if (decoded.isIdentityMapping()) {
-    view = input.viewBase;
+    view = input.physicalValueBase;
   } else if (decoded.isConstantMapping()) {
-    view =
-        BaseVector::wrapInConstant(numRows_, decoded.index(0), input.viewBase);
+    view = BaseVector::wrapInConstant(
+        numRows_, decoded.index(0), input.physicalValueBase);
   } else {
     const BufferPtr& indices =
         copyToScratch(viewIndices_[col], decoded.indices(), numRows_);
@@ -277,7 +286,7 @@ NullClass CellNestedSplitter::viewRows(uint32_t col) {
           viewNulls_[col], decoded.nulls(), bits::nwords(numRows_));
     }
     view = BaseVector::wrapInDictionary(
-        std::move(nulls), indices, numRows_, input.viewBase);
+        std::move(nulls), indices, numRows_, input.physicalValueBase);
   }
   decoded_[col].decode(*view);
   return classifyNulls(decoded_[col], numRows_);
@@ -285,8 +294,8 @@ NullClass CellNestedSplitter::viewRows(uint32_t col) {
 
 void CellNestedSplitter::decodeNode(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
-  auto& input = inputs_[n];
-  input.vector = vector;
+  auto& input = preparedNodes_[n];
+  input.source = vector;
   input.allNull = false;
   if (node.kind == Kind::kRow) {
     decodeRow(n, vector);
@@ -298,12 +307,14 @@ void CellNestedSplitter::decodeNode(uint32_t n, const VectorPtr& vector) {
     }
     return;
   }
-  input.decoded.decode(*vector);
+  input.sourceMapping.decode(*vector);
   // A null constant has no base container.
-  const auto* base = dynamic_cast<const ArrayVectorBase*>(input.decoded.base());
-  input.allNull = base == nullptr || allNull(input.decoded, vector->size());
+  const auto* base =
+      dynamic_cast<const ArrayVectorBase*>(input.sourceMapping.base());
+  input.allNull =
+      base == nullptr || allNull(input.sourceMapping, vector->size());
   if (input.allNull) {
-    input.viewBase.reset();
+    input.physicalValueBase.reset();
     for (const uint32_t child : node.children) {
       clearNode(child);
     }
@@ -311,7 +322,7 @@ void CellNestedSplitter::decodeNode(uint32_t n, const VectorPtr& vector) {
   }
   input.offsets = base->rawOffsets();
   input.sizes = base->rawSizes();
-  input.viewBase = std::make_shared<FlatVector<int32_t>>(
+  input.physicalValueBase = std::make_shared<FlatVector<int32_t>>(
       &pool_,
       INTEGER(),
       base->nulls(),
@@ -330,23 +341,23 @@ void CellNestedSplitter::decodeNode(uint32_t n, const VectorPtr& vector) {
 
 void CellNestedSplitter::decodeColumn(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
-  auto& input = inputs_[n];
+  auto& input = preparedNodes_[n];
   if (node.group == 0) {
     decoded_[node.layoutColumn].decode(*vector);
     return;
   }
-  input.decoded.decode(*vector);
-  input.allNull = allNull(input.decoded, vector->size());
+  input.sourceMapping.decode(*vector);
+  input.allNull = allNull(input.sourceMapping, vector->size());
   // The base belongs to the vector: the view shares its ownership.
-  input.viewBase = input.allNull
+  input.physicalValueBase = input.allNull
       ? nullptr
-      : VectorPtr(vector, const_cast<BaseVector*>(input.decoded.base()));
+      : VectorPtr(vector, const_cast<BaseVector*>(input.sourceMapping.base()));
 }
 
 void CellNestedSplitter::decodeRow(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
-  auto& input = inputs_[n];
-  auto& structs = input.decoded;
+  auto& input = preparedNodes_[n];
+  auto& structs = input.sourceMapping;
   structs.decode(*vector);
   const vector_size_t size = vector->size();
   // A null constant has no base struct.
@@ -388,7 +399,7 @@ void CellNestedSplitter::decodeRow(uint32_t n, const VectorPtr& vector) {
     decodeNode(node.children[i], foldStructNulls(n, i, nulls));
   }
   // The structs are decoded until here, the presence from here.
-  input.vector = presence;
+  input.source = presence;
   decodeColumn(n, presence);
 }
 
@@ -396,8 +407,8 @@ VectorPtr CellNestedSplitter::foldStructNulls(
     uint32_t n,
     uint32_t i,
     const BufferPtr& nulls) {
-  auto& input = inputs_[n];
-  const auto& structs = input.decoded;
+  auto& input = preparedNodes_[n];
+  const auto& structs = input.sourceMapping;
   const vector_size_t size = structs.size();
   const uint32_t field = layout_.node(n).children[i];
   const auto& vector = structs.base()->asUnchecked<RowVector>()->childAt(i);
@@ -414,7 +425,7 @@ VectorPtr CellNestedSplitter::foldStructNulls(
         nulls, input.structIndices, size, loaded);
   }
   if (nulls == nullptr) {
-    return loaded->size() > size ? loaded->slice(0, size) : loaded;
+    return visiblePrefix(loaded, size);
   }
   // A field may stop short of its structs where every struct past it is
   // null: a dictionary reads nothing of it there and leaves its buffers as
@@ -433,7 +444,7 @@ VectorPtr CellNestedSplitter::foldStructNulls(
   BufferPtr combined = nulls;
   if (const uint64_t* own = loaded->rawNulls()) {
     const auto words = bits::nwords(size);
-    auto& fieldNulls = inputs_[field].fieldNulls;
+    auto& fieldNulls = preparedNodes_[field].fieldNulls;
     auto* raw = scratch<uint64_t>(fieldNulls, words);
     const auto* structNulls = nulls->as<uint64_t>();
     for (size_t w = 0; w < words; ++w) {
@@ -445,9 +456,9 @@ VectorPtr CellNestedSplitter::foldStructNulls(
 }
 
 void CellNestedSplitter::clearNode(uint32_t n) {
-  auto& input = inputs_[n];
-  input.vector.reset();
-  input.viewBase.reset();
+  auto& input = preparedNodes_[n];
+  input.source.reset();
+  input.physicalValueBase.reset();
   input.allNull = true;
   for (const uint32_t child : layout_.node(n).children) {
     clearNode(child);
@@ -455,17 +466,16 @@ void CellNestedSplitter::clearNode(uint32_t n) {
 }
 
 void CellNestedSplitter::countRange(
-    uint32_t container,
+    const ContainerExpansion& expansion,
     vector_size_t begin,
     vector_size_t end) {
-  auto& input = inputs_[container];
+  auto& input = preparedNodes_[expansion.container];
   if (input.allNull) {
     return;
   }
-  const uint32_t ownedGroup = layout_.node(container).ownedGroup;
-  const auto& containers = layout_.group(ownedGroup).containers;
-  uint64_t& total = totals_[ownedGroup];
-  const auto& decoded = input.decoded;
+  const auto& children = layout_.group(expansion.elementGroup).expansions;
+  uint64_t& total = totals_[expansion.elementGroup];
+  const auto& decoded = input.sourceMapping;
   for (vector_size_t j = begin; j < end; ++j) {
     if (decoded.isNullAt(j)) {
       continue;
@@ -480,7 +490,7 @@ void CellNestedSplitter::countRange(
           "its rows together, more than a Cell shuffle payload carries",
           CellNestedLayout::kMaxPositions);
     }
-    for (const uint32_t child : containers) {
+    for (const auto& child : children) {
       const vector_size_t offset = input.offsets[i];
       countRange(child, offset, offset + size);
     }
@@ -512,35 +522,10 @@ void CellNestedSplitter::split(
   followSeals();
   std::fill(committed_.begin(), committed_.end(), 0);
 
-  const auto& rows = layout_.group(0);
-  bool someNulls = false;
-  for (const uint32_t col : rows.columns) {
-    someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
-  }
-  const uint32_t* pids = row2Partition.data();
-  uint32_t* rowIndex = nullptr;
-  if (someNulls) {
-    rowIndex = scratch<uint32_t>(rowIndex_, numRows_);
-    uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
-    for (vector_size_t row = 0; row < numRows_; ++row) {
-      rowIndex[row] = elementCounts[pids[row]]++;
-    }
-    std::fill_n(elementCounts, numPartitions_, 0);
-  }
-  SplitBatch batch;
-  batch.decoded = decoded_;
-  batch.row2Partition = row2Partition;
-  batch.partition2RowCount = partition2RowCount;
-  batch.nullClass = nullClass_;
-  if (rowIndex != nullptr) {
-    batch.rowIndexInPid = {rowIndex, row2Partition.size()};
-  }
-  batch.columns = rows.columns;
-  wireColumns(batch);
-
-  const Entries entries{pids, nullptr, 0, static_cast<uint32_t>(numRows_), 0};
-  for (const uint32_t container : rows.containers) {
-    splitElements(container, entries);
+  writeGroupColumns(0, row2Partition, partition2RowCount);
+  const ElementSelection rootRows{row2Partition};
+  for (const auto& expansion : layout_.group(0).expansions) {
+    expandContainer(expansion, rootRows);
   }
   for (uint32_t g = 1; g < layout_.numGroups(); ++g) {
     BOLT_CHECK_EQ(
@@ -553,9 +538,9 @@ void CellNestedSplitter::split(
   // structs past the larger of its rows and an element batch.
   const size_t keep = std::max<size_t>(numRows_, kElementBatchPositions);
   const size_t keepNulls = bits::nwords(keep) * sizeof(uint64_t);
-  for (auto& input : inputs_) {
-    input.vector.reset();
-    input.viewBase.reset();
+  for (auto& input : preparedNodes_) {
+    input.source.reset();
+    input.physicalValueBase.reset();
     releaseOver(input.fieldNulls, keepNulls);
     releaseOver(input.structNulls, keepNulls);
     releaseOver(input.structIndices, keep * sizeof(vector_size_t));
@@ -576,16 +561,15 @@ int64_t CellNestedSplitter::releaseScratch() {
   rowIndex_.reset();
   ones_.reset();
   identity_.reset();
-  for (auto& elements : elementBatches_) {
-    elements.pids.reset();
-    elements.rowIndexInPid.reset();
-    elements.indices.reset();
+  for (auto& buffer : buffersByDepth_) {
+    buffer.partitionIds.reset();
+    buffer.sourceIndices.reset();
   }
   for (uint32_t col = 0; col < viewIndices_.size(); ++col) {
     viewIndices_[col].reset();
     viewNulls_[col].reset();
   }
-  for (auto& input : inputs_) {
+  for (auto& input : preparedNodes_) {
     input.fieldNulls.reset();
     input.structNulls.reset();
     input.structIndices.reset();
@@ -593,167 +577,178 @@ int64_t CellNestedSplitter::releaseScratch() {
   return held - pool_.usedBytes();
 }
 
-void CellNestedSplitter::splitElements(
-    uint32_t container,
-    const Entries& parent) {
-  auto& input = inputs_[container];
+CellNestedSplitter::ElementBlock::ElementBlock(ElementBuffers& buffers)
+    : partitionIds_(buffers.partitionIds->asMutable<uint32_t>()),
+      indices_(buffers.sourceIndices->asMutable<vector_size_t>()),
+      indexBuffer_(buffers.sourceIndices) {}
+
+void CellNestedSplitter::ElementBlock::appendRange(
+    vector_size_t offset,
+    uint32_t count,
+    uint32_t pid) {
+  std::fill_n(partitionIds_ + size, count, pid);
+  if (size == 0) {
+    first_ = offset;
+  } else if (
+      contiguous_ && offset != first_ + static_cast<vector_size_t>(size)) {
+    std::iota(indices_, indices_ + size, first_);
+    contiguous_ = false;
+  }
+  if (!contiguous_) {
+    std::iota(indices_ + size, indices_ + size + count, offset);
+  }
+  size += count;
+}
+
+CellNestedSplitter::ElementSelection
+CellNestedSplitter::ElementBlock::takeSelection() {
+  ElementSelection selection{
+      {partitionIds_, size}, first_, contiguous_ ? nullptr : indexBuffer_};
+  size = 0;
+  contiguous_ = true;
+  return selection;
+}
+
+void CellNestedSplitter::expandContainer(
+    const ContainerExpansion& expansion,
+    const ElementSelection& parents) {
+  const auto& input = preparedNodes_[expansion.container];
   if (input.allNull) {
     return;
   }
-  const uint32_t ownedGroup = layout_.node(container).ownedGroup;
-  const auto& group = layout_.group(ownedGroup);
-  const auto& decoded = input.decoded;
+  const auto groupId = expansion.elementGroup;
+  const auto& group = layout_.group(groupId);
+  const auto& mapping = input.sourceMapping;
   if (group.columns.empty()) {
-    // UNKNOWN elements: positions to count, no value to split.
-    uint32_t* counts = counts_[ownedGroup];
-    for (uint32_t k = 0; k < parent.size; ++k) {
-      const vector_size_t j = parent.index(k);
-      if (decoded.isNullAt(j)) {
-        continue;
+    // ARRAY/MAP of UNKNOWN needs only its per-partition position counts.
+    auto* counts = counts_[groupId];
+    for (uint32_t k = 0; k < parents.partitionIds.size(); ++k) {
+      const auto j = parents.sourcePosition(k);
+      if (!mapping.isNullAt(j)) {
+        const auto count = static_cast<uint32_t>(input.sizes[mapping.index(j)]);
+        const auto pid = parents.partitionIds[k];
+        counts[pid] += count;
+        maxCount_[groupId] = std::max(maxCount_[groupId], counts[pid]);
+        committed_[groupId] += count;
       }
-      const auto size = static_cast<uint32_t>(input.sizes[decoded.index(j)]);
-      const uint32_t pid = parent.pid[k];
-      counts[pid] += size;
-      maxCount_[ownedGroup] = std::max(maxCount_[ownedGroup], counts[pid]);
-      committed_[ownedGroup] += size;
     }
     return;
   }
 
-  ElementBatch& elements = elementBatches_[parent.depth + 1];
-  if (elements.pids == nullptr) {
-    scratch<uint32_t>(elements.pids, kElementBatchPositions);
-    scratch<uint32_t>(elements.rowIndexInPid, kElementBatchPositions);
-    scratch<vector_size_t>(elements.indices, kElementBatchPositions);
+  auto& buffer = buffersByDepth_[group.depth];
+  if (buffer.partitionIds == nullptr) {
+    scratch<uint32_t>(buffer.partitionIds, kElementBatchPositions);
+    scratch<vector_size_t>(buffer.sourceIndices, kElementBatchPositions);
   }
-  uint32_t* pids = elements.pids->asMutable<uint32_t>();
-  vector_size_t* indices = elements.indices->asMutable<vector_size_t>();
-  uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
-  elements.size = 0;
-  elements.contiguous = true;
-  for (uint32_t k = 0; k < parent.size; ++k) {
-    const vector_size_t j = parent.index(k);
-    if (decoded.isNullAt(j)) {
+  ElementBlock block(buffer);
+  auto* blockCounts = elementCounts_->asMutable<uint32_t>();
+  for (uint32_t k = 0; k < parents.partitionIds.size(); ++k) {
+    const auto j = parents.sourcePosition(k);
+    if (mapping.isNullAt(j)) {
       continue;
     }
-    const vector_size_t i = decoded.index(j);
-    vector_size_t offset = input.offsets[i];
-    auto left = static_cast<uint32_t>(input.sizes[i]);
-    const uint32_t pid = parent.pid[k];
-    // An entry's elements may go into several element batches.
-    while (left > 0) {
-      const uint32_t take =
-          std::min(left, kElementBatchPositions - elements.size);
-      std::fill_n(pids + elements.size, take, pid);
-      if (elements.contiguous) {
-        if (elements.size == 0) {
-          elements.start = offset;
-        } else if (
-            offset !=
-            elements.start + static_cast<vector_size_t>(elements.size)) {
-          std::iota(indices, indices + elements.size, elements.start);
-          elements.contiguous = false;
-        }
-      }
-      if (!elements.contiguous) {
-        std::iota(
-            indices + elements.size, indices + elements.size + take, offset);
-      }
-      if (elementCounts[pid] == 0) {
+    const auto i = mapping.index(j);
+    auto offset = input.offsets[i];
+    auto remaining = static_cast<uint32_t>(input.sizes[i]);
+    const auto pid = parents.partitionIds[k];
+    while (remaining > 0) {
+      const auto count =
+          std::min(remaining, kElementBatchPositions - block.size);
+      block.appendRange(offset, count, pid);
+      if (blockCounts[pid] == 0) {
         touched_.push_back(pid);
       }
-      elementCounts[pid] += take;
-      elements.size += take;
-      offset += static_cast<vector_size_t>(take);
-      left -= take;
-      if (elements.size == kElementBatchPositions) {
-        splitElementBatch(ownedGroup, elements, parent.depth + 1);
+      blockCounts[pid] += count;
+      offset += count;
+      remaining -= count;
+      if (block.size == kElementBatchPositions) {
+        writeElementBlock(groupId, block.takeSelection());
       }
     }
   }
-  if (elements.size > 0) {
-    splitElementBatch(ownedGroup, elements, parent.depth + 1);
+  if (block.size > 0) {
+    writeElementBlock(groupId, block.takeSelection());
   }
 }
 
-void CellNestedSplitter::splitElementBatch(
-    uint32_t groupIndex,
-    ElementBatch& elements,
-    uint32_t depth) {
-  const auto& group = layout_.group(groupIndex);
-  bool someNulls = false;
-  for (const uint32_t col : group.columns) {
-    nullClass_[col] = view(col, elements);
-    someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
+void CellNestedSplitter::writeElementBlock(
+    uint32_t groupId,
+    const ElementSelection& elements) {
+  const auto& group = layout_.group(groupId);
+  for (const auto col : group.columns) {
+    nullClass_[col] = prepareElementColumn(col, elements);
   }
-  const uint32_t* pids = elements.pids->as<uint32_t>();
-  uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
-  uint32_t* rowIndexInPid = nullptr;
-  if (someNulls) {
-    rowIndexInPid = elements.rowIndexInPid->asMutable<uint32_t>();
-    uint32_t* runningIndex = runningIndex_->asMutable<uint32_t>();
-    const uint32_t size = elements.size;
-    if (touched_.size() == 1) {
-      // One partition: an element's index in it is its batch index.
-      std::iota(rowIndexInPid, rowIndexInPid + size, 0u);
-    } else {
-      for (uint32_t k = 0; k < size; ++k) {
-        rowIndexInPid[k] = runningIndex[pids[k]]++;
-      }
-    }
-    for (const uint32_t pid : touched_) {
-      runningIndex[pid] = 0;
-    }
+  writeGroupColumns(
+      groupId,
+      elements.partitionIds,
+      {elementCounts_->as<uint32_t>(), numPartitions_});
+  // Children reuse the per-partition block counts. They still need this
+  // selection.
+  commitElementCounts(groupId);
+  for (const auto& expansion : group.expansions) {
+    expandContainer(expansion, elements);
   }
-  uint32_t* counts = counts_[groupIndex];
-  SplitBatch batch;
-  batch.decoded = decoded_;
-  batch.row2Partition = {pids, elements.size};
-  batch.partition2RowCount = {elementCounts, numPartitions_};
-  batch.nullClass = nullClass_;
-  if (rowIndexInPid != nullptr) {
-    batch.rowIndexInPid = {rowIndexInPid, elements.size};
-  }
-  batch.columns = group.columns;
-  batch.windowRowCounts = counts;
-  wireColumns(batch);
-  // Committed before the column group's next element batch splits, which
-  // starts past them.
+}
+
+void CellNestedSplitter::commitElementCounts(uint32_t groupId) {
+  auto* windowCounts = counts_[groupId];
+  auto* blockCounts = elementCounts_->asMutable<uint32_t>();
   for (const uint32_t pid : touched_) {
-    counts[pid] += elementCounts[pid];
-    maxCount_[groupIndex] = std::max(maxCount_[groupIndex], counts[pid]);
-    committed_[groupIndex] += elementCounts[pid];
-    elementCounts[pid] = 0;
+    const auto count = blockCounts[pid];
+    windowCounts[pid] += count;
+    maxCount_[groupId] = std::max(maxCount_[groupId], windowCounts[pid]);
+    committed_[groupId] += count;
+    blockCounts[pid] = 0;
   }
   touched_.clear();
-
-  const Entries entries{
-      pids, elements.indicesOrNull(), elements.start, elements.size, depth};
-  for (const uint32_t child : group.containers) {
-    splitElements(child, entries);
-  }
-  elements.size = 0;
-  elements.contiguous = true;
 }
 
-NullClass CellNestedSplitter::view(uint32_t col, const ElementBatch& elements) {
-  auto& input = inputs_[layout_.nodeIndexOfColumn(col)];
+std::span<const uint32_t> CellNestedSplitter::indicesInPartition(
+    std::span<const uint32_t> partitionIds,
+    bool rootGroup) {
+  auto* indices = scratch<uint32_t>(rowIndex_, partitionIds.size());
+  if (!rootGroup && touched_.size() == 1) {
+    std::iota(indices, indices + partitionIds.size(), 0u);
+  } else {
+    auto* next = runningIndex_->asMutable<uint32_t>();
+    for (size_t k = 0; k < partitionIds.size(); ++k) {
+      indices[k] = next[partitionIds[k]]++;
+    }
+    if (rootGroup) {
+      std::fill_n(next, numPartitions_, 0);
+    } else {
+      for (const auto pid : touched_) {
+        next[pid] = 0;
+      }
+    }
+  }
+  return {indices, partitionIds.size()};
+}
+
+NullClass CellNestedSplitter::prepareElementColumn(
+    uint32_t col,
+    const ElementSelection& elements) {
+  auto& input = preparedNodes_[layout_.nodeIndexOfColumn(col)];
   if (input.allNull) {
     return NullClass::kAllNull;
   }
-  auto& decoded = input.decoded;
-  const auto n = static_cast<vector_size_t>(elements.size);
+  auto& decoded = input.sourceMapping;
+  const auto n = static_cast<vector_size_t>(elements.partitionIds.size());
   auto& view = views_[col];
   // The previous element batch's view lets go of the scratch it shares.
   view.reset();
   if (decoded.isIdentityMapping()) {
     // Elements in a row stay a flat vector; others index it.
-    view = elements.contiguous
-        ? input.viewBase->slice(elements.start, n)
+    view = elements.sourceIndices == nullptr
+        ? input.physicalValueBase->slice(elements.first, n)
         : BaseVector::wrapInDictionary(
-              BufferPtr(nullptr), elements.indices, n, input.viewBase);
+              BufferPtr(nullptr),
+              elements.sourceIndices,
+              n,
+              input.physicalValueBase);
   } else if (decoded.isConstantMapping()) {
-    view = BaseVector::wrapInConstant(n, decoded.index(0), input.viewBase);
+    view = BaseVector::wrapInConstant(
+        n, decoded.index(0), input.physicalValueBase);
   } else {
     // One dictionary over the base: the wrappers' indices and nulls
     // combined.
@@ -761,9 +756,8 @@ NullClass CellNestedSplitter::view(uint32_t col, const ElementBatch& elements) {
     uint64_t* nulls = decoded.mayHaveNulls()
         ? scratch<uint64_t>(viewNulls_[col], bits::nwords(n))
         : nullptr;
-    const vector_size_t* src = elements.indicesOrNull();
     for (vector_size_t k = 0; k < n; ++k) {
-      const vector_size_t j = src != nullptr ? src[k] : elements.start + k;
+      const vector_size_t j = elements.sourcePosition(k);
       indices[k] = decoded.index(j);
       if (nulls != nullptr) {
         bits::setNull(nulls, k, decoded.isNullAt(j));
@@ -773,13 +767,30 @@ NullClass CellNestedSplitter::view(uint32_t col, const ElementBatch& elements) {
         nulls != nullptr ? viewNulls_[col] : BufferPtr(nullptr),
         viewIndices_[col],
         n,
-        input.viewBase);
+        input.physicalValueBase);
   }
   decoded_[col].decode(*view);
   return classifyNulls(decoded_[col], n);
 }
 
-void CellNestedSplitter::wireColumns(const SplitBatch& batch) {
+void CellNestedSplitter::writeGroupColumns(
+    uint32_t groupId,
+    std::span<const uint32_t> partitionIds,
+    std::span<const uint32_t> positionsPerPartition) {
+  const auto& columns = layout_.group(groupId).columns;
+  SplitBatch batch;
+  batch.decoded = decoded_;
+  batch.row2Partition = partitionIds;
+  batch.partition2RowCount = positionsPerPartition;
+  batch.nullClass = nullClass_;
+  batch.columns = columns;
+  batch.windowRowCounts = counts_[groupId];
+  if (std::any_of(columns.begin(), columns.end(), [&](uint32_t col) {
+        return nullClass_[col] == NullClass::kSomeNulls;
+      })) {
+    batch.rowIndexInPid = indicesInPartition(partitionIds, groupId == 0);
+  }
+
   NanosecondTimer timer(&wireWallNs_);
   inWireColumns_ = true;
   SCOPE_EXIT {

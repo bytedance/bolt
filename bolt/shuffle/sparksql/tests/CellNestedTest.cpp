@@ -2130,5 +2130,26 @@ TEST_F(CellNestedTest, oversizedNonNullStructChildrenAreSlicedToParentSize) {
       expected, written, arrow::Compression::UNCOMPRESSED, pool());
 }
 
+TEST_F(CellNestedTest, oversizedStructPrefixWithShortField) {
+  const auto structType = ROW({"x"}, {BIGINT()});
+  const auto outerType = ROW({"inner"}, {structType});
+  // Four rows are visible. The field only needs a value for the first struct.
+  const auto largeStruct = std::make_shared<RowVector>(
+      pool(),
+      structType,
+      makeNulls(8, [](auto row) { return row > 0; }),
+      8,
+      std::vector<VectorPtr>{makeFlatVector<int64_t>({42})});
+  const auto outer = std::make_shared<RowVector>(
+      pool(), outerType, nullptr, 4, std::vector<VectorPtr>{largeStruct});
+  const auto batch = std::make_shared<RowVector>(
+      pool(),
+      ROW({"direct", "nested"}, {structType, outerType}),
+      nullptr,
+      4,
+      std::vector<VectorPtr>{largeStruct, outer});
+  roundTrip(test::roundRobin({batch}, 2), 2);
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell
