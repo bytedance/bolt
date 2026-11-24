@@ -109,7 +109,9 @@ arrow::Status CelebornPartitionWriter::evict(
   for (auto pid = 0; pid < rows.size(); ++pid) {
     auto rawSize =
         isCompositeVector ? getTotalRowBytes(rows[pid]) : partitionBytes[pid];
-    partitionBytes[pid] = 0;
+    if (!isCompositeVector) {
+      partitionBytes[pid] = 0;
+    }
     RETURN_NOT_OK(writeFinal(pid, rows[pid], rawSize, isCompositeVector));
   }
   return arrow::Status::OK();
