@@ -78,8 +78,8 @@ bool BmRowContainer::canBulkRead(
       ? driverCtx->task->maybeScopedDisableMemoryExpansion()
       : std::nullopt;
   const auto reserved =
-      bufferManager_->MaybeReserve(bytes * admissionMultiplier);
-  bufferManager_->ReleaseUnusedReservation();
+      allocationPool_->maybeReserve(bytes * admissionMultiplier);
+  allocationPool_->release();
   return reserved;
 }
 
@@ -88,14 +88,14 @@ void BmRowContainer::ensureSegmentsLoaded(
   validateSegments(segments);
 
   const auto bytes = unloadedBytes(segments);
-  const bool reserved = bytes == 0 || bufferManager_->MaybeReserve(bytes);
+  const bool reserved = bytes == 0 || allocationPool_->maybeReserve(bytes);
   BOLT_CHECK(reserved, "Cannot load {} bytes into BM RowContainer", bytes);
 
   try {
     blockLoader_.loadSegments(segments);
-    bufferManager_->ReleaseUnusedReservation();
+    allocationPool_->release();
   } catch (const std::exception&) {
-    bufferManager_->ReleaseUnusedReservation();
+    allocationPool_->release();
     throw;
   }
 }
@@ -108,14 +108,14 @@ void BmRowContainer::ensureChunksLoaded(
     bytes += unloadedBytesForChunk(*chunk);
   }
 
-  const bool reserved = bytes == 0 || bufferManager_->MaybeReserve(bytes);
+  const bool reserved = bytes == 0 || allocationPool_->maybeReserve(bytes);
   BOLT_CHECK(reserved, "Cannot load {} bytes into BM RowContainer", bytes);
 
   try {
     blockLoader_.loadChunks(chunks);
-    bufferManager_->ReleaseUnusedReservation();
+    allocationPool_->release();
   } catch (const std::exception&) {
-    bufferManager_->ReleaseUnusedReservation();
+    allocationPool_->release();
     throw;
   }
 }

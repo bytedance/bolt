@@ -40,6 +40,8 @@
 #include "bolt/type/OpaqueCustomTypes.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/VariantValue.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance::bolt {
 using namespace bytedance::bolt::test;
 namespace {
@@ -897,6 +899,69 @@ TEST_F(ArrayWriterTest, nestedArrayWriteThenCommitNull) {
 
   ASSERT_EQ(reader.readNullFree(1).at(0).size(), 1);
   ASSERT_EQ(reader.readNullFree(1)[0][0], 10);
+}
+
+TEST_F(ArrayWriterTest, writeThenCommitNullVarchar) {
+  auto result = prepareResult(ARRAY(VARCHAR()), 2);
+  exec::VectorWriter<Array<Varchar>> writer;
+  writer.init(*result->as<ArrayVector>());
+
+  {
+    writer.setOffset(0);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item() += "stale"_sv;
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& arrayWriter = writer.current();
+    auto& element = arrayWriter.add_item();
+    // add_item() must not commit the pending element of the null row.
+    auto* elements =
+        result->as<ArrayVector>()->elements()->asFlatVector<StringView>();
+    for (vector_size_t i = 0; i < elements->size(); ++i) {
+      EXPECT_NE(elements->valueAt(i).getString(), "stale");
+    }
+    element += "fresh"_sv;
+    writer.commit();
+  }
+  writer.finish();
+
+  std::vector<std::vector<StringView>> expectedData = {{}, {"fresh"_sv}};
+  auto expected = makeArrayVector<StringView>(expectedData);
+  expected->setNull(0, true);
+  assertEqualVectors(result, expected);
+}
+
+TEST_F(ArrayWriterTest, writeThenCommitNullVariant) {
+  auto result = prepareResult(ARRAY(VARIANT()), 2);
+  exec::VectorWriter<Array<Variant>> writer;
+  writer.init(*result->as<ArrayVector>());
+
+  {
+    writer.setOffset(0);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item().copy_from(
+        VariantValue{StringView("v1"), StringView("m1")});
+    writer.commitNull();
+  }
+
+  {
+    writer.setOffset(1);
+    auto& arrayWriter = writer.current();
+    arrayWriter.add_item().copy_from(
+        VariantValue{StringView("v2"), StringView("m2")});
+    writer.commit();
+  }
+  writer.finish();
+
+  auto* arrays = result->as<ArrayVector>();
+  auto* variants = arrays->elements()->as<VariantVector>();
+  ASSERT_EQ(arrays->sizeAt(1), 1);
+  auto variant = variants->valueAt(arrays->offsetAt(1));
+  EXPECT_EQ(variant.value.getString(), "v2");
+  EXPECT_EQ(variant.metadata.getString(), "m2");
 }
 
 // ArrayWriter should append and not overwrite elements vectors.

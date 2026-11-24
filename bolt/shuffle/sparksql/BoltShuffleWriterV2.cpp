@@ -274,7 +274,12 @@ arrow::Status BoltShuffleWriterV2::stop() {
             if (numRows == 0) {
               return arrow::Status::OK();
             }
-            bool mayUseRowVectorMode = true;
+            // Celeborn serializes partitions below the threshold in buffer
+            // mode.
+            bool mayUseRowVectorMode =
+                options_.partitionWriterOptions.partitionWriterType !=
+                    PartitionWriterType::kCeleborn ||
+                numRows >= options_.partitionWriterOptions.compressionThreshold;
             ARROW_ASSIGN_OR_RAISE(
                 auto buffers,
                 assembleBuffersGeneral(partitionId, mayUseRowVectorMode));
@@ -784,7 +789,10 @@ arrow::Status BoltShuffleWriterV2::evictPartitionBuffers(
     Evict::type evictType) {
   auto numRows = partitionBufferBase_[partitionId];
   if (numRows > 0) {
-    bool mayUseRowVectorMode = (evictType == Evict::kCacheNoMerge);
+    bool mayUseRowVectorMode = evictType == Evict::kCacheNoMerge &&
+        (options_.partitionWriterOptions.partitionWriterType !=
+             PartitionWriterType::kCeleborn ||
+         numRows >= options_.partitionWriterOptions.compressionThreshold);
     // assembleBuffersGeneral will finally decide RowVector mode or not
     ARROW_ASSIGN_OR_RAISE(
         auto buffers, assembleBuffersGeneral(partitionId, mayUseRowVectorMode));

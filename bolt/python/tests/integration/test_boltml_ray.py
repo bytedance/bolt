@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run installed BoltML through Ray Client and real workers on a local cluster."""
+"""Run installed BoltML in real workers on an independent local Ray cluster."""
 
 import hashlib
 from importlib.metadata import version
 import os
 from pathlib import Path
-import socket
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -29,7 +27,6 @@ import pyarrow.parquet as pq
 import pybolt
 import pybolt.pybolt as native
 import ray
-from ray.cluster_utils import Cluster
 
 from boltml import DataFrame
 from boltml.distributed.ray import RayExecutionConfig, RayExecutionMode
@@ -52,46 +49,18 @@ class RayExecutionTests(unittest.TestCase):
             {
                 "RAY_TMPDIR": cls.temporary.name,
                 "RAY_USAGE_STATS_ENABLED": "0",
-                "RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER": "0",
             },
         )
         environment.start()
         cls.addClassCleanup(environment.stop)
-        # Prevent Ray Client from replacing our explicit loopback GCS address.
-        localNetwork = patch("ray._private.ray_constants.ENABLE_RAY_CLUSTER", False)
-        localNetwork.start()
-        cls.addClassCleanup(localNetwork.stop)
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-        cls.cluster = Cluster(shutdown_at_exit=True)
-        cls.addClassCleanup(cls.cluster.shutdown)
-        cls.cluster.add_node(
-            node_ip_address="127.0.0.1",
+        cls.addClassCleanup(ray.shutdown)
+        ray.init(
+            address="local",
             num_cpus=4,
             object_store_memory=128 * 1024 * 1024,
             include_dashboard=False,
-            ray_client_server_port=port,
-            temp_dir=str(Path(cls.temporary.name) / "ray"),
+            namespace="bolt-integration-tests",
         )
-        cls.addClassCleanup(ray.shutdown)
-        try:
-            ray.init(
-                address=f"ray://127.0.0.1:{port}", namespace="bolt-integration-tests"
-            )
-        except Exception:
-            # Class cleanups remove the temporary session, including the server
-            # logs needed to diagnose a failed Ray Client startup in CI.
-            try:
-                logs = Path(cls.cluster.head_node.get_logs_dir_path())
-                for path in sorted(logs.glob("ray_client_server*.err")):
-                    print(
-                        f"\n{path.name}:\n{path.read_text(errors='replace')[-16000:]}",
-                        file=sys.stderr,
-                    )
-            except OSError:
-                pass  # Preserve the original startup error if logs are unavailable.
-            raise
 
     def executor(self):
         return RayExecutor(config=RayExecutionConfig(mode=RayExecutionMode.REMOTE_LEAF))

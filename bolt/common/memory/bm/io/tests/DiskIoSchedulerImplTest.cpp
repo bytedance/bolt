@@ -119,6 +119,19 @@ bool waitUntilCurrentDepth(DiskIoSchedulerImpl& scheduler, uint32_t expected) {
   return false;
 }
 
+bool waitUntilBackendSubmitCalls(
+    DiskIoSchedulerImpl& scheduler,
+    uint64_t expected) {
+  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (scheduler.stats().backendSubmitCalls >= expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return false;
+}
+
 void submitBalancedRequests(
     DiskIoSchedulerImpl& scheduler,
     std::vector<std::future<IoResult>>& futures,
@@ -272,8 +285,13 @@ class BusyOnceBackend : public IoBackend {
       override {
     submittedRequestId_ = requestId;
     priority_ = request.priority;
-    ++submitAttempts_;
-    if (submitAttempts_.load() == 1) {
+    uint64_t submitAttempts;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      submitAttempts = ++submitAttempts_;
+    }
+    cv_.notify_all();
+    if (submitAttempts == 1) {
       return BackendSubmitStatus::RetryableBusy;
     }
     submitted_ = true;
@@ -292,8 +310,18 @@ class BusyOnceBackend : public IoBackend {
     return completions;
   }
 
+  bool waitUntilSubmitAttempts(
+      uint64_t expected,
+      std::chrono::steady_clock::duration timeout = kFutureTimeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, expected] {
+      return submitAttempts_ >= expected;
+    });
+  }
+
   uint64_t submitAttempts() const {
-    return submitAttempts_.load();
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submitAttempts_;
   }
 
   IoPriority priority() const {
@@ -305,7 +333,9 @@ class BusyOnceBackend : public IoBackend {
   }
 
  private:
-  std::atomic<uint64_t> submitAttempts_{0};
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  uint64_t submitAttempts_{0};
   uint64_t submittedRequestId_{0};
   IoPriority priority_{IoPriority::Medium};
   bool submitted_{false};
@@ -313,8 +343,16 @@ class BusyOnceBackend : public IoBackend {
   EventFd completionEvent_;
 };
 
-class AlwaysBusyBackend : public IoBackend {
+class ControlledAlwaysBusyBackend : public IoBackend {
  public:
+  ControlledAlwaysBusyBackend(
+      uint64_t blockedReapCall,
+      uint64_t allowedSubmitAttempts,
+      bool blockAndFailFirstSubmit = false)
+      : blockedReapCall_(blockedReapCall),
+        allowedSubmitAttempts_(allowedSubmitAttempts),
+        blockAndFailFirstSubmit_(blockAndFailFirstSubmit) {}
+
   int completionFd() const override {
     return completionEvent_.fd();
   }
@@ -322,21 +360,110 @@ class AlwaysBusyBackend : public IoBackend {
   BackendSubmitStatus submit(
       uint64_t /*requestId*/,
       const IoRequest& /*request*/) override {
-    ++submitAttempts_;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (blockAndFailFirstSubmit_ && !blockedSubmitEntered_) {
+      blockedSubmitEntered_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [this] { return allowBlockedSubmitReturn_; });
+      return BackendSubmitStatus::Failed;
+    }
+    const auto nextSubmitAttempt = submitAttempts_ + 1;
+    if (nextSubmitAttempt > allowedSubmitAttempts_ ||
+        (nextSubmitAttempt == explicitlyPermittedSubmitAttempt_ &&
+         reapCalls_ < minimumReapCallsForPermittedSubmit_)) {
+      ++unexpectedSubmitAttempts_;
+    }
+    submitAttempts_ = nextSubmitAttempt;
+    lock.unlock();
+    cv_.notify_all();
     return BackendSubmitStatus::RetryableBusy;
   }
 
   std::vector<BackendCompletion> reap() override {
+    std::unique_lock<std::mutex> lock(mutex_);
     completionEvent_.drainNonBlocking();
+    const auto reapCall = ++reapCalls_;
+    cv_.notify_all();
+    if (reapCall == blockedReapCall_) {
+      cv_.wait(lock, [this] { return allowBlockedReapReturn_; });
+    }
     return {};
   }
 
+  bool waitUntilReapCalls(uint64_t expected) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, kFutureTimeout, [this, expected] {
+      return reapCalls_ >= expected;
+    });
+  }
+
+  void unblockBlockedReap() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      allowBlockedReapReturn_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  bool waitUntilBlockedSubmitEntered() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(
+        lock, kFutureTimeout, [this] { return blockedSubmitEntered_; });
+  }
+
+  void unblockBlockedSubmit() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      allowBlockedSubmitReturn_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  bool waitUntilSubmitAttempts(
+      uint64_t expected,
+      std::chrono::steady_clock::duration timeout = kFutureTimeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, expected] {
+      return submitAttempts_ >= expected;
+    });
+  }
+
   uint64_t submitAttempts() const {
-    return submitAttempts_.load();
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submitAttempts_;
+  }
+
+  uint64_t unexpectedSubmitAttempts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return unexpectedSubmitAttempts_;
+  }
+
+  void permitAndWakeNextSubmit() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++allowedSubmitAttempts_;
+    explicitlyPermittedSubmitAttempt_ = allowedSubmitAttempts_;
+    minimumReapCallsForPermittedSubmit_ = reapCalls_ + 1;
+    // Keep the permit and eventfd notification in one critical section. A
+    // permitted backend submit must observe both this wakeup and the later
+    // reap that consumes it, rather than an iteration that was already
+    // spinning before the wakeup.
+    completionEvent_.notify();
   }
 
  private:
-  std::atomic<uint64_t> submitAttempts_{0};
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  const uint64_t blockedReapCall_;
+  bool allowBlockedReapReturn_{false};
+  uint64_t allowedSubmitAttempts_;
+  const bool blockAndFailFirstSubmit_;
+  bool blockedSubmitEntered_{false};
+  bool allowBlockedSubmitReturn_{false};
+  uint64_t explicitlyPermittedSubmitAttempt_{0};
+  uint64_t minimumReapCallsForPermittedSubmit_{0};
+  uint64_t reapCalls_{0};
+  uint64_t submitAttempts_{0};
+  uint64_t unexpectedSubmitAttempts_{0};
   EventFd completionEvent_;
 };
 
@@ -765,15 +892,7 @@ TEST(DiskIoSchedulerImplTest, retryableBackendBusyDoesNotFailRequest) {
   DiskIoSchedulerImpl scheduler(DiskIoSchedulerConfig{}, std::move(backend));
 
   auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
-  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
-  while (backendPtr->submitAttempts() < 1 &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  ASSERT_EQ(1, backendPtr->submitAttempts());
-  EXPECT_EQ(
-      std::future_status::timeout,
-      future.wait_for(std::chrono::milliseconds(10)));
+  ASSERT_TRUE(backendPtr->waitUntilSubmitAttempts(1));
 
   backendPtr->wake();
   ASSERT_TRUE(waitUntilReady(future));
@@ -794,25 +913,80 @@ TEST(DiskIoSchedulerImplTest, retryableBackendBusyDoesNotFailRequest) {
 
 TEST(
     DiskIoSchedulerImplTest,
-    retryableBackendBusyWaitsForWakeupBeforeRetrying) {
-  auto backend = std::make_unique<AlwaysBusyBackend>();
+    retryableBackendBusyWaitsForNewWakeupBeforeRetrying) {
+  auto backend = std::make_unique<ControlledAlwaysBusyBackend>(0, 1, true);
   auto* backendPtr = backend.get();
   auto scheduler = std::make_unique<DiskIoSchedulerImpl>(
       DiskIoSchedulerConfig{}, std::move(backend));
 
-  auto future = scheduler->submit(makeValidRequest(IoPriority::Low));
-  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
-  while (backendPtr->submitAttempts() < 1 &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  // Block a dummy request after the scheduler has collected its dispatch
+  // batch. The target request submitted while the worker is blocked cannot be
+  // part of that batch, and its wakeup is fully written before the worker is
+  // released.
+  auto dummyFuture = scheduler->submit(makeValidRequest(IoPriority::Low));
+  const auto blockedSubmitEntered = backendPtr->waitUntilBlockedSubmitEntered();
+  if (!blockedSubmitEntered) {
+    backendPtr->unblockBlockedSubmit();
   }
-  ASSERT_EQ(1, backendPtr->submitAttempts());
+  ASSERT_TRUE(blockedSubmitEntered);
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto future = scheduler->submit(makeValidRequest(IoPriority::Low));
+  backendPtr->unblockBlockedSubmit();
+
+  ASSERT_TRUE(backendPtr->waitUntilSubmitAttempts(1));
+  ASSERT_TRUE(waitUntilBackendSubmitCalls(*scheduler, 2));
   EXPECT_EQ(1, backendPtr->submitAttempts());
+  EXPECT_EQ(0, backendPtr->unexpectedSubmitAttempts());
   EXPECT_EQ(
       std::future_status::timeout,
       future.wait_for(std::chrono::milliseconds(0)));
+
+  backendPtr->permitAndWakeNextSubmit();
+  ASSERT_TRUE(backendPtr->waitUntilSubmitAttempts(2));
+  ASSERT_TRUE(waitUntilBackendSubmitCalls(*scheduler, 3));
+  EXPECT_EQ(2, backendPtr->submitAttempts());
+  EXPECT_EQ(0, backendPtr->unexpectedSubmitAttempts());
+
+  ASSERT_TRUE(waitUntilReady(dummyFuture));
+  EXPECT_EQ(IoErrorCode::BackendSubmitFailed, dummyFuture.get().error);
+
+  scheduler.reset();
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+  EXPECT_EQ(0, result.bytes);
+  EXPECT_EQ(IoErrorCode::Shutdown, result.error);
+}
+
+TEST(
+    DiskIoSchedulerImplTest,
+    pendingSubmitWakeupRetriesBusyRequestOnceWithoutSpinning) {
+  auto backend = std::make_unique<ControlledAlwaysBusyBackend>(1, 2);
+  auto* backendPtr = backend.get();
+  auto scheduler = std::make_unique<DiskIoSchedulerImpl>(
+      DiskIoSchedulerConfig{}, std::move(backend));
+
+  const auto enteredFirstReap = backendPtr->waitUntilReapCalls(1);
+  if (!enteredFirstReap) {
+    backendPtr->unblockBlockedReap();
+  }
+  ASSERT_TRUE(enteredFirstReap);
+
+  auto future = scheduler->submit(makeValidRequest(IoPriority::Low));
+  backendPtr->unblockBlockedReap();
+
+  ASSERT_TRUE(backendPtr->waitUntilSubmitAttempts(2));
+  ASSERT_TRUE(waitUntilBackendSubmitCalls(*scheduler, 2));
+  EXPECT_EQ(2, backendPtr->submitAttempts());
+  EXPECT_EQ(0, backendPtr->unexpectedSubmitAttempts());
+  EXPECT_EQ(
+      std::future_status::timeout,
+      future.wait_for(std::chrono::milliseconds(0)));
+
+  backendPtr->permitAndWakeNextSubmit();
+  ASSERT_TRUE(backendPtr->waitUntilSubmitAttempts(3));
+  ASSERT_TRUE(waitUntilBackendSubmitCalls(*scheduler, 3));
+  EXPECT_EQ(3, backendPtr->submitAttempts());
+  EXPECT_EQ(0, backendPtr->unexpectedSubmitAttempts());
 
   scheduler.reset();
   ASSERT_TRUE(waitUntilReady(future));

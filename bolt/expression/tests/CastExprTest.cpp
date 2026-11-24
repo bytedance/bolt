@@ -2237,6 +2237,18 @@ TEST_F(CastExprTest, boolToDecimal) {
 TEST_F(CastExprTest, varcharToDecimal) {
   testCast(
       makeFlatVector<StringView>(
+          {"0E-211", "1E-211", "-1E-211", "0E-2147483648", "1E-2147483648"}),
+      makeFlatVector<int128_t>({0, 0, 0, 0, 0}, DECIMAL(24, 6)));
+
+  testTryCast<std::string, int128_t>(
+      "decimal(24, 6)",
+      {"1E211", "1E2147483647"},
+      {std::nullopt, std::nullopt},
+      VARCHAR(),
+      DECIMAL(24, 6));
+
+  testCast(
+      makeFlatVector<StringView>(
           {"9999999999.99",
            "15",
            "1.5",

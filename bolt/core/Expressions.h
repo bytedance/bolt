@@ -94,14 +94,7 @@ class ConstantTypedExpr : public ITypedExpr {
     return value_.toJson(type());
   }
 
-  size_t localHash() const override {
-    static const size_t kBaseHash =
-        std::hash<const char*>()("ConstantTypedExpr");
-
-    return bits::hashMix(
-        kBaseHash,
-        hasValueVector() ? valueVector_->hashValueAt(0) : value_.hash());
-  }
+  size_t localHash() const override;
 
   bool hasValueVector() const {
     return valueVector_ != nullptr;
@@ -143,26 +136,7 @@ class ConstantTypedExpr : public ITypedExpr {
     }
   }
 
-  bool equals(const ITypedExpr& other) const {
-    const auto* casted = dynamic_cast<const ConstantTypedExpr*>(&other);
-    if (!casted) {
-      return false;
-    }
-
-    if (*this->type() != *casted->type()) {
-      return false;
-    }
-
-    if (this->hasValueVector() != casted->hasValueVector()) {
-      return false;
-    }
-
-    if (this->hasValueVector()) {
-      return this->valueVector_->equalValueAt(casted->valueVector_.get(), 0, 0);
-    }
-
-    return this->value_ == casted->value_;
-  }
+  bool equals(const ITypedExpr& other) const;
 
   bool operator==(const ITypedExpr& other) const final {
     return this->equals(other);

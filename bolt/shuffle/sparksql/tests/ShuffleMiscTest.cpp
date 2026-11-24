@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
+#include <arrow/memory_pool.h>
 #include <numeric>
 
 #include "bolt/row/CompactRow.h"
@@ -26,6 +27,45 @@
 namespace bytedance::bolt::shuffle::sparksql::test {
 
 class ShuffleMiscTest : public ShuffleTestBase {};
+
+TEST(ArrowBufferSliceTest, RetainsParentAndManager) {
+  arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+  std::shared_ptr<arrow::ResizableBuffer> parent =
+      arrow::AllocateResizableBuffer(16, &pool).ValueOrDie();
+  std::iota(parent->mutable_data(), parent->mutable_data() + 16, uint8_t{0});
+  auto manager = parent->memory_manager();
+  std::weak_ptr<arrow::Buffer> weakParent = parent;
+  auto* data = parent->data();
+
+  auto slice = sliceBufferWithParentManager(parent, 4, 8);
+  EXPECT_EQ(slice->data(), data + 4);
+  EXPECT_EQ(slice->size(), 8);
+  EXPECT_EQ(slice->memory_manager(), manager);
+  EXPECT_EQ(slice->parent(), parent);
+
+  parent.reset();
+  EXPECT_FALSE(weakParent.expired());
+  EXPECT_EQ(slice->data()[0], 4);
+  EXPECT_EQ(slice->data()[7], 11);
+  slice.reset();
+  EXPECT_TRUE(weakParent.expired());
+}
+
+TEST(ArrowBufferSliceTest, PreservesWriterCapacityRange) {
+  arrow::ProxyMemoryPool pool(arrow::default_memory_pool());
+  std::shared_ptr<arrow::ResizableBuffer> parent =
+      arrow::AllocateResizableBuffer(4, &pool).ValueOrDie();
+  ASSERT_TRUE(parent->Reserve(64).ok());
+  std::iota(parent->mutable_data(), parent->mutable_data() + 32, uint8_t{0});
+
+  auto slice = sliceBufferWithParentManager(parent, 8, 24);
+  EXPECT_EQ(parent->size(), 4);
+  EXPECT_EQ(slice->size(), 24);
+  EXPECT_EQ(slice->data(), parent->data() + 8);
+  EXPECT_EQ(slice->memory_manager(), parent->memory_manager());
+  EXPECT_EQ(slice->data()[0], 8);
+  EXPECT_EQ(slice->data()[23], 31);
+}
 
 namespace {
 

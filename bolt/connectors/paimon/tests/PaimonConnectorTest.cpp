@@ -25,6 +25,7 @@
 #include <paimon/table/source/plan.h>
 #include <paimon/table/source/table_scan.h>
 #include <cstdlib>
+#include <numeric>
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
@@ -51,6 +52,22 @@ std::string pythonExecutableForTests() {
   return python != nullptr && python[0] != '\0' ? python : "python3";
 }
 
+bool isPypaimonAvailable() {
+  try {
+    folly::Subprocess process(
+        {pythonExecutableForTests(), "-c", "import pypaimon"},
+        folly::Subprocess::Options()
+            .usePath()
+            .stdoutFd(folly::Subprocess::DEV_NULL)
+            .stderrFd(folly::Subprocess::DEV_NULL));
+    const auto status = process.wait();
+    return status.exited() && status.exitStatus() == 0;
+  } catch (const folly::SubprocessSpawnError& e) {
+    LOG(WARNING) << "Failed to run Python for Paimon tests: " << e.what();
+    return false;
+  }
+}
+
 } // namespace
 
 class PaimonConnectorTest
@@ -58,6 +75,10 @@ class PaimonConnectorTest
  protected:
   static void SetUpTestCase() {
     filesystems::registerLocalFileSystem();
+    CHECK(isPypaimonAvailable())
+        << "Python package pypaimon is required to create Paimon test tables. "
+        << "Install it with: " << pythonExecutableForTests()
+        << " -m pip install pypaimon==1.4.2";
 
     // Create a temporary directory for the test
     tempDir_ = exec::test::TempDirectoryPath::create();
@@ -269,6 +290,102 @@ TEST_F(PaimonConnectorTest, ReturnedVectorsCanOutliveReaderEof) {
 
   ASSERT_FALSE(outputs.empty());
   outputs.clear();
+  const auto stats = dataSource.runtimeStats();
+  ASSERT_TRUE(stats.contains("skippedStrides"));
+  ASSERT_TRUE(stats.contains("processedStrides"));
+  EXPECT_EQ(stats.at("skippedStrides").value, 0);
+  EXPECT_GT(stats.at("processedStrides").value, 0);
+  EXPECT_GT(stats.at("rawBytesRead").value, 0);
+  EXPECT_EQ(stats.at("rawBytesRead").unit, RuntimeCounter::Unit::kBytes);
+  EXPECT_EQ(dataSource.getCompletedBytes(), stats.at("rawBytesRead").value);
+  // Only export metrics already collected by the original reading path.
+  for (const auto* name :
+       {"processedSplits",
+        "skippedSplits",
+        "skippedSplitBytes",
+        "numStorageRead",
+        "storageReadBytes",
+        "ioWaitNanosSync",
+        "ioWaitNanosAsync",
+        "maxSingleIoWaitNanos",
+        "queryThreadIoLatency",
+        "decompressDataTime",
+        "decodeTime",
+        "totalPages",
+        "filteredOutPages",
+        "flattenStringDictionaryValues"}) {
+    EXPECT_FALSE(stats.contains(name)) << name;
+  }
+
+  EXPECT_EQ(stats.at("totalMergeTime").value, 0);
+  EXPECT_EQ(stats.at("totalMergeTime").unit, RuntimeCounter::Unit::kNanos);
+  ASSERT_TRUE(stats.contains("ioWaitWallNanos"));
+  for (const auto* name :
+       {"totalScanTime",
+        "loadMetaDataTime",
+        "totalRemainingFilterTime",
+        "ioWaitWallNanos"}) {
+    EXPECT_EQ(stats.at(name).unit, RuntimeCounter::Unit::kNanos);
+    EXPECT_GE(stats.at(name).value, 0);
+  }
+  EXPECT_EQ(stats.at("overreadBytes").unit, RuntimeCounter::Unit::kBytes);
+  const auto bytes = dataSource.getCompletedBytesReads();
+  const auto counts = dataSource.getCompletedCntReads();
+  const auto times = dataSource.getCompletedScanTimeReads();
+  ASSERT_EQ(bytes.size(), 4);
+  ASSERT_EQ(counts.size(), 4);
+  ASSERT_EQ(times.size(), 4);
+  EXPECT_EQ(
+      std::accumulate(bytes.begin(), bytes.end(), uint64_t{0}),
+      dataSource.getCompletedBytes());
+  EXPECT_GT(std::accumulate(counts.begin(), counts.end(), uint64_t{0}), 0);
+  EXPECT_EQ(
+      std::accumulate(times.begin(), times.end(), uint64_t{0}),
+      stats.at("totalScanTime").value);
+  size_t bucket = 0;
+  for (const auto* suffix : {"<4k", "<32k", "<128k", ">=128k"}) {
+    for (const auto& [prefix, values] :
+         {std::pair{"rawBytesRead", &bytes},
+          std::pair{"cntRead", &counts},
+          std::pair{"totalTimeRead", &times}}) {
+      const auto name = std::string(prefix) + suffix;
+      ASSERT_TRUE(stats.contains(name)) << name;
+      EXPECT_EQ(stats.at(name).value, values->at(bucket));
+      EXPECT_EQ(
+          stats.at(name).unit,
+          prefix == std::string("rawBytesRead") ? RuntimeCounter::Unit::kBytes
+              : prefix == std::string("totalTimeRead")
+              ? RuntimeCounter::Unit::kNanos
+              : RuntimeCounter::Unit::kNone);
+    }
+    ++bucket;
+  }
+
+  // EOF and repeated snapshots must not add the same file's counters again.
+  EXPECT_EQ(dataSource.next(1, future).value(), nullptr);
+  EXPECT_EQ(
+      dataSource.runtimeStats().at("processedStrides").value,
+      stats.at("processedStrides").value);
+  EXPECT_EQ(dataSource.getCompletedBytesReads(), bytes);
+  EXPECT_EQ(dataSource.getCompletedCntReads(), counts);
+  EXPECT_EQ(dataSource.getCompletedScanTimeReads(), times);
+
+  // A new reader on the same DataSource accumulates independently.
+  for (const auto& split : makeConnectorSplits(paimonPlan, paimonPool)) {
+    dataSource.addSplit(split);
+  }
+  while (dataSource.next(1, future).value()) {
+  }
+  EXPECT_EQ(
+      dataSource.runtimeStats().at("processedStrides").value,
+      2 * stats.at("processedStrides").value);
+  EXPECT_EQ(dataSource.getCompletedBytes(), 2 * stats.at("rawBytesRead").value);
+  const auto repeatedBytes = dataSource.getCompletedBytesReads();
+  const auto repeatedCounts = dataSource.getCompletedCntReads();
+  for (size_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(repeatedBytes[i], 2 * bytes[i]);
+    EXPECT_EQ(repeatedCounts[i], 2 * counts[i]);
+  }
 }
 
 TEST_F(
@@ -1094,7 +1211,20 @@ TEST_F(PaimonConnectorTest, UnsupportedFilterIsAppliedAsRemainingFilter) {
   createDuckDbTable("tmp", {allRows});
 
   auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
-  assertQuery(plan, connectorSplits, "SELECT c0 FROM tmp WHERE c0 + 1 = 3");
+  auto task =
+      assertQuery(plan, connectorSplits, "SELECT c0 FROM tmp WHERE c0 + 1 = 3");
+  bool foundScan = false;
+  for (const auto& pipeline : task->taskStats().pipelineStats) {
+    for (const auto& op : pipeline.operatorStats) {
+      if (op.operatorType == "TableScan") {
+        foundScan = true;
+        const auto& time = op.runtimeStats.at("totalRemainingFilterTime");
+        EXPECT_EQ(time.unit, RuntimeCounter::Unit::kNanos);
+        EXPECT_GT(time.sum, 0);
+      }
+    }
+  }
+  EXPECT_TRUE(foundScan);
 }
 
 TEST_F(

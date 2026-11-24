@@ -1393,6 +1393,85 @@ class MinMaxByNTest : public AggregationTestBase {
   }
 };
 
+TEST_F(MinMaxByNTest, encodedIntermediateRows) {
+  for (bool constantArrays : {false, true}) {
+    for (bool constantRow : {false, true}) {
+      for (bool sparseMask : {false, true}) {
+        for (bool nullValue : {false, true}) {
+          SCOPED_TRACE(fmt::format(
+              "constantArrays={}, constantRow={}, sparseMask={}, nullValue={}",
+              constantArrays,
+              constantRow,
+              sparseMask,
+              nullValue));
+          auto values = makeNullableArrayVector<int64_t>(
+              {{-1000},
+               {10, nullValue ? std::nullopt : std::optional<int64_t>(20)},
+               {500, 600},
+               {99}});
+          auto comparisons =
+              makeArrayVector<int64_t>({{4, 1}, {100}, {200}, {300}});
+          VectorPtr encodedValues;
+          VectorPtr encodedComparisons;
+          if (constantArrays) {
+            encodedValues = BaseVector::wrapInConstant(4, 1, values);
+            encodedComparisons = BaseVector::wrapInConstant(4, 0, comparisons);
+          } else {
+            encodedValues = wrapInDictionary(
+                makeIndices({0, 1, 2, 3}),
+                4,
+                wrapInDictionary(makeIndices({3, 3, 1, 3}), 4, values));
+            encodedComparisons = wrapInDictionary(
+                makeIndices({0, 1, 2, 3}),
+                4,
+                wrapInDictionary(makeIndices({1, 1, 0, 1}), 4, comparisons));
+          }
+          auto intermediate = makeRowVector({
+              makeConstant<int64_t>(2, 4),
+              encodedComparisons,
+              encodedValues,
+          });
+
+          // The value and comparison arrays use different base rows and
+          // offsets.
+          const vector_size_t size = sparseMask ? 4 : 1;
+          VectorPtr encodedRows;
+          if (constantRow) {
+            encodedRows = BaseVector::wrapInConstant(size, 2, intermediate);
+          } else {
+            encodedRows = wrapInDictionary(
+                makeIndices(size, [](auto) { return 2; }), size, intermediate);
+          }
+          auto data = makeRowVector({
+              makeConstant<int64_t>(7, size),
+              encodedRows,
+              makeFlatVector<bool>(
+                  size, [&](auto row) { return !sparseMask || row == 3; }),
+          });
+
+          for (bool grouped : {false, true}) {
+            auto plan = PlanBuilder()
+                            .values({data})
+                            .finalAggregation(
+                                grouped ? std::vector<std::string>{"c0"}
+                                        : std::vector<std::string>{},
+                                {"min_by(c1) FILTER (WHERE c2)",
+                                 "max_by(c1) FILTER (WHERE c2)"},
+                                {{BIGINT(), BIGINT(), BIGINT()},
+                                 {BIGINT(), BIGINT(), BIGINT()}})
+                            .planNode();
+            const auto results =
+                nullValue ? "[NULL, 10], [10, NULL]" : "[20, 10], [10, 20]";
+            assertQuery(
+                plan,
+                fmt::format("SELECT {}{}", grouped ? "7, " : "", results));
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_F(MinMaxByNTest, global) {
   // DuckDB doesn't support 3-argument versions of min_by and max_by.
 

@@ -26,6 +26,7 @@
 #include <unordered_map>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortRunStorage.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
@@ -129,7 +130,11 @@ void buildMetadata(
     metadata.children.reserve(type->size());
     for (uint32_t child = 0; child < type->size(); ++child) {
       RadixSortKeyColumn childMetadata;
-      buildMetadata(type->childAt(child), flags, childMetadata);
+      auto childFlags = flags;
+      if (kSparkCompatible && type->kind() == TypeKind::MAP) {
+        childFlags.nullsFirst = flags.ascending;
+      }
+      buildMetadata(type->childAt(child), childFlags, childMetadata);
       metadata.containsFloatingPoint |= childMetadata.containsFloatingPoint;
       metadata.children.push_back(std::move(childMetadata));
     }
@@ -721,15 +726,16 @@ uint64_t encodedMapSize(
       count,
       keyMetadata,
       decodedVectors);
-  return 1 + keysSize + 1 +
+  // Spark: validity + uint32 cardinality + alternating keys/values.
+  // Presto: validity + key array delimiter + value array delimiter.
+  return 1 + keysSize + (kSparkCompatible ? sizeof(uint32_t) : 2) +
       encodedRangeSize(
              column.children[1],
              *map.mapValues(),
              offset,
              count,
              valueMetadata,
-             decodedVectors) +
-      1;
+             decodedVectors);
 }
 
 uint64_t encodedRowSize(
@@ -1364,6 +1370,26 @@ void encodeValue(
           const auto indexAt = [&](vector_size_t entry) {
             return indices == nullptr ? first + entry : indices[entry];
           };
+          if (kSparkCompatible) {
+            encodeUnsigned<uint32_t>(count, output + offset, descending);
+            offset += sizeof(uint32_t);
+            for (vector_size_t entry = 0; entry < count; ++entry) {
+              for (uint32_t child = 0; child < 2; ++child) {
+                uint64_t childWritten;
+                encodeValue(
+                    column.children[child],
+                    child == 0 ? *mapVector->mapKeys()
+                               : *mapVector->mapValues(),
+                    indexAt(entry),
+                    output + offset,
+                    childWritten,
+                    mapIndices,
+                    decodedVectors);
+                addWritten(offset, childWritten);
+              }
+            }
+            return;
+          }
           for (vector_size_t entry = 0; entry < count; ++entry) {
             uint64_t childWritten;
             encodeValue(
@@ -2156,6 +2182,8 @@ void decodeUnsigned(EncodedKeyReader& reader, bool descending, T& value) {
   }
   value = fromBigEndian(encoded);
 }
+
+void skipValue(const RadixSortKeyColumn& column, EncodedKeyReader& reader);
 
 template <typename T>
 void decodeSigned(EncodedKeyReader& reader, bool descending, T& value) {
@@ -2955,6 +2983,31 @@ void decodeValue(
     auto* mapResult = result->as<MapVector>();
     result->setNull(row, false);
     const auto start = mapResult->mapKeys()->size();
+    if (kSparkCompatible) {
+      uint32_t count;
+      reader.checkedSkip(0); // Validate the cursor before reading cardinality.
+      BOLT_CHECK_GE(reader.remaining(), sizeof(uint32_t));
+      decodeUnsigned(reader, descending, count);
+      BOLT_CHECK_LE(count, std::numeric_limits<vector_size_t>::max() - start);
+      // Each entry needs at least two validity markers. Validate all child
+      // payloads before growing vectors from an untrusted encoded count.
+      BOLT_CHECK_LE(count, reader.remaining() / 2);
+      auto scan = reader;
+      for (uint32_t entry = 0; entry < count; ++entry) {
+        skipValue(column.children[0], scan);
+        skipValue(column.children[1], scan);
+      }
+      mapResult->mapKeys()->resize(start + count);
+      mapResult->mapValues()->resize(start + count);
+      for (uint32_t entry = 0; entry < count; ++entry) {
+        decodeValue(
+            column.children[0], reader, mapResult->mapKeys(), start + entry);
+        decodeValue(
+            column.children[1], reader, mapResult->mapValues(), start + entry);
+      }
+      mapResult->setOffsetAndSize(row, start, count);
+      return;
+    }
     vector_size_t count = 0;
     const auto encodedDelimiter =
         descending ? static_cast<uint8_t>(~kStringDelimiter) : kStringDelimiter;
@@ -3645,6 +3698,17 @@ void skipValue(const RadixSortKeyColumn& column, EncodedKeyReader& reader) {
       }
     }
     case TypeKind::MAP: {
+      if (kSparkCompatible) {
+        reader.checkedSkip(0);
+        BOLT_CHECK_GE(reader.remaining(), sizeof(uint32_t));
+        uint32_t count;
+        decodeUnsigned(reader, descending, count);
+        for (uint32_t entry = 0; entry < count; ++entry) {
+          skipValue(column.children[0], reader);
+          skipValue(column.children[1], reader);
+        }
+        return;
+      }
       const auto delimiter = descending
           ? static_cast<uint8_t>(~kStringDelimiter)
           : kStringDelimiter;
@@ -3967,6 +4031,30 @@ int32_t compareEncodedMap(
     return 0;
   }
   BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
+  if (kSparkCompatible) {
+    const bool descending = !column.flags.ascending;
+    left.checkedSkip(0);
+    right.checkedSkip(0);
+    BOLT_CHECK_GE(left.remaining(), sizeof(uint32_t));
+    BOLT_CHECK_GE(right.remaining(), sizeof(uint32_t));
+    uint32_t leftCount;
+    uint32_t rightCount;
+    decodeUnsigned(left, descending, leftCount);
+    decodeUnsigned(right, descending, rightCount);
+    if (leftCount != rightCount) {
+      const auto result = (leftCount > rightCount) - (leftCount < rightCount);
+      return descending ? -result : result;
+    }
+    for (uint32_t entry = 0; entry < leftCount; ++entry) {
+      for (const auto& child : column.children) {
+        const auto result = child.encodedComparator(child, left, right);
+        if (result != 0) {
+          return result;
+        }
+      }
+    }
+    return 0;
+  }
   const uint8_t delimiter = column.flags.ascending ? uint8_t{0} : uint8_t{255};
   uint64_t count = 0;
   const auto& key = column.children[0];

@@ -26,7 +26,7 @@
 #   # Show all supported options.
 #   python3 scripts/configure-conan-profile.py --help
 #
-#   # Configure the default profile using an automatically selected toolchain.
+#   # Configure build-profile and host-profile using an automatically selected toolchain.
 #   python3 scripts/configure-conan-profile.py
 #
 # Default toolchain selection:
@@ -38,11 +38,14 @@
 # | Other platforms with only Clang | Highest-version Clang | libc++ | lld |
 # | Other platforms with GCC but no Clang | Highest-version GCC | libstdc++11 | ld |
 #
-# Explicit --compiler, --libcxx, and --linker options override these defaults.
+# --compiler clang selects the highest-version usable Clang on PATH.
+# Versioned compiler names and paths select that specific compiler.
+# Explicit --libcxx and --linker options override these defaults.
 # Use --linker ld to select the compiler-default linker without adding a
-# -fuse-ld flag.
-# The selected profile is deleted and regenerated from scratch; profiles with
-# other names are left unchanged.
+# linker-selection flag.
+# The selected profile is regenerated from scratch and atomically replaced after
+# generation succeeds. Preparation, generation or replacement failures leave the
+# original profile intact; profiles with other names are left unchanged.
 #
 #   # Configure a named profile for Clang 18, libc++, and ThinLTO.
 #   python3 scripts/configure-conan-profile.py \
@@ -65,7 +68,7 @@
 #       --extra-link-flags="-Wl,--as-needed" \
 #       --libc gnu --libc-version 2.17
 #
-#   # Only add os.libc/os.libc_version to settings_user.yml.
+#   # Configure settings_user.yml and the source cache without updating a profile.
 #   python3 scripts/configure-conan-profile.py --skip-profile
 #
 #   # Use a converted perf profile (use instrumentation for merged .profraw data).
@@ -76,18 +79,21 @@ import argparse
 import ast
 import hashlib
 import os
+import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 
-DEFAULT_PROFILE_NAME = "default"
+DEFAULT_BUILD_PROFILE_NAME = "build-profile"
+DEFAULT_HOST_PROFILE_NAME = "host-profile"
 DEFAULT_LTO = "none"
 CMAKE_VERSION = "3.31.10"
 
@@ -192,20 +198,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         dest="profile_name",
-        default=DEFAULT_PROFILE_NAME,
-        help=f"Conan profile name to replace (default: {DEFAULT_PROFILE_NAME})",
+        help=(
+            "Replace only this named profile; by default, generate build-profile "
+            "and host-profile with PGO applied only to host-profile"
+        ),
     )
     # Use --skip-profile to extend Linux libc settings without requiring installed compilers.
     parser.add_argument(
         "--skip-profile",
         action="store_true",
-        help="Only update settings_user.yml, do not touch any Conan profile",
+        help="Update settings_user.yml and global.conf, do not touch any Conan profile",
     )
     parser.add_argument(
         "--compiler",
         help=(
             "Compiler name or path, for example clang, gcc-12 or "
-            "/opt/compiler/bin/clang (default: auto-detect)"
+            "/opt/compiler/bin/clang (default: auto-detect); "
+            "clang selects the highest-version usable Clang on PATH"
         ),
     )
     # Clang with libstdc++ selects the newest GCC/G++ pair on PATH; --libcxx libc++ skips this.
@@ -236,8 +245,8 @@ def parse_args() -> argparse.Namespace:
         "--linker",
         default=None,
         help=(
-            "Linker for -fuse-ld (default: lld for Clang/Apple Clang, ld otherwise); "
-            "use 'ld' to omit -fuse-ld"
+            "Linker to select (default: lld for Clang/Apple Clang, ld otherwise); "
+            "use 'ld' to omit the linker-selection flag"
         ),
     )
     parser.add_argument(
@@ -306,19 +315,42 @@ def run_command(command: list[str]) -> str:
     ).stdout.strip()
 
 
+def validate_conan_compiler(compiler: CompilerInfo) -> None:
+    # Ask the active Conan installation, including settings_user.yml overrides.
+    # Validate before replacing an existing profile.
+    with tempfile.TemporaryDirectory(prefix="bolt-conan-") as directory:
+        profile = Path(directory) / "compiler"
+        profile.write_text(
+            f"[settings]\ncompiler={compiler.family}\n"
+            f"compiler.version={compiler.version}\n"
+        )
+        result = subprocess.run(
+            ["conan", "profile", "show", "-pr:h", str(profile), "-pr:b", str(profile)],
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode:
+        raise RuntimeError(
+            f"Conan cannot use {compiler.family} {compiler.version}. "
+            "Upgrade Conan (python -m pip install --upgrade conan) or update "
+            "the active Conan settings to support this compiler.\n"
+            f"{result.stderr.strip()}"
+        )
+
+
 def resolve_executable(command: str) -> str:
     if "/" in command:
-        executable = Path(command).expanduser().resolve()
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise RuntimeError(
-                f"Required compiler not found or not executable: {command}"
-            )
-        return str(executable)
+        executable = Path(command).expanduser().absolute()
+    else:
+        found = shutil.which(command)
+        if found is None:
+            raise RuntimeError(f"Required compiler not found: {command}")
+        executable = Path(found)
 
-    executable = shutil.which(command)
-    if executable is None:
-        raise RuntimeError(f"Required compiler not found: {command}")
-    return os.path.abspath(executable)
+    # Preserve argv[0] for C++ drivers and compiler-named wrappers such as ccache.
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(f"Required compiler not found or not executable: {command}")
+    return str(executable.absolute())
 
 
 def compiler_pair_name(compiler: str, family: str) -> str:
@@ -327,26 +359,54 @@ def compiler_pair_name(compiler: str, family: str) -> str:
     pair_stem = stem.replace(family, replacement, 1)
     if "/" not in compiler:
         return pair_stem
-    return str(Path(compiler).expanduser().resolve().parent / pair_stem)
+    return str(Path(compiler).expanduser().absolute().parent / pair_stem)
 
 
-def resolve_compiler_pair(compiler: str, family: str) -> str:
-    candidates = [compiler_pair_name(compiler, family)]
-    generic_pair = "clang++" if family == "clang" else "g++"
-
-    if "/" in compiler:
-        sibling_generic = str(
-            Path(compiler).expanduser().resolve().parent / generic_pair
+def resolve_compiler_pair(
+    compiler: str,
+    family: str,
+    expected: tuple[str, str] | None = None,
+) -> str:
+    executable = Path(resolve_executable(compiler))
+    if expected is None:
+        expected = (
+            detect_clang(str(executable))
+            if family == "clang"
+            else (family, detect_gcc_version(str(executable)))
         )
-        if sibling_generic not in candidates:
-            candidates.append(sibling_generic)
-    elif generic_pair not in candidates:
-        candidates.append(generic_pair)
+    resolved_compiler = executable.resolve()
+    candidates = []
+    generic_pair = "clang++" if family == "clang" else "g++"
+    # Use the selected installation first, but never treat a wrapper as a compiler.
+    if resolved_compiler.name.startswith(family):
+        candidates.extend(
+            [
+                compiler_pair_name(str(resolved_compiler), family),
+                str(resolved_compiler.parent / generic_pair),
+            ]
+        )
+    candidates.extend(
+        [
+            compiler_pair_name(str(executable), family),
+            str(executable.parent / generic_pair),
+            compiler_pair_name(compiler, family),
+            compiler_pair_name(executable.name, family),
+            generic_pair,
+        ]
+    )
+    candidates = list(dict.fromkeys(candidates))
 
     for candidate in candidates:
         try:
-            return resolve_executable(candidate)
-        except RuntimeError:
+            cpp_path = resolve_executable(candidate)
+            actual = (
+                detect_clang(cpp_path)
+                if family == "clang"
+                else (family, detect_gcc_version(cpp_path))
+            )
+            if actual == expected:
+                return cpp_path
+        except (RuntimeError, OSError, subprocess.SubprocessError):
             continue
 
     raise RuntimeError(
@@ -406,19 +466,12 @@ def detect_compiler(compiler: str) -> CompilerInfo:
     compiler_name = Path(compiler).name
     family = "clang" if compiler_name.startswith("clang") else "gcc"
     c_path = resolve_executable(compiler)
-    cpp_path = resolve_compiler_pair(compiler, family)
     if family == "clang":
         c_family, c_version = detect_clang(c_path)
-        cpp_family, cpp_version = detect_clang(cpp_path)
     else:
-        c_family = cpp_family = family
+        c_family = family
         c_version = detect_gcc_version(c_path)
-        cpp_version = detect_gcc_version(cpp_path)
-    if (c_family, c_version) != (cpp_family, cpp_version):
-        raise RuntimeError(
-            f"C compiler {c_path} ({c_family} {c_version}) does not match "
-            f"C++ compiler {cpp_path} ({cpp_family} {cpp_version})"
-        )
+    cpp_path = resolve_compiler_pair(compiler, family, (c_family, c_version))
     return CompilerInfo(
         family=c_family,
         version=c_version,
@@ -443,6 +496,19 @@ def read_profile_lines(profile_file: Path) -> list[str]:
     if not profile_file.exists():
         return []
     return profile_file.read_text().splitlines()
+
+
+def configure_source_download_cache(conan_home: Path) -> None:
+    global_conf = conan_home / "global.conf"
+    text = global_conf.read_text() if global_conf.exists() else ""
+    key = "core.sources:download_cache"
+    if any(line.partition("=")[0].strip() == key for line in text.splitlines()):
+        return
+    cache_path = conan_home.resolve() / "source-backup"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    global_conf.write_text(f"{text}{key}={cache_path}\n")
+    print(f"✅ Configured source download cache: {cache_path}")
 
 
 def update_settings_user_file(settings_user_file: Path) -> None:
@@ -638,7 +704,7 @@ def lto_package_id_entries(
 def toolchain_flag_entries(
     profile_file: Path,
     toolchain_root: Path | None,
-    linker: str | None,
+    linker_flag: str | None,
     lto: str,
     extra_cflags: list[str],
     extra_link_flags: list[str],
@@ -653,6 +719,7 @@ def toolchain_flag_entries(
             for flag in remove_pgo_flags(values)
             if not flag.startswith("--gcc-toolchain=")
             and not flag.startswith("-fuse-ld=")
+            and not flag.startswith("--ld-path=")
             and not flag.startswith("-flto")
         ]
         extra_flags = (
@@ -666,11 +733,11 @@ def toolchain_flag_entries(
             normalized_values.append(pgo.flag)
         if toolchain_root is not None and key == "tools.build:cxxflags":
             normalized_values.append(shlex.quote(f"--gcc-toolchain={toolchain_root}"))
-        if linker and key in (
+        if linker_flag and key in (
             "tools.build:exelinkflags",
             "tools.build:sharedlinkflags",
         ):
-            normalized_values.append(f"-fuse-ld={linker}")
+            normalized_values.append(linker_flag)
         if lto != "none":
             normalized_values.append(f"-flto={lto}")
         entries[key] = repr(normalized_values)
@@ -781,7 +848,14 @@ def discover_apple_clang() -> CompilerInfo:
 def select_compiler_and_libcxx(
     compiler: str | None, libcxx: str | None
 ) -> tuple[CompilerInfo, str]:
-    if compiler is not None:
+    if compiler == "clang":
+        try:
+            compiler_info = discover_latest_clang()
+        except RuntimeError:
+            if sys.platform != "darwin":
+                raise
+            compiler_info = discover_apple_clang()
+    elif compiler is not None:
         compiler_info = detect_compiler(compiler)
     elif sys.platform == "darwin":
         compiler_info = discover_apple_clang()
@@ -837,8 +911,43 @@ def update_selected_profile(
     libc_version: str | None = None,
     pgo: PgoProfile | None = None,
 ) -> None:
-    profile_file.unlink(missing_ok=True)
     profile_file.parent.mkdir(parents=True, exist_ok=True)
+    print(f"🔧 Updating Conan profile: {profile_file}")
+    # Stage on the same filesystem so readers see either the old or full profile.
+    with tempfile.TemporaryDirectory(
+        dir=profile_file.parent, prefix=".bolt-profile-"
+    ) as directory:
+        staged_profile = Path(directory) / "profile"
+        summary = _generate_selected_profile(
+            staged_profile,
+            profile_name,
+            compiler_info,
+            libcxx,
+            lto,
+            linker,
+            extra_cflags,
+            extra_link_flags,
+            libc,
+            libc_version,
+            pgo,
+        )
+        staged_profile.replace(profile_file)
+    print(summary)
+
+
+def _generate_selected_profile(
+    profile_file: Path,
+    profile_name: str,
+    compiler_info: CompilerInfo,
+    libcxx: str,
+    lto: str,
+    linker: str | None,
+    extra_cflags: list[str],
+    extra_link_flags: list[str],
+    libc: str | None,
+    libc_version: str | None,
+    pgo: PgoProfile | None,
+) -> str:
     update_profile_with_libc_template(profile_file, libc, libc_version)
 
     profile_settings = existing_profile_settings(profile_file)
@@ -848,6 +957,12 @@ def update_selected_profile(
         if key not in profile_settings
     }
     compiler_libcxx = normalize_libcxx(libcxx)
+    if is_clang_family(compiler_info.family) and platform.machine().lower().startswith(
+        ("arm", "aarch64")
+    ):
+        extra_link_flags = [*extra_link_flags, "-rtlib=compiler-rt"]
+        if compiler_libcxx == "libstdc++11":
+            extra_link_flags.append("--unwindlib=libgcc")
 
     conf = {
         "tools.build:compiler_executables": repr(
@@ -863,11 +978,20 @@ def update_selected_profile(
         selected_linker = "lld"
     if selected_linker == "ld":
         selected_linker = None
+    linker_flag = None
+    if selected_linker:
+        if (
+            is_clang_family(compiler_info.family)
+            and Path(selected_linker).is_absolute()
+        ):
+            linker_flag = f"--ld-path={selected_linker}"
+        else:
+            linker_flag = f"-fuse-ld={selected_linker}"
     conf.update(
         toolchain_flag_entries(
             profile_file,
             selected_gcc_toolchain.root if selected_gcc_toolchain is not None else None,
-            linker=selected_linker,
+            linker_flag=linker_flag,
             lto=lto if is_clang_family(compiler_info.family) else "none",
             extra_cflags=extra_cflags,
             extra_link_flags=extra_link_flags,
@@ -883,7 +1007,6 @@ def update_selected_profile(
             "RANLIB": resolve_llvm_tool(compiler_info.executables["c"], "llvm-ranlib"),
         }
 
-    print(f"🔧 Updating Conan profile: {profile_file}")
     update_profile_entries(
         profile_file,
         "settings",
@@ -891,7 +1014,7 @@ def update_selected_profile(
             **defaults,
             "compiler": compiler_info.family,
             "compiler.version": compiler_info.version,
-            "compiler.cppstd": "gnu20",
+            "compiler.cppstd": "gnu23",
             "compiler.libcxx": compiler_libcxx,
         },
     )
@@ -923,7 +1046,7 @@ def update_selected_profile(
     summary = (
         f"✅ Profile '{profile_name}' configured for "
         f"{compiler_info.family} {compiler_info.version}, compiler.libcxx={compiler_libcxx}, "
-        "compiler.cppstd=gnu20, absolute compiler paths, "
+        "compiler.cppstd=gnu23, absolute compiler paths, "
         f"CMake {CMAKE_VERSION}, "
         f"os.libc={libc if libc is not None else 'auto-detect'}, "
         f"os.libc_version={libc_version if libc_version is not None else 'auto-detect'}"
@@ -939,7 +1062,7 @@ def update_selected_profile(
         summary += f" with {lto} LTO"
     if pgo is not None:
         summary += f" with {pgo.mode} PGO (SHA-256: {pgo.sha256})"
-    print(summary)
+    return summary
 
 
 def main() -> int:
@@ -969,6 +1092,7 @@ def main() -> int:
             compiler_info, libcxx = select_compiler_and_libcxx(
                 args.compiler, args.libcxx
             )
+            validate_conan_compiler(compiler_info)
         except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             requested_compiler = args.compiler or "an automatically selected compiler"
             print(
@@ -985,6 +1109,7 @@ def main() -> int:
     print(
         "✅ Added Linux settings override to settings_user.yml: os.libc / os.libc_version"
     )
+    configure_source_download_cache(conan_home)
 
     if args.skip_profile:
         print("ℹ️  Skipped profile update by request")
@@ -992,20 +1117,37 @@ def main() -> int:
 
     assert compiler_info is not None
     assert libcxx is not None
-    profile_file = conan_home / "profiles" / args.profile_name
-    update_selected_profile(
-        profile_file,
-        args.profile_name,
-        compiler_info,
-        libcxx,
-        args.lto,
-        args.linker,
-        args.extra_cflags,
-        args.extra_link_flags,
-        libc=args.libc,
-        libc_version=args.libc_version,
-        pgo=args.pgo,
+    profile_names = (
+        [args.profile_name]
+        if args.profile_name
+        else [DEFAULT_BUILD_PROFILE_NAME, DEFAULT_HOST_PROFILE_NAME]
     )
+    for profile_name in profile_names:
+        is_build_profile = profile_name == DEFAULT_BUILD_PROFILE_NAME
+        update_selected_profile(
+            conan_home / "profiles" / profile_name,
+            profile_name,
+            compiler_info,
+            libcxx,
+            args.lto,
+            args.linker,
+            remove_pgo_flags(args.extra_cflags)
+            if is_build_profile
+            else args.extra_cflags,
+            remove_pgo_flags(args.extra_link_flags)
+            if is_build_profile
+            else args.extra_link_flags,
+            libc=args.libc,
+            libc_version=args.libc_version,
+            pgo=None if is_build_profile else args.pgo,
+        )
+    if not args.profile_name:
+        default_profile = conan_home / "profiles" / "default"
+        if not default_profile.exists() and not default_profile.is_symlink():
+            default_profile.symlink_to(DEFAULT_HOST_PROFILE_NAME)
+            print(
+                f"✅ Created Conan profile symlink: {default_profile} -> {DEFAULT_HOST_PROFILE_NAME}"
+            )
     return 0
 
 

@@ -76,6 +76,7 @@ jobs:
         run: |
           conan remote remove ci || true
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Release" \
             -c "bolt/*:tools.build:skip_test=False" \
@@ -86,11 +87,33 @@ jobs:
             -o "bolt/*:enable_perf=True" \
             --build=missing -r=bolt-cci-local
 
+      - name: Install Python Release dependency graph
+        if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Release') }}
+        shell: bash
+        env:
+          BOLT_TEST_LINKAGE: static
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-dev
+
+          # Match the Python wheel dependency graph in bolt_build_backend.py.
+          conan install . \
+            -pr:h host-profile -pr:b build-profile \
+            -s "build_type=Release" \
+            -s "&:build_type=Release" \
+            -o "&:python_bind=True" \
+            -o "&:enable_testutil=True" \
+            -o "&:enable_jit=False" \
+            -o "&:spark_compatible=False" \
+            -o "&:shared=False" \
+            --build=missing -r=bolt-cci-local
+
       - name: Install Debug dependency graph
         if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}
         shell: bash
         run: |
           conan install . \
+            -pr:h host-profile -pr:b build-profile \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Debug" \
             -c "bolt/*:tools.build:skip_test=False" \

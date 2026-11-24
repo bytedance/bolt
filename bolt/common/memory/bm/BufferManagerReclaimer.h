@@ -43,6 +43,8 @@ class BufferManagerReclaimer final : public memory::MemoryReclaimer {
       uint64_t maxWaitMs,
       Stats& stats) override;
 
+  void abort(MemoryPool* pool, const std::exception_ptr& error) override;
+
  private:
   std::weak_ptr<BufferManager> manager_;
   std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer_;

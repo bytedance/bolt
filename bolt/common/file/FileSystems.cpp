@@ -314,7 +314,7 @@ class LocalFileSystem : public FileSystem {
   static std::function<std::shared_ptr<
       FileSystem>(std::shared_ptr<const config::ConfigBase>, std::string_view)>
   fileSystemGenerator(const FileSystemOptions& options) {
-    return [&options](
+    return [options](
                std::shared_ptr<const config::ConfigBase> properties,
                std::string_view filePath) {
       // One instance of Local FileSystem is sufficient.

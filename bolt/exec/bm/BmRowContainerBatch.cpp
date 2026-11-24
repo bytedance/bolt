@@ -284,8 +284,11 @@ void BmRowContainer::storeFixedColumnBatchRangesNoNullsTyped(
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
     const auto rowStride = segments_.rowStride();
+    // Boolean vectors are bit-packed, including identity-mapped inputs.
     const auto* values =
-        decoded.isIdentityMapping() ? decoded.data<T>() : nullptr;
+        Kind != TypeKind::BOOLEAN && decoded.isIdentityMapping()
+        ? decoded.data<T>()
+        : nullptr;
     for (const auto& range : ranges) {
       auto* row = range.rowBegin;
       auto source = range.sourceBegin;

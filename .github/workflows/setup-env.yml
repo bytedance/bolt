@@ -50,9 +50,8 @@ jobs:
       - name: Install System and Python Dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential gcc g++ cmake make ninja-build wget
+          sudo apt install -y git build-essential cmake make ninja-build wget
           ./scripts/setup-dev-env.sh
-          python ./scripts/configure-conan-profile.py --compiler gcc
 
       - name: Setup path
         run: |

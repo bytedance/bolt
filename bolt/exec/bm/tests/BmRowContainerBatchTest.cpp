@@ -20,6 +20,8 @@
 #include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 
+#include <cctype>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +30,231 @@ namespace bytedance::bolt::exec::bm {
 namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
+
+class BmBatchAppendTypeTest : public BmRowContainerTest,
+                              public testing::WithParamInterface<TypePtr> {
+ public:
+  static void SetUpTestSuite() {
+    BmRowContainerTest::SetUpTestSuite();
+  }
+
+ protected:
+  // Cross two 64-bit words and exercise a partial trailing word in Boolean
+  // values and null bitmaps.
+  static constexpr vector_size_t kRows = 130;
+
+  VectorPtr makeValues(const TypePtr& type) {
+    switch (type->kind()) {
+      case TypeKind::BOOLEAN:
+        return makeFlatVector<bool>(kRows, [](auto row) {
+          return row % 3 == 0 || row == 63 || row == 64;
+        });
+      case TypeKind::TINYINT:
+        return makeFlatVector<int8_t>(
+            kRows, [](auto row) { return row - 65; }, nullptr, type);
+      case TypeKind::SMALLINT:
+        return makeFlatVector<int16_t>(
+            kRows, [](auto row) { return (row - 65) * 503; }, nullptr, type);
+      case TypeKind::INTEGER:
+        return makeFlatVector<int32_t>(
+            kRows, [](auto row) { return (row - 65) * 7919; }, nullptr, type);
+      case TypeKind::BIGINT:
+        return makeFlatVector<int64_t>(
+            kRows,
+            [](auto row) { return static_cast<int64_t>(row - 65) * 104729; },
+            nullptr,
+            type);
+      case TypeKind::HUGEINT:
+        return makeFlatVector<int128_t>(
+            kRows,
+            [](auto row) {
+              return static_cast<int128_t>(row - 65) * (int128_t{1} << 80);
+            },
+            nullptr,
+            type);
+      case TypeKind::REAL:
+        return makeFlatVector<float>(kRows, [](auto row) {
+          return row == 63 ? std::numeric_limits<float>::quiet_NaN()
+              : row == 64  ? -0.0f
+              : row == 127 ? std::numeric_limits<float>::infinity()
+              : row == 128 ? -std::numeric_limits<float>::infinity()
+                           : (row - 65) * 1.25f;
+        });
+      case TypeKind::DOUBLE:
+        return makeFlatVector<double>(kRows, [](auto row) {
+          return row == 63 ? std::numeric_limits<double>::quiet_NaN()
+              : row == 64  ? -0.0
+              : row == 127 ? std::numeric_limits<double>::infinity()
+              : row == 128 ? -std::numeric_limits<double>::infinity()
+                           : (row - 65) * 1.25;
+        });
+      case TypeKind::TIMESTAMP:
+        return makeFlatVector<Timestamp>(
+            kRows, [](auto row) { return Timestamp(row - 65, row * 7919); });
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        return makeFlatVector<std::string>(
+            kRows,
+            [](auto row) {
+              return row % 7 == 0
+                  ? std::string{}
+                  : std::string("a\0z", 3) + std::string(row % 40, 'x');
+            },
+            nullptr,
+            type);
+      case TypeKind::ARRAY:
+        return makeArrayVector<bool>(
+            kRows,
+            [](auto row) { return row % 4; },
+            [](auto index) { return index % 3 == 0; },
+            nullptr,
+            [](auto index) { return index % 5 == 0; });
+      case TypeKind::MAP:
+        return makeMapVector<int64_t, bool>(
+            kRows,
+            [](auto row) { return row % 4; },
+            [](auto index) { return index; },
+            [](auto index) { return index % 3 == 0; },
+            nullptr,
+            [](auto index) { return index % 5 == 0; });
+      case TypeKind::ROW:
+        return makeRowVector(
+            {"flag", "items", "text"},
+            {makeValues(BOOLEAN()),
+             makeValues(ARRAY(BOOLEAN())),
+             makeValues(VARCHAR())});
+      default:
+        BOLT_FAIL("Unsupported batch test type {}", type->toString());
+    }
+  }
+
+  VectorPtr makeMixedNullValues() {
+    auto input = makeValues(GetParam());
+    for (vector_size_t row = 0; row < kRows; row += 3) {
+      input->setNull(row, true);
+    }
+    return input;
+  }
+
+  VectorPtr makeAllNullValues() {
+    auto input = makeValues(GetParam());
+    for (vector_size_t row = 0; row < kRows; ++row) {
+      input->setNull(row, true);
+    }
+    return input;
+  }
+
+  void assertBatchRoundTrip(const VectorPtr& input, bool nullable) {
+    SCOPED_TRACE(nullable ? "nullable column" : "non-nullable column");
+    ASSERT_TRUE(input->type()->equivalent(*GetParam()));
+    // Small row and heap blocks force the batch to span BM chunks.
+    BmRowContainer container(
+        {input->type()},
+        {nullable},
+        0,
+        bufferManager_,
+        MemoryTag::kTesting,
+        64,
+        64);
+    std::vector<char*> rows;
+    container.appendBatch(makeRowVector({input}), kDefaultPartition, &rows);
+    ASSERT_EQ(input->size(), rows.size());
+    auto result = BaseVector::create(input->type(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), 0, result, true);
+    test::assertEqualVectors(input, result);
+  }
+};
+
+TEST_P(BmBatchAppendTypeTest, FlatInputWithoutNulls) {
+  auto input = makeValues(GetParam());
+  assertBatchRoundTrip(input, /*nullable=*/false);
+  assertBatchRoundTrip(input, /*nullable=*/true);
+}
+
+TEST_P(BmBatchAppendTypeTest, FlatInputWithMixedNulls) {
+  assertBatchRoundTrip(makeMixedNullValues(), /*nullable=*/true);
+}
+
+TEST_P(BmBatchAppendTypeTest, FlatInputWithAllNulls) {
+  assertBatchRoundTrip(makeAllNullValues(), /*nullable=*/true);
+}
+
+TEST_P(BmBatchAppendTypeTest, NullBitmapBoundaries) {
+  auto input = makeValues(GetParam());
+  // Null both sides of byte and 64-bit word boundaries. Neighboring rows
+  // remain non-null, so a shifted or missing null bit changes the result.
+  for (vector_size_t row : {7, 8, 63, 64, 127, 128}) {
+    input->setNull(row, true);
+  }
+  assertBatchRoundTrip(input, /*nullable=*/true);
+}
+
+TEST_P(BmBatchAppendTypeTest, DictionaryInput) {
+  const auto reverse = [&](const VectorPtr& input) {
+    return wrapInDictionary(makeIndicesInReverse(kRows), input);
+  };
+  auto nonNullInput = reverse(makeValues(GetParam()));
+  assertBatchRoundTrip(nonNullInput, /*nullable=*/false);
+  assertBatchRoundTrip(nonNullInput, /*nullable=*/true);
+  assertBatchRoundTrip(reverse(makeMixedNullValues()), /*nullable=*/true);
+  assertBatchRoundTrip(reverse(makeAllNullValues()), /*nullable=*/true);
+}
+
+TEST_P(BmBatchAppendTypeTest, ConstantAndDictionaryOverConstantInput) {
+  // The source contains no top-level nulls. For BOOLEAN, indices 0 and 1
+  // select true and false, respectively.
+  auto values = makeValues(GetParam());
+  for (vector_size_t sourceRow : {0, 1}) {
+    SCOPED_TRACE(sourceRow);
+    auto constant = BaseVector::wrapInConstant(kRows, sourceRow, values);
+    auto dictionary = wrapInDictionary(makeIndicesInReverse(kRows), constant);
+    assertBatchRoundTrip(constant, /*nullable=*/false);
+    assertBatchRoundTrip(constant, /*nullable=*/true);
+    assertBatchRoundTrip(dictionary, /*nullable=*/false);
+    assertBatchRoundTrip(dictionary, /*nullable=*/true);
+  }
+
+  // Construct a null constant explicitly, independently of source row values.
+  auto nullConstant = BaseVector::createNullConstant(GetParam(), kRows, pool());
+  assertBatchRoundTrip(nullConstant, /*nullable=*/true);
+  assertBatchRoundTrip(
+      wrapInDictionary(makeIndicesInReverse(kRows), nullConstant),
+      /*nullable=*/true);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllSupportedTypes,
+    BmBatchAppendTypeTest,
+    testing::Values(
+        BOOLEAN(),
+        TINYINT(),
+        SMALLINT(),
+        INTEGER(),
+        BIGINT(),
+        HUGEINT(),
+        REAL(),
+        DOUBLE(),
+        TIMESTAMP(),
+        VARCHAR(),
+        VARBINARY(),
+        DATE(),
+        INTERVAL_DAY_TIME(),
+        INTERVAL_YEAR_MONTH(),
+        DECIMAL(10, 2),
+        DECIMAL(30, 4),
+        ARRAY(BOOLEAN()),
+        MAP(BIGINT(), BOOLEAN()),
+        ROW({"flag", "items", "text"},
+            {BOOLEAN(), ARRAY(BOOLEAN()), VARCHAR()})),
+    [](const testing::TestParamInfo<TypePtr>& info) {
+      auto name = info.param->toString();
+      for (auto& character : name) {
+        if (!std::isalnum(static_cast<unsigned char>(character))) {
+          character = '_';
+        }
+      }
+      return name;
+    });
 
 TEST_F(BmRowContainerTest, AppendBatchStoresComplexEncodings) {
   auto arrays = makeNullableArrayVector<std::string>({
@@ -107,6 +334,31 @@ TEST_F(BmRowContainerTest, AppendBatchStoresFixedAndVariableRows) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(0).str());
   EXPECT_EQ("bravo", varcharFlat->valueAt(1).str());
   EXPECT_EQ("charlie", varcharFlat->valueAt(2).str());
+}
+
+TEST_F(BmRowContainerTest, AppendBatchPreservesBooleanBitPatterns) {
+  // Cross byte and word boundaries in the bit-packed source. The nullable
+  // column exercises decoded.valueAt<bool>() as a reference for the fast path.
+  auto values = makeFlatVector<bool>(
+      130, [](auto row) { return row % 3 == 0 || row == 63 || row == 64; });
+  auto input = makeRowVector({values, values});
+  BmRowContainer container(
+      {BOOLEAN(), BOOLEAN()},
+      {false, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      64);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_EQ(input->size(), rows.size());
+
+  for (int32_t column = 0; column < 2; ++column) {
+    SCOPED_TRACE(column);
+    auto result = BaseVector::create(BOOLEAN(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), column, result);
+    test::assertEqualVectors(values, result);
+  }
 }
 
 TEST_F(BmRowContainerTest, AppendBatchPreservesNulls) {

@@ -34,6 +34,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/functions/lib/DateTimeFormatterCache.h"
 #include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -1601,21 +1602,29 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
   const tz::TimeZone* sessionTimeZone_ = nullptr;
+  std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
+  bool standaloneMonthText_{false};
   uint32_t maxResultSize_{0};
   TimePolicy timePolicy_{TimePolicy::CORRECTED};
+  DateTimeFormatterCache formatCache_;
 
   FOLLY_ALWAYS_INLINE void setFormatter(const arg_type<Varchar>* formatString) {
     if (formatString != nullptr) {
       if (timePolicy_ == TimePolicy::LEGACY) {
         jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
+            std::string_view(formatString->data(), formatString->size()),
+            formatterContext_);
+      } else if constexpr (SparkCompatible) {
+        jodaDateTime_ = buildSparkDateTimeFormatter(
+            std::string_view(formatString->data(), formatString->size()),
+            false,
+            standaloneMonthText_);
       } else {
         jodaDateTime_ = buildJodaDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()));
       }
-      isConstFormat_ = true;
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
     }
   }
@@ -1627,12 +1636,18 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<Varchar>* formatString) {
     sessionTimeZone_ = getTimeZoneFromConfig(config);
     if constexpr (SparkCompatible) {
+      standaloneMonthText_ = config.get<bool>(
+          core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+      if (timePolicy_ == TimePolicy::LEGACY) {
+        formatterContext_ = getDateTimeFormatterContext(config);
+      }
     } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
     setFormatter(formatString);
+    isConstFormat_ = formatString != nullptr;
   }
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1641,44 +1656,67 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<TimestampWithTimezone>* /*timestamp*/,
       const arg_type<Varchar>* formatString) {
     if constexpr (SparkCompatible) {
+      standaloneMonthText_ = config.get<bool>(
+          core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+      if (timePolicy_ == TimePolicy::LEGACY) {
+        formatterContext_ = getDateTimeFormatterContext(config);
+      }
     } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
     setFormatter(formatString);
+    isConstFormat_ = formatString != nullptr;
   }
 
   FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<Timestamp>& timestamp,
       const arg_type<Varchar>& formatString) {
-    if (!isConstFormat_) {
-      if constexpr (!SparkCompatible) {
-        ensureFormatLegal(
-            std::string_view(formatString.data(), formatString.size()));
-      }
-      setFormatter(&formatString);
-    }
-
-    result.reserve(maxResultSize_);
-    const auto resultSize = jodaDateTime_->format(
-        timestamp,
-        sessionTimeZone_,
-        maxResultSize_,
-        result.data(),
-        false,
-        timePolicy_);
-    result.resize(resultSize);
-    return true;
+    return format(result, timestamp, formatString, sessionTimeZone_);
   }
 
   FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<TimestampWithTimezone>& timestampWithTimezone,
       const arg_type<Varchar>& formatString) {
-    auto timestamp = this->toTimestamp(timestampWithTimezone);
-    return call(result, timestamp, formatString);
+    return format(
+        result,
+        this->toTimestamp(timestampWithTimezone, true),
+        formatString,
+        tz::locateZone(*timestampWithTimezone.template at<1>()));
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE bool format(
+      out_type<Varchar>& result,
+      const Timestamp& timestamp,
+      const arg_type<Varchar>& formatString,
+      const tz::TimeZone* timezone) {
+    if (!isConstFormat_) {
+      if constexpr (!SparkCompatible) {
+        ensureFormatLegal(
+            std::string_view(formatString.data(), formatString.size()));
+      }
+      if constexpr (SparkCompatible) {
+        const std::string_view pattern(
+            formatString.data(), formatString.size());
+        jodaDateTime_ = formatCache_.get(pattern, [&] {
+          setFormatter(&formatString);
+          return jodaDateTime_;
+        });
+        maxResultSize_ = jodaDateTime_->maxResultSize(timezone);
+      } else {
+        setFormatter(&formatString);
+      }
+    }
+
+    result.reserve(maxResultSize_);
+    const auto resultSize = jodaDateTime_->format(
+        timestamp, timezone, maxResultSize_, result.data(), false, timePolicy_);
+    result.resize(resultSize);
+    return true;
   }
 };
 

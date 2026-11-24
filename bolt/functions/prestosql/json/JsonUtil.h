@@ -21,6 +21,7 @@
 #include "bolt/functions/prestosql/json/JsonEscape.h"
 #include "bolt/functions/prestosql/json/SIMDJsonUtil.h"
 #include "bolt/functions/prestosql/json/SIMDJsonWrapper.h"
+#include "functions/prestosql/json/JsonPathTokenizer.h"
 
 namespace bytedance::bolt::functions {
 
@@ -197,11 +198,18 @@ inline bool
 extractElementByKeyFromObject(T& obj, const std::string& token, T& ans) {
   if constexpr (
       std::is_same_v<T, domElement> || std::is_same_v<T, domElementResult>) {
-    auto error = obj.get_object()[token].get(ans);
-    if (error) {
-      return true; // mean error
+    simdjson::dom::object object;
+    if (obj.get_object().get(object)) {
+      return true;
     }
-    return false;
+    // search the first not null child
+    for (const auto& pair : object) {
+      if (pair.key == token && !pair.value.is_null()) {
+        ans = pair.value;
+        return false;
+      }
+    }
+    return true;
   }
   if constexpr (
       std::is_same_v<T, ondemandElement> ||
@@ -213,6 +221,14 @@ extractElementByKeyFromObject(T& obj, const std::string& token, T& ans) {
         auto error = pair.value().get(ans);
         if (error) {
           return true;
+        }
+        // search the first not null child
+        bool isNull = false;
+        if (ans.is_null().get(isNull)) {
+          return true;
+        }
+        if (isNull) {
+          continue;
         }
         childHasBeenSet = true;
         break;
@@ -504,7 +520,7 @@ inline simdjson::error_code boltToJsonString(
 template <typename Visitor, JsonElementConcept T>
 inline bool traversingByTokens(
     T& element,
-    const std::vector<std::string>& tokens,
+    const JsonPathTokens& tokens,
     int tokenIdx,
     std::string& ans,
     Visitor visitor,
@@ -513,7 +529,7 @@ inline bool traversingByTokens(
 template <typename Visitor, JsonElementConcept T>
 inline bool traversingArrayByTokens(
     T& array,
-    const std::vector<std::string>& tokens,
+    const JsonPathTokens& tokens,
     int tokenIdx,
     std::string& ans,
     Visitor visitor,
@@ -556,7 +572,7 @@ inline bool traversingArrayByTokens(
 template <typename Visitor, JsonElementConcept T>
 inline bool traversingByTokens(
     T& element,
-    const std::vector<std::string>& tokens,
+    const JsonPathTokens& tokens,
     int tokenIdx,
     std::string& ans,
     Visitor visitor,
@@ -569,7 +585,7 @@ inline bool traversingByTokens(
   }
   switch (toBoltJsonType(element)) {
     case BoltJsonElementType::ARRAY: {
-      if (tokens[tokenIdx] == "*") {
+      if (tokens[tokenIdx].wildcard_) {
         int32_t returnNums = 0;
         std::string tempAns;
         bool result = traversingArrayByTokens(
@@ -597,7 +613,7 @@ inline bool traversingByTokens(
       } else {
         int32_t arrayIdx;
         try {
-          arrayIdx = std::stoi(tokens[tokenIdx]);
+          arrayIdx = std::stoi(tokens[tokenIdx].token_);
         } catch (...) {
           return false;
         }
@@ -613,7 +629,7 @@ inline bool traversingByTokens(
     case BoltJsonElementType::OBJECT: {
       T childElement;
       auto error = extractElementByKeyFromObject(
-          element, tokens[tokenIdx], childElement);
+          element, tokens[tokenIdx].token_, childElement);
       if (error) {
         return wildcardCount >= 1;
       }

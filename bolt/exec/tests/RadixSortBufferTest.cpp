@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
@@ -1098,21 +1099,31 @@ TEST_F(RadixSortBufferTest, complexOrderKeysMatchDuckDb) {
 
 TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKey) {
   auto input = makeStringBigintMapKeyRows();
+  // Spark compares cardinality first, then each canonical key/value pair.
+  // Presto compares the complete key array before the value array.
+  const auto ascendingQuery = kSparkCompatible
+      ? "SELECT * FROM tmp ORDER BY len(map_entries(c0)) ASC NULLS FIRST, "
+        "list_sort(map_entries(c0)) ASC NULLS FIRST"
+      : "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
+        "x -> x.key) ASC NULLS FIRST, "
+        "list_transform(list_sort(map_entries(c0)), x -> x.value) ASC NULLS FIRST";
+  const auto descendingQuery = kSparkCompatible
+      ? "SELECT * FROM tmp ORDER BY len(map_entries(c0)) DESC NULLS LAST, "
+        "list_sort(map_entries(c0)) DESC NULLS LAST"
+      : "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
+        "x -> x.key) DESC NULLS LAST, "
+        "list_transform(list_sort(map_entries(c0)), x -> x.value) DESC NULLS LAST";
   sortAndVerifyWithDuckDb(
       input,
       {0},
       {SortComparatorOracle::makeSortFlags(true, true)},
-      "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
-      "x -> x.key) ASC NULLS FIRST, "
-      "list_transform(list_sort(map_entries(c0)), x -> x.value) ASC NULLS FIRST",
+      ascendingQuery,
       2);
   sortAndVerifyWithDuckDb(
       input,
       {0},
       {SortComparatorOracle::makeSortFlags(false, false)},
-      "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
-      "x -> x.key) DESC NULLS LAST, "
-      "list_transform(list_sort(map_entries(c0)), x -> x.value) DESC NULLS LAST",
+      descendingQuery,
       3,
       false);
 }

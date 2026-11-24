@@ -254,6 +254,26 @@ ScopedLoadedRows ReadOnlyWindowReadSession::loadChunkBoundedRowsScoped(
   return loadRowsScoped({&chunkRange, 1});
 }
 
+void ReadOnlyWindowReadSession::releaseConsumedChunk(
+    const SegmentRowRange& range) {
+  BOLT_CHECK_NOT_NULL(container_);
+  BOLT_CHECK_GT(range.count, 0);
+  BOLT_CHECK(segments_.count(range.segment) != 0);
+  auto& segment = container_->segments_.segmentData(range.segment);
+  const auto end = static_cast<uint64_t>(range.begin) + range.count;
+  BOLT_CHECK_LE(end, segment.nextRowNumber);
+  if (segment.meta.state == SegmentState::kActiveResident) {
+    return;
+  }
+  auto& chunk = container_->segments_.chunkForRow(segment, end - 1);
+  const auto key = chunkKey(range.segment, chunk.meta.id);
+  if (end != chunk.meta.firstRowNumber + chunk.meta.rowCount ||
+      activeLeases_.count(key) != 0 || chunkHasPinnedBlocks(chunk)) {
+    return;
+  }
+  container_->releaseChunk(range.segment, chunk.meta.id);
+}
+
 void ReadOnlyWindowReadSession::releaseRowLeases(
     const std::vector<uint64_t>& chunkKeys) noexcept {
   for (auto key : chunkKeys) {

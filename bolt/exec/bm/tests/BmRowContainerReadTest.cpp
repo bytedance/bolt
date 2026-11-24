@@ -245,6 +245,53 @@ TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
   EXPECT_EQ("charlie", strings->valueAt(4).str());
 }
 
+TEST_F(BmRowContainerTest, ExtractStringHonorsExactSize) {
+  const std::string value = "1234567890123";
+  BmRowContainer container(
+      {VARCHAR(), VARCHAR()},
+      {false, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<std::string>({value, value, value}),
+      makeNullableFlatVector<std::string>({value, std::nullopt, value}),
+  });
+  auto rows = storeAll(container, input);
+  const std::vector<vector_size_t> selected{0, 1, -1, 2};
+
+  for (int column = 0; column < 2; ++column) {
+    for (bool byRowNumbers : {false, true}) {
+      auto exact = BaseVector::create(VARCHAR(), 0, pool());
+      auto normal = BaseVector::create(VARCHAR(), 0, pool());
+      for (auto [result, exactSize] :
+           {std::make_pair(exact, true), std::make_pair(normal, false)}) {
+        if (byRowNumbers) {
+          container.extractColumnResident(
+              rows.data(),
+              {selected.data(), selected.size()},
+              column,
+              0,
+              result,
+              exactSize);
+        } else {
+          container.extractColumnResident(
+              rows.data(), rows.size(), column, 0, result, exactSize);
+        }
+      }
+      auto* exactFlat = exact->asFlatVector<StringView>();
+      auto* normalFlat = normal->asFlatVector<StringView>();
+      test::assertEqualVectors(exact, normal);
+      ASSERT_FALSE(exactFlat->stringBuffers().empty());
+      ASSERT_FALSE(normalFlat->stringBuffers().empty());
+      EXPECT_LT(
+          exactFlat->stringBuffers().front()->capacity(),
+          normalFlat->stringBuffers().front()->capacity());
+      EXPECT_EQ(value, exactFlat->valueAt(0).str());
+    }
+  }
+}
+
 TEST_F(BmRowContainerDiskIoTest, BulkReadSessionLoadSkipsConsumedChunks) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);
@@ -410,6 +457,112 @@ TEST_F(
     EXPECT_EQ(boundary - 1, result->asFlatVector<int64_t>()->valueAt(1));
   }
   EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+}
+
+TEST_F(BmRowContainerDiskIoTest, ConsumedChunkReleaseAvoidsDirtyWriteback) {
+  constexpr vector_size_t kRows = 512;
+  for (const bool releaseConsumedChunk : {false, true}) {
+    BmRowContainer container(
+        {BIGINT(), VARCHAR()},
+        {false, false},
+        0,
+        bufferManager_,
+        MemoryTag::kTesting,
+        64 << 10,
+        32 << 10);
+    storeAll(
+        container,
+        makeRowVector({
+            makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+            makeFlatVector<std::string>(
+                kRows,
+                [](auto row) { return std::string(256, 'a' + row % 26); }),
+        }));
+    const auto segment = container.spillActiveSegment();
+    auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+    auto output = BaseVector::create(VARCHAR(), kRows, pool());
+    {
+      const SegmentRowRange range{segment, 0, kRows};
+      auto rows = session.loadChunkBoundedRowsScoped(range);
+      ASSERT_EQ(kRows, rows.size());
+      container.extractColumnResident(rows.data(), rows.size(), 1, output);
+    }
+    ASSERT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+    const auto writesBefore = bufferManager_->stats().spillWriteCount;
+    if (releaseConsumedChunk) {
+      session.releaseConsumedChunk({segment, 0, kRows});
+      EXPECT_EQ(0, bufferManager_->stats().unpinnedResidentBytes);
+    } else {
+      EXPECT_GT(bufferManager_->stats().unpinnedResidentBytes, 0);
+    }
+    bufferManager_->Reclaim(kUnlimitedBytes);
+    const auto extraWrites =
+        bufferManager_->stats().spillWriteCount - writesBefore;
+    RecordProperty(
+        releaseConsumedChunk ? "released_extra_write_blocks"
+                             : "retained_extra_write_blocks",
+        static_cast<int>(extraWrites));
+    if (releaseConsumedChunk) {
+      EXPECT_EQ(0, extraWrites);
+    } else {
+      EXPECT_GT(extraWrites, 0);
+    }
+    // The copied output remains valid after either reclaim or destruction of
+    // the original chunk, including all of its non-inline string payloads.
+    for (vector_size_t row = 0; row < kRows; ++row) {
+      EXPECT_EQ(
+          std::string(256, 'a' + row % 26),
+          output->asFlatVector<StringView>()->valueAt(row).str());
+    }
+  }
+}
+
+TEST_F(
+    BmRowContainerDiskIoTest,
+    ConsumedChunkReleaseKeepsPartialAndLeasedChunks) {
+  constexpr vector_size_t kRows = 512;
+  BmRowContainer container(
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);
+  storeAll(
+      container, makeRowVector({makeFlatVector<int64_t>(kRows, [](auto row) {
+        return row;
+      })}));
+  {
+    const auto activeSegment = container.activeSegmentId();
+    auto activeSession =
+        container.beginReadOnlyWindowReadSegments({&activeSegment, 1});
+    activeSession.releaseConsumedChunk({activeSegment, 0, kRows});
+    // Active storage remains writable and readable even at its current end.
+    auto activeRows =
+        activeSession.loadChunkBoundedRowsScoped({activeSegment, 0, kRows});
+    ASSERT_EQ(kRows, activeRows.size());
+    auto output = BaseVector::create(BIGINT(), kRows, pool());
+    container.extractColumnResident(activeRows.data(), kRows, 0, output);
+    EXPECT_EQ(kRows - 1, output->asFlatVector<int64_t>()->valueAt(kRows - 1));
+  }
+  const auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  auto rows = session.loadChunkBoundedRowsScoped({segment, 0, kRows});
+  ASSERT_EQ(kRows, rows.size());
+  session.releaseConsumedChunk({segment, 0, kRows});
+  EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
+  rows.reset();
+  session.releaseConsumedChunk({segment, 0, kRows / 2});
+  EXPECT_GT(bufferManager_->stats().unpinnedResidentBytes, 0);
+  {
+    // The rest of a shared physical chunk must remain readable, even when
+    // the earlier rows belong to a completed partition.
+    auto remaining =
+        session.loadChunkBoundedRowsScoped({segment, kRows / 2, kRows / 2});
+    auto output = BaseVector::create(BIGINT(), remaining.size(), pool());
+    container.extractColumnResident(
+        remaining.data(), remaining.size(), 0, output);
+    for (vector_size_t i = 0; i < remaining.size(); ++i) {
+      EXPECT_EQ(kRows / 2 + i, output->asFlatVector<int64_t>()->valueAt(i));
+    }
+  }
+  session.releaseConsumedChunk({segment, kRows / 2, kRows / 2});
+  EXPECT_EQ(0, bufferManager_->stats().unpinnedResidentBytes);
 }
 
 TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
@@ -626,12 +779,7 @@ TEST_F(BmRowContainerDiskIoTest, ScopedRowsSharePinsAndReleaseAllHeapBlocks) {
   const auto segment = container.spillActiveSegment();
   auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
   const auto ids = window.listRowIds();
-  memory::MemoryPool* bmPool = nullptr;
-  root_->visitChildren([&](memory::MemoryPool* child) {
-    bmPool = child;
-    return false;
-  });
-  ASSERT_NE(nullptr, bmPool);
+  auto bmPool = bufferManager_->defaultAllocationPool();
 
   auto outer = window.loadRowsScoped({ids.data(), 1});
   const auto outerStats = bufferManager_->stats();
@@ -1020,16 +1168,17 @@ TEST_F(BmRowContainerDiskIoTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   ASSERT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
   ASSERT_GT(bufferManager_->stats().unpinnedResidentBytes, 0);
 
-  memory::MemoryPool* bmPool = nullptr;
-  root_->visitChildren([&](memory::MemoryPool* child) {
-    bmPool = child;
-    return false;
-  });
-  ASSERT_NE(nullptr, bmPool);
+  auto bmPool = bufferManager_->defaultAllocationPool();
+
+  auto otherPool = bufferManager_->addOperatorPool("bulk-read-idle-operator");
+  ASSERT_TRUE(otherPool->maybeReserve(1 << 20));
+  const auto otherReservation = otherPool->reservedBytes();
+  ASSERT_GT(otherReservation, 0);
 
   const auto reservesBefore = bmPool->stats().numReserves;
   EXPECT_TRUE(container.canBulkRead({&segment, 1}));
   EXPECT_EQ(reservesBefore + 1, bmPool->stats().numReserves);
+  EXPECT_EQ(otherReservation, otherPool->reservedBytes());
 }
 
 TEST_F(BmRowContainerDiskIoTest, CanBulkReadRequiresProcessingHeadroom) {

@@ -43,7 +43,8 @@ enum class WindowBuildType {
   kUnspecified = 0, // no window build is specified
   kSortWindowBuild = 1, // sort window build
   kRowStreamingWindowBuild = 2, // row streaming window build
-  kSpillableWindowBuild = 3 // spillable window build
+  kSpillableWindowBuild = 3, // spillable window build
+  kBmStreamingWindowBuild = 4 // BufferManager-backed streaming window build
 };
 
 class TestWindowInjection {
@@ -98,8 +99,8 @@ class Window : public Operator {
   }
 
   bool canReclaim() const override {
-    // TODO Add support for spilling after noMoreInput().
-    return Operator::canReclaim() && !noMoreInput_;
+    return Operator::canReclaim() &&
+        (!noMoreInput_ || isBmStreamingWindowBuild_);
   }
 
   void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
@@ -129,6 +130,9 @@ class Window : public Operator {
   }
 
   void recordWindowStats();
+
+ protected:
+  memory::MemoryPool* externalReclaimPool() const override;
 
  private:
   // Used for k preceding/following frames. Index is the column index if k is a
@@ -243,6 +247,11 @@ class Window : public Operator {
       const common::SpillConfig* spillConfig,
       int64_t spillThreshold);
 
+  void setBmStreamingWindowBuild(
+      bool ignorePeer,
+      const common::SpillConfig* spillConfig,
+      int64_t spillThreshold);
+
   // decide if (1) current window function is supported for spill
   // (2) if window function is aggregated (sum, max, min, count..) or not
   // (lead, lag)
@@ -252,6 +261,15 @@ class Window : public Operator {
       const core::WindowNode::Function& func);
 
   void createWindowFunctionsForSpillableWindowBuild();
+
+  enum class WindowBuildKind : int64_t {
+    kUnknown = 0,
+    kSort = 1,
+    kStreaming = 2,
+    kRowsStreaming = 3,
+    kSpillable = 4,
+    kBmStreaming = 5,
+  };
 
   const vector_size_t numInputColumns_;
 
@@ -264,6 +282,8 @@ class Window : public Operator {
   // WindowBuild is used to store input rows and return WindowPartitions
   // for the processing.
   std::unique_ptr<WindowBuild> windowBuild_;
+
+  WindowBuildKind windowBuildKind_{WindowBuildKind::kUnknown};
 
   std::vector<std::pair<column_index_t, core::SortOrder>> sortKeyInfo_;
 
@@ -337,6 +357,8 @@ class Window : public Operator {
   vector_size_t peerEndRow_ = 0;
 
   bool isSpillableWindowBuild_ = false;
+
+  bool isBmStreamingWindowBuild_ = false;
   bool isAggWindowFunc_ = false;
   std::vector<TypePtr> windowResultTypes_;
 
@@ -356,6 +378,7 @@ class Window : public Operator {
   uint64_t loadFromSpillTimeUs_{0};
   uint64_t windowSpillTimeUs_{0};
   bool hasRecordSpillStats_ = false;
+  bool hasRecordedBmWindowStats_{false};
 };
 
 } // namespace bytedance::bolt::exec

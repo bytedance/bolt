@@ -15,6 +15,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <limits>
 #include <tuple>
 
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -95,6 +96,41 @@ TEST(BigDecimalTest, setScale) {
     decimal.setScale(std::get<2>(data));
     EXPECT_EQ(decimal.getScale(), std::get<2>(data));
     EXPECT_EQ(decimal.floatValue(), std::get<3>(data));
+  }
+}
+
+TEST(BigDecimalTest, truncateScale) {
+  for (double value : {1.25, -1.25}) {
+    BigDecimal decimal(value);
+    decimal.truncateScale(std::numeric_limits<int32_t>::max());
+    EXPECT_EQ(decimal.doubleValue(), value);
+    EXPECT_EQ(decimal.floatValue(), value);
+    EXPECT_EQ(decimal.toString(), "125");
+    EXPECT_EQ(decimal.getCompactVal(), 125);
+
+    BOLT_ASSERT_USER_THROW(
+        decimal.truncateScale(std::numeric_limits<int32_t>::min()),
+        "Decimal scale overflow");
+  }
+}
+
+TEST(BigDecimalTest, zeroAfterScaleChange) {
+  for (double value : {0.125, -0.125}) {
+    for (int32_t scale : {-1025, 0}) {
+      BigDecimal decimal(value);
+      decimal.truncateScale(scale);
+      EXPECT_EQ(decimal.toString(), "0");
+      EXPECT_EQ(decimal.getCompactVal(), -1);
+      EXPECT_EQ(decimal.doubleValue(), 0);
+      EXPECT_EQ(decimal.floatValue(), 0);
+    }
+
+    BigDecimal decimal(value);
+    decimal.setScale(0);
+    EXPECT_EQ(decimal.toString(), "0");
+    EXPECT_EQ(decimal.getCompactVal(), -1);
+    EXPECT_EQ(decimal.doubleValue(), 0);
+    EXPECT_EQ(decimal.floatValue(), 0);
   }
 }
 

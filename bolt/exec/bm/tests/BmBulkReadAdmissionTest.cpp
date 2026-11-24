@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "bolt/exec/bm/BmWindowPartition.h"
 #include "bolt/exec/bm/tests/BmRowContainerTestBase.h"
 
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
@@ -82,6 +83,7 @@ class BmBulkReadAdmissionTest : public BmRowContainerDiskIoTest {
         "bulk-read-admission",
         memory::kMaxMemory,
         memory::MemoryReclaimer::create());
+    windowPool_ = root_->addLeafChild("window");
     probe_ = root_->addLeafChild("probe");
     resetBufferManagerCompression(memory::bm::compress::CompressionKind::kNone);
   }
@@ -103,6 +105,7 @@ class BmBulkReadAdmissionTest : public BmRowContainerDiskIoTest {
   void TearDown() override {
     bufferManager_.reset();
     probe_.reset();
+    windowPool_.reset();
     root_.reset();
     manager_.reset();
     registration_.reset();
@@ -116,6 +119,7 @@ class BmBulkReadAdmissionTest : public BmRowContainerDiskIoTest {
   memory::sparksql::AllocationListenerPtr listener_;
   std::unique_ptr<memory::sparksql::ArbitratorFactoryRegister> registration_;
   std::unique_ptr<memory::MemoryManager> manager_;
+  std::shared_ptr<memory::MemoryPool> windowPool_;
   std::shared_ptr<memory::MemoryPool> probe_;
 };
 
@@ -176,6 +180,43 @@ TEST_F(BmBulkReadAdmissionTest, GuardCanReusePreviouslyBorrowedCapacity) {
   DriverCtx driverCtx(task, 0, 0, 0, 0);
   ScopedDriverThreadContext driverContext(&driverCtx);
   EXPECT_TRUE(container.canBulkRead({&segment, 1}));
+}
+
+TEST_F(BmBulkReadAdmissionTest, LargePartitionSelectsWindowReadBeforeBulkPin) {
+  useTaskPool(32 * kMiB);
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      memory::bm::MemoryTag::kTesting,
+      64 * kMiB,
+      4 * kMiB);
+  auto input = makeInput();
+  storeAll(container, input);
+  const auto segment = container.spillActiveSegment();
+  window::BmWindowPartitionDescriptor descriptor;
+  descriptor.numRows = input->size();
+  descriptor.ranges.push_back(
+      {segment, 0, static_cast<RowNumber>(input->size())});
+  descriptor.hasSpilledRows = true;
+  auto stats = std::make_shared<window::BmWindowAccessStats>();
+  window::BmWindowPartition partition(
+      &container,
+      windowPool_.get(),
+      {BIGINT(), VARCHAR()},
+      std::move(descriptor),
+      {0, 1},
+      {},
+      stats);
+  auto values = BaseVector::create(VARCHAR(), 0, pool());
+  auto task = makeTask();
+  DriverCtx driverCtx(task, 0, 0, 0, 0);
+  ScopedDriverThreadContext driverContext(&driverCtx);
+  partition.extractColumn(1, 0, input->size(), 0, values);
+  bytedance::bolt::test::assertEqualVectors(input->childAt(1), values);
+  EXPECT_EQ(1, stats->windowReadPartitions);
+  EXPECT_EQ(0, stats->fastPathPartitions);
 }
 
 } // namespace

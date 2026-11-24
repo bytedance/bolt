@@ -381,11 +381,7 @@ class Operator : public BaseRuntimeStatWriter {
   /// Returns how many bytes is reclaimable from this operator. The function
   /// returns true if this operator is reclaimable, and returns the estimated
   /// reclaimable bytes.
-  virtual bool reclaimableBytes(uint64_t& reclaimableBytes) const {
-    const bool reclaimable = canReclaim();
-    reclaimableBytes = reclaimable ? pool()->reservedBytes() : 0;
-    return reclaimable;
-  }
+  virtual bool reclaimableBytes(uint64_t& reclaimableBytes) const;
 
   /// Invoked by the memory arbitrator to reclaim memory from this operator with
   /// specified reclaim target bytes. If 'targetBytes' is zero, then it tries to
@@ -527,6 +523,17 @@ class Operator : public BaseRuntimeStatWriter {
   }
 
  protected:
+  /// Optional allocation leaf whose reservation is reclaimed by this operator.
+  /// Once created, the leaf stays stable for the operator lifetime and shares
+  /// its root. Querying this hook must not create it.
+  /// This operator must be the sole owner of the leaf's reclaim estimates:
+  /// neither another operator nor the leaf's own reclaimer may report the same
+  /// memory. A shared task-level pool requires separate accounting ownership
+  /// before it can be exposed through this hook.
+  virtual bolt::memory::MemoryPool* externalReclaimPool() const {
+    return nullptr;
+  }
+
   static std::vector<std::unique_ptr<PlanNodeTranslator>>& translators();
   friend class NonReclaimableSection;
 

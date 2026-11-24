@@ -25,6 +25,7 @@
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -36,6 +37,11 @@ class BufferManagerStatsCollector;
 class EvictionQueue;
 class SpillWriteDriver;
 class SpillStore;
+
+struct SpillCompressionOptions {
+  std::string kind{"zstd"};
+  std::optional<int32_t> level;
+};
 
 struct BufferManagerConfig {
   std::string poolName;
@@ -49,6 +55,12 @@ struct BufferManagerConfig {
   /// memory arbitration. Reclaiming BufferManager blocks remains the
   /// responsibility of BufferManagerReclaimer.
   std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer;
+
+  /// Optional named codec settings, resolved and validated by Create before
+  /// allocating resources. When absent, the typed spillStoreConfig compression
+  /// options are used unchanged. When present, kind and the optional selected
+  /// codec level override those options; other codec options are preserved.
+  std::optional<SpillCompressionOptions> spillCompression;
 };
 
 class BufferManager : public std::enable_shared_from_this<BufferManager> {
@@ -56,9 +68,20 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   static std::shared_ptr<BufferManager> Create(
       MemoryPool& parent,
       BufferManagerConfig config);
+
   ~BufferManager();
 
+  /// Creates a dedicated allocation leaf under this manager's aggregate.
+  /// The caller supplies a unique name for each operator instance.
+  std::shared_ptr<MemoryPool> addOperatorPool(const std::string& name);
+  /// Lazily creates the single allocation leaf used by the legacy APIs.
+  std::shared_ptr<MemoryPool> defaultAllocationPool();
+
   BufferHandle Allocate(size_t size, MemoryTag tag);
+  BufferHandle Allocate(
+      size_t size,
+      MemoryTag tag,
+      const std::shared_ptr<MemoryPool>& allocationPool);
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
 
   std::vector<BufferHandle>
@@ -83,6 +106,8 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
       std::span<const std::shared_ptr<BlockHandle>> blocks);
 
   bool MaybeReserve(size_t size);
+  /// Releases unused reservation from every allocation leaf. Operators with
+  /// a dedicated leaf release that leaf directly instead.
   void ReleaseUnusedReservation();
   uint64_t Reclaim(uint64_t targetBytes);
   uint64_t reclaimableBytes() const;
@@ -94,7 +119,12 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   explicit BufferManager(BufferManagerConfig config);
 
   void Initialize(MemoryPool& parent);
-  BufferHandle AllocateOne(size_t size, MemoryTag tag);
+  void ValidateAllocationPool(
+      const std::shared_ptr<MemoryPool>& allocationPool) const;
+  BufferHandle AllocateOne(
+      size_t size,
+      MemoryTag tag,
+      const std::shared_ptr<MemoryPool>& allocationPool);
   void Unpin(const std::shared_ptr<BlockHandle>& block) noexcept;
   BufferHandle PinInMemory(const std::shared_ptr<BlockHandle>& block);
   BufferHandle PinSpilled(const std::shared_ptr<BlockHandle>& block);
@@ -106,7 +136,9 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   BufferHandle MakeHandle(const std::shared_ptr<BlockHandle>& block);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
-  std::shared_ptr<MemoryPool> pool_;
+  std::shared_ptr<MemoryPool> aggregatePool_;
+  std::shared_ptr<MemoryPool> defaultAllocationPool_;
+  std::vector<std::shared_ptr<MemoryPool>> allocationPools_;
   std::unique_ptr<SpillStore> spillStore_;
   BufferManagerConfig config_;
   uint64_t nextBlockId_{1};

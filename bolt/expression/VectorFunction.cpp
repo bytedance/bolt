@@ -35,6 +35,20 @@
 #include "folly/Synchronized.h"
 namespace bytedance::bolt::exec {
 
+namespace {
+TypePtr resolveFromSignatures(
+    const std::vector<FunctionSignaturePtr>& signatures,
+    const std::vector<TypePtr>& argTypes) {
+  for (const auto& signature : signatures) {
+    SignatureBinder binder(*signature, argTypes);
+    if (binder.tryBind()) {
+      return binder.tryResolveReturnType();
+    }
+  }
+  return nullptr;
+}
+} // namespace
+
 VectorFunctionMap& vectorFunctionFactories() {
   static VectorFunctionMap factories;
   return factories;
@@ -57,12 +71,7 @@ std::shared_ptr<const Type> resolveVectorFunction(
     const std::vector<TypePtr>& argTypes) {
   if (auto vectorFunctionSignatures =
           exec::getVectorFunctionSignatures(functionName)) {
-    for (const auto& signature : vectorFunctionSignatures.value()) {
-      exec::SignatureBinder binder(*signature, argTypes);
-      if (binder.tryBind()) {
-        return binder.tryResolveReturnType();
-      }
-    }
+    return resolveFromSignatures(*vectorFunctionSignatures, argTypes);
   }
 
   return nullptr;
@@ -95,7 +104,15 @@ std::shared_ptr<VectorFunction> getVectorFunction(
   return vectorFunctionFactories().withRLock(
       [&sanitizedName, &inputArgs, &config, &inputTypes, &resultType, &name](
           auto& functionMap) -> std::shared_ptr<VectorFunction> {
-        if (auto destType = resolveVectorFunction(sanitizedName, inputTypes)) {
+        auto functionIterator = functionMap.find(sanitizedName);
+        if (functionIterator == functionMap.end()) {
+          return nullptr;
+        }
+
+        const auto& entry = functionIterator->second;
+        // Another registry read can deadlock when a writer is waiting.
+        if (auto destType =
+                resolveFromSignatures(entry.signatures, inputTypes)) {
           BOLT_USER_CHECK(
               (resultType == nullptr ||
                (destType != nullptr && destType->equivalent(*resultType))),
@@ -104,9 +121,7 @@ std::shared_ptr<VectorFunction> getVectorFunction(
               destType,
               resultType,
               folly::join(", ", inputTypes));
-          auto functionIterator = functionMap.find(sanitizedName);
-          return functionIterator->second.factory(
-              sanitizedName, inputArgs, config);
+          return entry.factory(sanitizedName, inputArgs, config);
         }
         return nullptr;
       });

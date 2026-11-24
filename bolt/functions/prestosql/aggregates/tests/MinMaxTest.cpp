@@ -891,6 +891,65 @@ class MinMaxNTest : public functions::aggregate::test::AggregationTestBase {
   }
 };
 
+TEST_F(MinMaxNTest, encodedIntermediateRows) {
+  for (bool constantArray : {false, true}) {
+    for (bool constantRow : {false, true}) {
+      for (bool sparseMask : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "constantArray={}, constantRow={}, sparseMask={}",
+            constantArray,
+            constantRow,
+            sparseMask));
+        auto arrays = makeArrayVector<int64_t>({{10}, {20}, {30}, {40}});
+        VectorPtr encodedArrays;
+        if (constantArray) {
+          encodedArrays = BaseVector::wrapInConstant(4, 1, arrays);
+        } else {
+          auto indices = makeIndices({0, 0, 1, 0});
+          encodedArrays = wrapInDictionary(
+              makeIndices({0, 1, 2, 3}),
+              4,
+              wrapInDictionary(indices, 4, arrays));
+        }
+        auto intermediate = makeRowVector({
+            makeConstant<int64_t>(1, 4),
+            encodedArrays,
+        });
+
+        // Even an all-selected final input can map into a larger base row.
+        const vector_size_t size = sparseMask ? 4 : 2;
+        VectorPtr encodedRows;
+        if (constantRow) {
+          encodedRows = BaseVector::wrapInConstant(size, 2, intermediate);
+        } else {
+          encodedRows = wrapInDictionary(
+              makeIndices(size, [](auto) { return 2; }), size, intermediate);
+        }
+        auto data = makeRowVector({
+            makeConstant<int64_t>(7, size),
+            encodedRows,
+            makeFlatVector<bool>(
+                size, [&](auto row) { return !sparseMask || row == 3; }),
+        });
+
+        for (bool grouped : {false, true}) {
+          auto plan = PlanBuilder()
+                          .values({data})
+                          .finalAggregation(
+                              grouped ? std::vector<std::string>{"c0"}
+                                      : std::vector<std::string>{},
+                              {"min(c1) FILTER (WHERE c2)",
+                               "max(c1) FILTER (WHERE c2)"},
+                              {{BIGINT(), BIGINT()}, {BIGINT(), BIGINT()}})
+                          .planNode();
+          assertQuery(
+              plan, grouped ? "SELECT 7, [20], [20]" : "SELECT [20], [20]");
+        }
+      }
+    }
+  }
+}
+
 TEST_F(MinMaxNTest, tinyint) {
   testNumericGlobal<int8_t>();
   testNumericGroupBy<int8_t>();

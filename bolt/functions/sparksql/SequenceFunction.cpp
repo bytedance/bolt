@@ -28,10 +28,17 @@
  * --------------------------------------------------------------------------
  */
 
+#include <limits>
+
 #include "bolt/functions/lib/Sequence.h"
 
 namespace bytedance::bolt::functions::sparksql {
 namespace {
+
+// Spark limits a single sequence to ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH
+// entries instead of Presto's 10'000.
+constexpr int32_t kSparkMaxSequenceEntries =
+    std::numeric_limits<int32_t>::max() - 15;
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> sequenceSignatures() {
   // Integer types: 2-arg (start, stop) and 3-arg (start, stop, step).
@@ -90,17 +97,21 @@ std::shared_ptr<exec::VectorFunction> makeSequence(
     const core::QueryConfig& /* config */) {
   switch (inputArgs[0].type->kind()) {
     case TypeKind::BIGINT:
-      return std::make_shared<SequenceFunction<int64_t, int64_t>>();
+      return std::make_shared<SequenceFunction<int64_t, int64_t>>(
+          kSparkMaxSequenceEntries);
     // Use K=int64_t for INTEGER to avoid conflicting with the
     // add<int32_t, int32_t> specialization used for date year-to-month
     // intervals. getStep handles reading the step vector as int32_t when
     // isDate is false.
     case TypeKind::INTEGER:
-      return std::make_shared<SequenceFunction<int32_t, int64_t>>();
+      return std::make_shared<SequenceFunction<int32_t, int64_t>>(
+          kSparkMaxSequenceEntries);
     case TypeKind::SMALLINT:
-      return std::make_shared<SequenceFunction<int16_t, int16_t>>();
+      return std::make_shared<SequenceFunction<int16_t, int16_t>>(
+          kSparkMaxSequenceEntries);
     case TypeKind::TINYINT:
-      return std::make_shared<SequenceFunction<int8_t, int8_t>>();
+      return std::make_shared<SequenceFunction<int8_t, int8_t>>(
+          kSparkMaxSequenceEntries);
     default:
       BOLT_UNREACHABLE(
           "Unexpected type for Spark sequence: {}",

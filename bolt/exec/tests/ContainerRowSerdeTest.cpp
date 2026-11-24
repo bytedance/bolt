@@ -34,6 +34,7 @@
 
 #include <span>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/bm/BmContainerRowSerde.h"
@@ -753,6 +754,163 @@ TEST_F(ContainerRowSerdeTest, TrySerializeSizeParity) {
           << "empty at " << i;
     }
   }
+}
+
+TEST_F(ContainerRowSerdeTest, mapOrderingDialect) {
+  auto maps = makeMapVector<std::string, std::string>({
+      {{"z", "same"}},
+      {{"a", "same"}, {"b", "same"}},
+      {{"b", "a"}, {"a", "z"}},
+      {{"c", "a"}, {"a", "a"}},
+      {{"a", std::nullopt}, {"b", "same"}},
+      {{"a", "a"}, {"c", "same"}},
+      {},
+      {{"a", "z"}, {"b", "a"}},
+      {},
+  });
+  // Nest the map and follow it with another field: equal Maps must consume
+  // both serialized arrays before comparing the next field.
+  auto rows = makeRowVector(
+      {maps, makeFlatVector<int64_t>({0, 0, 0, 0, 0, 0, 0, 1, 1})});
+  const auto positions = serializeWithPositions(rows);
+  DecodedVector decoded(*rows);
+  for (bool ascending : {true, false}) {
+    for (bool nullsFirst : {true, false}) {
+      const CompareFlags flags{
+          .nullsFirst = nullsFirst, .ascending = ascending};
+      auto check =
+          [&](vector_size_t left, vector_size_t right, int spark, int presto) {
+            const auto expected =
+                (ascending ? 1 : -1) * (kSparkCompatible ? spark : presto);
+            auto lhs = HashStringAllocator::prepareRead(positions[left].header);
+            auto rhs =
+                HashStringAllocator::prepareRead(positions[right].header);
+            auto result = ContainerRowSerde::compare(
+                *lhs, *rhs, rows->type().get(), flags);
+            EXPECT_EQ((result > 0) - (result < 0), expected);
+            lhs = HashStringAllocator::prepareRead(positions[left].header);
+            result = ContainerRowSerde::compare(*lhs, decoded, right, flags);
+            EXPECT_EQ((result > 0) - (result < 0), expected);
+          };
+      check(0, 1, -1, 1);
+      check(2, 3, 1, -1);
+      check(4, 5, -1, -1);
+      check(6, 0, -1, -1);
+      check(2, 7, -1, -1);
+      check(6, 8, -1, -1); // Empty Maps must advance to the following field.
+    }
+  }
+}
+
+TEST_F(ContainerRowSerdeTest, mapOrderingNestedAndSegmented) {
+  auto check = [&](const VectorPtr& data, int spark, int presto) {
+    auto bytes = serializeIntoBytes(data, 0);
+    auto rightBytes = serializeIntoBytes(data, 1);
+    auto ranges = [](std::vector<char>& buffer) {
+      std::vector<ByteRange> result;
+      // Split size headers, null bitmaps, and string payloads across ranges.
+      for (size_t i = 0; i < buffer.size(); i += 3) {
+        result.push_back(ByteRange{
+            reinterpret_cast<uint8_t*>(buffer.data() + i),
+            static_cast<int32_t>(std::min<size_t>(3, buffer.size() - i)),
+            0});
+      }
+      return result;
+    };
+    DecodedVector decoded(*data);
+    for (bool ascending : {true, false}) {
+      for (bool nullsFirst : {true, false}) {
+        SCOPED_TRACE(
+            fmt::format("ascending={} nullsFirst={}", ascending, nullsFirst));
+        CompareFlags flags{.nullsFirst = nullsFirst, .ascending = ascending};
+        const auto expected =
+            (kSparkCompatible ? spark : presto) * (ascending ? 1 : -1);
+        auto sign = [](int32_t value) { return (value > 0) - (value < 0); };
+        EXPECT_EQ(
+            sign(data->compare(data.get(), 0, 1, flags).value()), expected);
+        ByteInputStream left(ranges(bytes));
+        ByteInputStream right(ranges(rightBytes));
+        EXPECT_EQ(
+            sign(ContainerRowSerde::compare(
+                left, right, data->type().get(), flags)),
+            expected);
+        ByteInputStream lhs(ranges(bytes));
+        EXPECT_EQ(
+            sign(ContainerRowSerde::compare(lhs, decoded, 1, flags)), expected);
+      }
+    }
+  };
+
+  auto inner = makeMapVector<std::string, std::string>(
+      {{{"z", "same"}}, {{"a", "same"}, {"b", "same"}}});
+  auto outer = makeMapVector({0, 1}, makeFlatVector<int64_t>({7, 7}), inner);
+  check(makeRowVector({outer, makeFlatVector<int64_t>({0, 0})}), -1, 1);
+  check(makeArrayVector({0, 1}, inner), -1, 1);
+
+  auto keys = makeArrayVector<int64_t>({{1, 2}, {1, 3}, {2, 0}});
+  auto complexKeys = makeMapVector(
+      {0, 2}, keys, makeFlatVector<std::string>({"same", "same", "same"}));
+  check(complexKeys, 1, -1);
+
+  using Entries =
+      std::vector<std::pair<std::string, std::optional<std::string>>>;
+  Entries first;
+  for (int i = 0; i < 70; ++i) {
+    first.emplace_back(
+        fmt::format("{:03d}", i) + std::string(200, 'x'),
+        i % 2 == 0 ? std::nullopt : std::optional<std::string>("same"));
+  }
+  auto second = first;
+  first.back().second = "0";
+  second.back().second = "1";
+  auto maps = makeMapVector<std::string, std::string>({first, second});
+  auto indices = allocateIndices(maps->mapKeys()->size(), pool());
+  for (vector_size_t i = 0; i < maps->mapKeys()->size(); ++i) {
+    indices->asMutable<vector_size_t>()[i] = i;
+  }
+  // Dictionary-encoded children must be unwrapped before scalar serde compare.
+  auto wrapped = makeMapVector(
+      {0, 70},
+      BaseVector::wrapInDictionary(
+          nullptr, indices, maps->mapKeys()->size(), maps->mapKeys()),
+      BaseVector::wrapInDictionary(
+          nullptr, indices, maps->mapValues()->size(), maps->mapValues()));
+  check(makeRowVector({wrapped, makeFlatVector<int64_t>({0, 0})}), -1, -1);
+}
+
+TEST_F(ContainerRowSerdeTest, sparkMapRejectsNegativeCardinality) {
+  if (!kSparkCompatible) {
+    GTEST_SKIP() << "Tests Spark's Map cardinality comparison";
+  }
+  int32_t counts[] = {-1, std::numeric_limits<int32_t>::max()};
+  for (int leftIndex : {0, 1}) {
+    ByteInputStream left({ByteRange{
+        reinterpret_cast<uint8_t*>(&counts[leftIndex]), sizeof(int32_t), 0}});
+    ByteInputStream right({ByteRange{
+        reinterpret_cast<uint8_t*>(&counts[1 - leftIndex]),
+        sizeof(int32_t),
+        0}});
+    auto type = MAP(INTEGER(), INTEGER());
+    EXPECT_THROW(
+        ContainerRowSerde::compare(left, right, type.get(), CompareFlags{}),
+        BoltException);
+  }
+}
+
+TEST_F(ContainerRowSerdeTest, mapSizeFirstAcrossRanges) {
+  auto maps =
+      makeMapVector<std::string, std::string>({{{"z", "x"}}, {{"z", "a"}}});
+  auto bytes = serializeIntoBytes(maps, 0);
+  ByteInputStream stream({
+      ByteRange{reinterpret_cast<uint8_t*>(bytes.data()), 3, 0},
+      ByteRange{
+          reinterpret_cast<uint8_t*>(bytes.data() + 3),
+          static_cast<int32_t>(bytes.size() - 3),
+          0},
+  });
+  DecodedVector decoded(*maps);
+  CompareFlags flags{.compareSizeFirst = true};
+  EXPECT_GT(ContainerRowSerde::compare(stream, decoded, 1, flags), 0);
 }
 
 TEST_F(ContainerRowSerdeTest, map) {

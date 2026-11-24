@@ -29,6 +29,7 @@
  */
 
 #include <folly/experimental/FunctionScheduler.h>
+#include <atomic>
 #include "bolt/connectors/Connector.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -42,6 +43,20 @@ namespace bytedance::bolt::exec::test {
 namespace {
 
 const std::string kTestConnectorId = "test";
+
+struct TestDataSourceStats {
+  std::atomic<int> releaseFinalSplitResourcesCalls{0};
+  std::atomic<int> closeCalls{0};
+  std::atomic<int> closeBeforeFinalReleaseCalls{0};
+
+  void reset() {
+    releaseFinalSplitResourcesCalls = 0;
+    closeCalls = 0;
+    closeBeforeFinalReleaseCalls = 0;
+  }
+};
+
+TestDataSourceStats testDataSourceStats;
 
 class TestTableHandle : public connector::ConnectorTableHandle {
  public:
@@ -89,7 +104,8 @@ class TestSplit : public connector::ConnectorSplit {
 
 class TestDataSource : public connector::DataSource {
  public:
-  explicit TestDataSource(memory::MemoryPool* pool) : pool_{pool} {}
+  TestDataSource(memory::MemoryPool* pool, TestDataSourceStats* stats)
+      : pool_{pool}, stats_{stats} {}
 
   void addSplit(std::shared_ptr<connector::ConnectorSplit> split) override {
     auto testSplit = std::dynamic_pointer_cast<TestSplit>(split);
@@ -142,15 +158,30 @@ class TestDataSource : public connector::DataSource {
     return {};
   }
 
+  void releaseFinalSplitResources() override {
+    ++stats_->releaseFinalSplitResourcesCalls;
+    finalResourcesReleased_ = true;
+  }
+
+  void close() override {
+    ++stats_->closeCalls;
+    if (!finalResourcesReleased_) {
+      ++stats_->closeBeforeFinalReleaseCalls;
+    }
+  }
+
  private:
   memory::MemoryPool* pool_;
+  TestDataSourceStats* const stats_;
+  bool finalResourcesReleased_{false};
   bool needSplit_{true};
   ContinueFuture future_{ContinueFuture::makeEmpty()};
 };
 
 class TestConnector : public connector::Connector {
  public:
-  TestConnector(const std::string& id) : connector::Connector(id) {}
+  TestConnector(const std::string& id, TestDataSourceStats* stats)
+      : connector::Connector(id), stats_{stats} {}
 
   std::unique_ptr<connector::DataSource> createDataSource(
       const RowTypePtr& /* outputType */,
@@ -160,7 +191,8 @@ class TestConnector : public connector::Connector {
           std::shared_ptr<connector::ColumnHandle>>& /* columnHandles */,
       std::shared_ptr<ConnectorQueryCtx> connectorQueryCtx,
       const core::QueryConfig& /* queryConfig */) override {
-    return std::make_unique<TestDataSource>(connectorQueryCtx->memoryPool());
+    return std::make_unique<TestDataSource>(
+        connectorQueryCtx->memoryPool(), stats_);
   }
 
   std::unique_ptr<connector::DataSink> createDataSink(
@@ -172,6 +204,9 @@ class TestConnector : public connector::Connector {
       const core::QueryConfig& /*queryConfig*/) override final {
     BOLT_NYI();
   }
+
+ private:
+  TestDataSourceStats* const stats_;
 };
 
 class TestConnectorFactory : public connector::ConnectorFactory {
@@ -184,7 +219,7 @@ class TestConnectorFactory : public connector::ConnectorFactory {
       const std::string& id,
       std::shared_ptr<const config::ConfigBase> config,
       folly::Executor* /* executor */) override {
-    return std::make_shared<TestConnector>(id);
+    return std::make_shared<TestConnector>(id, &testDataSourceStats);
   }
 
   std::shared_ptr<Connector> newConnector(
@@ -204,6 +239,7 @@ class AsyncConnectorTest : public OperatorTestBase {
  public:
   void SetUp() override {
     OperatorTestBase::SetUp();
+    testDataSourceStats.reset();
     connector::registerConnectorFactory(
         std::make_shared<TestConnectorFactory>());
     auto testConnector =
@@ -218,7 +254,13 @@ class AsyncConnectorTest : public OperatorTestBase {
 
   void TearDown() override {
     connector::unregisterConnector(kTestConnectorId);
+    connector::unregisterConnectorFactory(
+        TestConnectorFactory::kTestConnectorName);
     OperatorTestBase::TearDown();
+  }
+
+  TestDataSourceStats& stats() {
+    return testDataSourceStats;
   }
 };
 
@@ -250,6 +292,37 @@ TEST_F(AsyncConnectorTest, basic) {
     const auto& scanStats = stats.at(scanId);
     ASSERT_GT(scanStats.blockedWallNanos, 0);
   }
+}
+
+TEST_F(AsyncConnectorTest, releaseFinalSplitResourcesBeforeClose) {
+  auto tableHandle = std::make_shared<TestTableHandle>();
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .outputType(ROW({"a"}, {BIGINT()}))
+                  .tableHandle(tableHandle)
+                  .endTableScan()
+                  .singleAggregation({}, {"min(a)"})
+                  .planNode();
+
+  assertQuery(plan, {std::make_shared<TestSplit>(0)}, "SELECT 0");
+
+  EXPECT_EQ(stats().releaseFinalSplitResourcesCalls.load(), 1);
+  EXPECT_EQ(stats().closeCalls.load(), 1);
+  EXPECT_EQ(stats().closeBeforeFinalReleaseCalls.load(), 0);
+}
+
+TEST_F(AsyncConnectorTest, closeBeforeFinalSplitForLimit) {
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .outputType(ROW({"a"}, {BIGINT()}))
+                  .tableHandle(std::make_shared<TestTableHandle>())
+                  .endTableScan()
+                  .limit(0, 1, false)
+                  .planNode();
+  assertQuery(plan, {std::make_shared<TestSplit>(0)}, "SELECT 0");
+  EXPECT_EQ(stats().releaseFinalSplitResourcesCalls.load(), 0);
+  EXPECT_EQ(stats().closeCalls.load(), 1);
+  EXPECT_EQ(stats().closeBeforeFinalReleaseCalls.load(), 1);
 }
 
 } // namespace bytedance::bolt::exec::test

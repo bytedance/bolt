@@ -35,10 +35,15 @@
 #include <numeric>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/HiveDataSource.h"
 #include "bolt/dwio/common/Statistics.h"
+#ifdef BOLT_ENABLE_PARQUET
+#include "bolt/dwio/common/FileSink.h"
+#include "bolt/dwio/parquet/writer/Writer.h"
+#endif
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/vector/LazyVector.h"
 namespace bytedance::bolt::connector::hive {
@@ -1115,6 +1120,436 @@ TEST_F(HiveConnectorTest, extractFiltersFromRemainingFilter) {
   ASSERT_TRUE(remaining);
   ASSERT_EQ(
       remaining->toString(), "not(lt(ROW[\"c2\"],cast 0 as DECIMAL(20, 0)))");
+}
+
+class HiveDataSourceFinalReleaseTest
+    : public exec::test::HiveConnectorTestBase,
+      public testing::WithParamInterface<dwio::common::FileFormat> {
+ protected:
+  enum class LoadMode {
+    kNone,
+    kAll,
+    kOneColumn,
+    kOuterRow,
+    kDiscard,
+    kDetachedColumn,
+    kDetachedNestedColumn,
+    kEmptySelection,
+    kHook,
+  };
+
+  class SumHook : public ValueHook {
+   public:
+    void addValue(vector_size_t /*row*/, const void* value) override {
+      sum += *static_cast<const int64_t*>(value);
+    }
+    int64_t sum{0};
+  };
+  std::shared_ptr<config::ConfigBase> properties_ =
+      std::make_shared<config::ConfigBase>(
+          std::unordered_map<std::string, std::string>{});
+
+  void SetUp() override {
+    HiveConnectorTestBase::SetUp();
+    BOLT_TEST_VALUE_ENABLE();
+  }
+
+  std::unique_ptr<DataSource> makeSource(
+      const RowTypePtr& type,
+      int outputCount) {
+    ColumnHandleMap columns;
+    for (const auto& name : type->names()) {
+      columns[name] = regularColumn(name, type->findChild(name));
+    }
+    auto ctx = std::make_shared<ConnectorQueryCtx>(
+        pool(),
+        pool(),
+        properties_.get(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        "lazyLifetime",
+        "lazyLifetime",
+        "0",
+        0);
+    return connector::getConnector(kHiveConnectorId)
+        ->createDataSource(
+            type,
+            makeTableHandle({}, nullptr, "lazyLifetime", type, false),
+            columns,
+            ctx,
+            core::QueryConfig(
+                {{core::QueryConfig::kTableScanReusableOutputCount,
+                  std::to_string(outputCount)}}));
+  }
+
+  std::shared_ptr<TempFilePath> writeData(const RowVectorPtr& input) {
+    auto file = TempFilePath::create();
+    if (GetParam() == dwio::common::FileFormat::DWRF) {
+      writeToFile(file->path, input);
+    }
+#ifdef BOLT_ENABLE_PARQUET
+    else {
+      auto sink = std::make_unique<dwio::common::WriteFileSink>(
+          std::make_unique<LocalWriteFile>(file->path, true, false),
+          file->path);
+      auto writerPool = rootPool_->addAggregateChild("lazyLifetime.writer");
+      parquet::WriterOptions options;
+      options.memoryPool = writerPool.get();
+      parquet::Writer writer(
+          std::move(sink), options, asRowType(input->type()));
+      writer.write(input);
+      writer.close();
+    }
+#endif
+    return file;
+  }
+
+  std::shared_ptr<HiveConnectorSplit> makeSplit(const std::string& path) {
+    return HiveConnectorSplitBuilder(path)
+        .connectorId(kHiveConnectorId)
+        .fileFormat(GetParam())
+        .build();
+  }
+
+  RowVectorPtr makeInput(int offset = 0) {
+    constexpr int n = 32;
+    return makeRowVector({
+        makeFlatVector<int64_t>(n, [offset](auto row) { return row + offset; }),
+        makeFlatVector<std::string>(
+            n,
+            [offset](auto row) {
+              return fmt::format(
+                  "{:08d}{}", row + offset, std::string(128, 'x'));
+            },
+            nullEvery(5)),
+        makeRowVector({
+            makeFlatVector<int64_t>(
+                n, [offset](auto row) { return row * 10 + offset; }),
+            makeArrayVector<std::string>(
+                n,
+                [](auto row) { return row % 3; },
+                [](auto element) {
+                  return fmt::format(
+                      "{:08d}{}", element, std::string(128, 'y'));
+                },
+                nullEvery(7)),
+        }),
+    });
+  }
+
+  RowVectorPtr readBatch(DataSource& source) {
+    ContinueFuture future = ContinueFuture::makeEmpty();
+    auto batch = source.next(1024, future);
+    EXPECT_TRUE(batch.has_value());
+    if (!batch.has_value()) {
+      return nullptr;
+    }
+    EXPECT_NE(nullptr, batch.value());
+    return std::move(batch.value());
+  }
+
+  void assertEof(DataSource& source) {
+    ContinueFuture future = ContinueFuture::makeEmpty();
+    auto eof = source.next(1024, future);
+    ASSERT_TRUE(eof.has_value());
+    ASSERT_EQ(nullptr, eof.value());
+  }
+
+  void testRelease(LoadMode mode, RowVectorPtr input = nullptr) {
+    if (!input) {
+      input = makeInput();
+    }
+    auto file = writeData(input);
+    for (const int outputCount : {0, 2}) {
+      SCOPED_TRACE(fmt::format(
+          "reuse {}, mode {}", outputCount, static_cast<int>(mode)));
+      std::weak_ptr<dwio::common::LazyLoadToken> token;
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::connector::hive::SplitReader::next",
+          std::function<void(SplitReader*)>([&](auto* reader) {
+            token = reader->readerOptions().lazyLoadToken();
+          }));
+      auto source = makeSource(asRowType(input->type()), outputCount);
+      source->addSplit(makeSplit(file->path));
+      auto output = readBatch(*source);
+      ASSERT_NE(nullptr, output);
+      ASSERT_EQ(input->size(), output->size());
+      ASSERT_TRUE(output->childAt(0)->isLazy());
+      ASSERT_FALSE(output->childAt(0)->as<LazyVector>()->isLoaded());
+      VectorPtr retained = output;
+      VectorPtr expected = input;
+      if (mode == LoadMode::kAll) {
+        output->loadedVector();
+      } else if (mode == LoadMode::kOneColumn) {
+        output->childAt(0)->loadedVector();
+      } else if (
+          mode == LoadMode::kOuterRow ||
+          mode == LoadMode::kDetachedNestedColumn) {
+        std::vector<vector_size_t> positions(output->size());
+        std::iota(positions.begin(), positions.end(), 0);
+        output->childAt(2)->as<LazyVector>()->load(RowSet(positions), nullptr);
+        auto* nested = output->childAt(2)->loadedVector()->as<RowVector>();
+        if (GetParam() == dwio::common::FileFormat::DWRF) {
+          ASSERT_TRUE(nested->childAt(0)->isLazy());
+          ASSERT_FALSE(nested->childAt(0)->as<LazyVector>()->isLoaded());
+        } else {
+          // Parquet's optional struct levels make these children eager.
+          ASSERT_FALSE(nested->childAt(0)->isLazy());
+        }
+        if (mode == LoadMode::kDetachedNestedColumn) {
+          retained = nested->childAt(0);
+          expected = input->childAt(2)->as<RowVector>()->childAt(0);
+        }
+      } else if (mode == LoadMode::kDiscard) {
+        retained.reset();
+      } else if (mode == LoadMode::kDetachedColumn) {
+        retained = output->childAt(0);
+        expected = input->childAt(0);
+      } else if (mode == LoadMode::kEmptySelection) {
+        for (auto& child : output->children()) {
+          child->as<LazyVector>()->load(RowSet{}, nullptr);
+          EXPECT_TRUE(child->as<LazyVector>()->isLoaded());
+          EXPECT_EQ(child->size(), child->loadedVector()->getNullCount());
+        }
+      } else if (mode == LoadMode::kHook) {
+        std::vector<vector_size_t> rows(output->size());
+        std::iota(rows.begin(), rows.end(), 0);
+        SumHook hook;
+        output->childAt(0)->as<LazyVector>()->load(RowSet(rows), &hook);
+        EXPECT_EQ(output->size() * (output->size() - 1) / 2, hook.sum);
+        for (int i = 1; i < output->childrenSize(); ++i) {
+          bytedance::bolt::test::assertEqualVectors(
+              input->childAt(i), output->childAt(i));
+        }
+        retained.reset();
+      }
+      output.reset();
+      assertEof(*source);
+      const auto beforeRelease = pool()->currentBytes();
+      source->releaseFinalSplitResources();
+      source->releaseFinalSplitResources();
+      if (BOLT_TEST_VALUE_ENABLED()) {
+        EXPECT_EQ(
+            mode == LoadMode::kAll || mode == LoadMode::kDiscard ||
+                mode == LoadMode::kHook ||
+                (mode == LoadMode::kDetachedNestedColumn &&
+                 GetParam() == dwio::common::FileFormat::PARQUET),
+            token.expired());
+      }
+      if (mode == LoadMode::kAll || mode == LoadMode::kDiscard ||
+          mode == LoadMode::kHook) {
+        EXPECT_LT(pool()->currentBytes(), beforeRelease);
+        EXPECT_EQ(DataSource::kUnknownRowSize, source->estimatedRowSize());
+      }
+      if (retained && mode != LoadMode::kEmptySelection) {
+        bytedance::bolt::test::assertEqualVectors(expected, retained);
+      }
+      // Empty selections bypass ColumnLoader. Cleanup may be deferred until
+      // close(), but loaded or discarded vectors never depend on the reader.
+      source->close();
+      source->close();
+      if (retained && mode != LoadMode::kEmptySelection) {
+        bytedance::bolt::test::assertEqualVectors(expected, retained);
+      }
+      retained.reset();
+      if (BOLT_TEST_VALUE_ENABLED()) {
+        EXPECT_TRUE(token.expired());
+      }
+    }
+  }
+};
+
+TEST_P(HiveDataSourceFinalReleaseTest, unloadedFinalBatch) {
+  testRelease(LoadMode::kNone);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, loadedFinalBatch) {
+  testRelease(LoadMode::kAll);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, partiallyLoadedFinalBatch) {
+  testRelease(LoadMode::kOneColumn);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, nestedUnloadedFields) {
+  testRelease(LoadMode::kOuterRow);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, discardUnloadedFinalBatch) {
+  testRelease(LoadMode::kDiscard);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, detachedLazyColumn) {
+  testRelease(LoadMode::kDetachedColumn);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, detachedNestedLazyColumn) {
+  testRelease(LoadMode::kDetachedNestedColumn);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, emptySelection) {
+  testRelease(LoadMode::kEmptySelection);
+}
+TEST_P(HiveDataSourceFinalReleaseTest, valueHook) {
+  testRelease(LoadMode::kHook);
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, singleLazyColumn) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(32, [](auto row) { return row; }),
+  });
+  for (auto mode : {LoadMode::kNone, LoadMode::kAll, LoadMode::kDiscard}) {
+    testRelease(mode, input);
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, singleNestedLazyColumn) {
+  auto input = makeRowVector({makeInput()->childAt(2)});
+  for (auto mode : {LoadMode::kNone, LoadMode::kAll, LoadMode::kDiscard}) {
+    testRelease(mode, input);
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, adoptPreloadedSource) {
+  auto input = makeInput();
+  auto file = writeData(input);
+  for (const int outputCount : {0, 2}) {
+    auto source = makeSource(asRowType(input->type()), outputCount);
+    auto prepared = makeSource(asRowType(input->type()), outputCount);
+    prepared->addSplit(makeSplit(file->path));
+    source->setFromDataSource(std::move(prepared));
+    auto output = readBatch(*source);
+    ASSERT_NE(nullptr, output);
+    assertEof(*source);
+    source->releaseFinalSplitResources();
+    bytedance::bolt::test::assertEqualVectors(input, output);
+    source->close();
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, multipleSplits) {
+  auto first = makeInput();
+  auto second = makeInput(100);
+  auto firstFile = writeData(first);
+  auto secondFile = writeData(second);
+  for (const int outputCount : {0, 2}) {
+    auto source = makeSource(asRowType(first->type()), outputCount);
+    source->addSplit(makeSplit(firstFile->path));
+    auto firstOutput = readBatch(*source);
+    ASSERT_NE(nullptr, firstOutput);
+    bytedance::bolt::test::assertEqualVectors(first, firstOutput);
+    assertEof(*source);
+    source->addSplit(makeSplit(secondFile->path));
+    auto secondOutput = readBatch(*source);
+    ASSERT_NE(nullptr, secondOutput);
+    assertEof(*source);
+    source->releaseFinalSplitResources();
+    bytedance::bolt::test::assertEqualVectors(first, firstOutput);
+    bytedance::bolt::test::assertEqualVectors(second, secondOutput);
+    source->close();
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, sparseLazyLoadAfterRelease) {
+  auto input = makeInput();
+  auto file = writeData(input);
+  for (const int outputCount : {0, 2}) {
+    auto source = makeSource(asRowType(input->type()), outputCount);
+    source->addSplit(makeSplit(file->path));
+    auto output = readBatch(*source);
+    ASSERT_NE(nullptr, output);
+    assertEof(*source);
+    source->releaseFinalSplitResources();
+    const std::vector<vector_size_t> rows{0, 1, 5, 31};
+    output->childAt(1)->as<LazyVector>()->load(RowSet(rows), nullptr);
+    auto indices = makeIndices(rows);
+    bytedance::bolt::test::assertEqualVectors(
+        BaseVector::wrapInDictionary(
+            nullptr, indices, rows.size(), input->childAt(1)),
+        BaseVector::wrapInDictionary(
+            nullptr, indices, rows.size(), output->childAt(1)));
+    source->close();
+    output.reset();
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, failedLazyLoadCleanup) {
+  class ThrowHook : public ValueHook {
+   public:
+    void addValue(vector_size_t /*row*/, const void* /*value*/) override {
+      BOLT_FAIL("Injected lazy load failure");
+    }
+  };
+  auto input = makeInput();
+  auto file = writeData(input);
+  for (const int outputCount : {0, 2}) {
+    auto source = makeSource(asRowType(input->type()), outputCount);
+    source->addSplit(makeSplit(file->path));
+    auto output = readBatch(*source);
+    ASSERT_NE(nullptr, output);
+    assertEof(*source);
+    source->releaseFinalSplitResources();
+    ThrowHook hook;
+    const std::vector<vector_size_t> rows{0};
+    ASSERT_THROW(
+        output->childAt(0)->as<LazyVector>()->load(RowSet(rows), &hook),
+        BoltRuntimeError);
+    source->close();
+    output.reset();
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, closeWithPendingLazyOutput) {
+  auto input = makeInput();
+  auto file = writeData(input);
+  for (const int outputCount : {0, 2}) {
+    auto source = makeSource(asRowType(input->type()), outputCount);
+    source->addSplit(makeSplit(file->path));
+    auto output = readBatch(*source);
+    ASSERT_NE(nullptr, output);
+    source->close();
+    source.reset();
+    // Pending output can be discarded after close without touching the reader.
+    output.reset();
+  }
+}
+
+TEST_P(HiveDataSourceFinalReleaseTest, emptySplit) {
+  auto input = makeInput();
+  auto file = writeData(input);
+  auto split = HiveConnectorSplitBuilder(file->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(GetParam())
+                   .length(0)
+                   .build();
+  auto source = makeSource(asRowType(input->type()), 0);
+  source->addSplit(split);
+  assertEof(*source);
+  source->releaseFinalSplitResources();
+  source->close();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Formats,
+    HiveDataSourceFinalReleaseTest,
+    testing::Values(
+        dwio::common::FileFormat::DWRF
+#ifdef BOLT_ENABLE_PARQUET
+        ,
+        dwio::common::FileFormat::PARQUET
+#endif
+        ),
+    [](const testing::TestParamInfo<dwio::common::FileFormat>& info) {
+      return info.param == dwio::common::FileFormat::DWRF ? "DWRF" : "PARQUET";
+    });
+
+TEST_F(HiveConnectorTest, copyLazyLoadTokenOptions) {
+  auto token = std::make_shared<dwio::common::LazyLoadToken>();
+  dwio::common::ReaderOptions original(pool_.get());
+  original.setLazyLoadToken(token);
+  dwio::common::ReaderOptions copied(original);
+  dwio::common::ReaderOptions assigned(pool_.get());
+  assigned = original;
+  for (const auto* options : {&copied, &assigned}) {
+    EXPECT_EQ(
+        token,
+        dwio::common::makeColumnReaderOptions(*options).lazyLoadToken.lock());
+  }
 }
 
 } // namespace

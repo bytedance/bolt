@@ -41,7 +41,7 @@ config.spillStoreConfig.fileAllocatorConfig.bucket_sizes = {
     static_cast<int64_t>(allocateSizeBytes(AllocateSize::kLarge)),
 };
 config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
-    1024LL * 1024LL * 1024LL;
+    2LL * 1024LL * 1024LL * 1024LL;
 config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 64;
 
 auto manager = BufferManager::Create(parentPool, std::move(config));
@@ -49,6 +49,52 @@ auto manager = BufferManager::Create(parentPool, std::move(config));
 
 `fileAllocatorConfig` uses the `bm/file` module. See
 `bolt/common/memory/bm/file/Usage.md` for its allocation rules.
+
+Task-created managers read these QueryConfig settings:
+
+| QueryConfig key | Default | Meaning |
+| --- | --- | --- |
+| `buffer_manager_enabled` | `false` | Create the Task-level BM for opted-in operators. |
+| `buffer_manager_spill_file_size` | 2147483648 bytes (2 GiB) | Maximum bucket-file size; positive, 4 KiB aligned, and at least the largest bucket (currently 4 MiB). |
+| `buffer_manager_spill_max_files_per_bucket` | 64 | Maximum files held independently by each bucket; positive and representable as uint32. |
+| `buffer_manager_spill_compression_kind` | `zstd` | BM codec, independent of ordinary operator spill compression. `none` disables compression; `openzl` selects OpenZL. An explicit empty value is accepted as a compatibility alias for `zstd`. |
+| `buffer_manager_spill_compression_level` | unset | Optional signed int32 level for the selected codec. Unset preserves its default (currently 3 for Zstd and OpenZL); ignored for `none`. |
+
+Gluten exposes these settings under `spark.gluten.sql.columnar.backend.bolt.`
+as `bufferManagerEnabled`, `bufferManagerSpillFileSize` (accepts byte units such
+as `2g`), `bufferManagerSpillMaxFilesPerBucket`, `bufferManagerSpillCompressionKind`
+and `bufferManagerSpillCompressionLevel`.
+
+Both Bolt and
+Gluten default the BM codec to `zstd`. An explicit empty value also selects Zstd
+for compatibility with older callers; only `none` disables compression.
+Zstd levels are checked against the linked library's
+supported range. OpenZL uses its native signed integer parameter.
+OpenZL's existing fallback for unsupported or undescribed blocks retains the
+independent Zstd options and default level rather than applying the OpenZL level.
+Settings apply when a Task creates its manager.
+
+Task defaults to 2 GiB per file and 64 files per bucket, allowing 128 GiB of
+live slots per bucket. Query settings override these defaults. Native callers
+can also set allocator limits in `BufferManagerConfig`. Bucket files grow as
+data is written; increasing these limits does not preallocate disk space. Each bucket has its own limit, freed
+slots can be reused, and dedicated files for records larger than the largest
+bucket bypass these limits. This is not a cumulative or task-wide spill quota.
+With the defaults and eight Task buckets, up to 512 bucket files can remain
+open per manager, plus dedicated files.
+
+The default retains 64 files per bucket because allocation and deallocation
+currently search existing files linearly. Queries needing more capacity can
+explicitly tune file size or file count; larger files also make whole-file disk
+reclamation coarser.
+
+Task puts the codec name and optional level in `config.spillCompression` and
+calls `BufferManager::Create(parent, config)`. BM resolves and validates these
+values before creating its pool or spill store, then retains only the resolved
+typed configuration. Omitting `spillCompression` preserves the typed compression
+options in `config.spillStoreConfig.compressionConfig` unchanged. Named settings
+only override the selected codec and optional level; other codec options,
+including the independent Zstd fallback for OpenZL, are preserved.
 
 BM reads and writes use the `bm/io` `DiskIoScheduler`. Its default backend uses
 io_uring. If the runtime does not support or permit io_uring, scheduler

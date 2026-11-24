@@ -32,6 +32,13 @@ namespace bytedance::bolt::functions::flinksql {
 ///   the resolved JVM default zone and raw offset explicitly when it differs.
 ///   The boolean controls parse failures, not Flink's MySQL zero-date option.
 /// - flink_timestamp_precision(timestamp, precision), with precision in [0, 9].
+///   Truncates fractional seconds to the requested precision, including before
+///   1970.
+/// - flink_timestamp_truncate(timestamp, precision), with precision in [0, 9].
+///   Matches Flink's legacy SqlDateTimeUtils.truncate: preserves timestamps
+///   whose unpadded nano digit count fits a positive precision; otherwise
+///   truncates epoch milliseconds toward zero for precision <= 3 and fractional
+///   seconds for higher precision. Millisecond conversion rejects overflow.
 /// - flink_timestamp_to_utc(timestamp, zone) and flink_timestamp_from_utc(...).
 ///   NTZ-to-LTZ conversion uses the earlier offset at regional overlaps.
 /// - flink_timestamp_to_utc_later_offset(timestamp, zone).

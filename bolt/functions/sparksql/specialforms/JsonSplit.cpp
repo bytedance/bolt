@@ -17,6 +17,7 @@
 #include "bolt/functions/sparksql/specialforms/JsonSplit.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/expression/PeeledEncoding.h"
 #include "bolt/expression/SpecialForm.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
@@ -24,6 +25,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/SelectivityVector.h"
 
+#include "expression/ScopedVarSetter.h"
 #include "sonic/dom/parser.h"
 #include "sonic/sonic.h"
 using namespace bytedance::bolt::exec;
@@ -256,6 +258,9 @@ parseElement(VectorPtr& vector, size_t index, simdjson::ondemand::value value) {
   try {
     value.get(jsonValue);
   } catch (simdjson::simdjson_error& error) {
+    if (error.error() == simdjson::MEMALLOC) {
+      BOLT_MEM_ALLOC_ERROR(error.what());
+    }
   }
   flatVector->set(index, jsonValue);
 }
@@ -340,7 +345,7 @@ typename std::enable_if<IsStringType<kind>>::type parseElement(
 
 void resizeVector(VectorPtr vectorPtr, size_t newSize) {
   if (newSize > vectorPtr->size()) {
-    vectorPtr->resize(vectorPtr->size() + newSize);
+    vectorPtr->resize(newSize);
   }
 }
 
@@ -604,14 +609,27 @@ void jsonToArray_SimdJson(
             row, doc.type() == simdjson::ondemand::json_type::null);
         arrayVector->setOffsetAndSize(row, lastOffset, offset - lastOffset);
         lastOffset = offset;
-      } catch (simdjson::simdjson_error& e) {
-        BOLT_USER_FAIL(fmt::format(
-            "json_split parse error: {}, json string: {}", e.what(), jsonStr));
+      } catch (const simdjson::simdjson_error& e) {
+        if (e.error() == simdjson::MEMALLOC) {
+          BOLT_MEM_ALLOC_ERROR(e.what());
+        }
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        return;
+      } catch (const BoltException& e) {
+        if (!e.isUserError()) {
+          throw;
+        }
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        return;
       } catch (const std::exception& e) {
-        BOLT_USER_FAIL(fmt::format(
-            "json_split exception occurs: {}, json string: {}",
-            e.what(),
-            jsonStr));
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        BOLT_FAIL("json_split exception occurs: {}", e.what());
       }
     }
   });
@@ -643,24 +661,39 @@ void jsonToArray_Sonic(
       jsonDoc.Parse(jsonStr.data(), jsonStr.size());
 
       if (jsonDoc.HasParseError()) {
-        BOLT_USER_FAIL(fmt::format(
-            "json_split parse error: {}, json string: {}",
-            sonic_json::ErrorMsg(jsonDoc.GetParseError()),
-            jsonStr));
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        return;
       }
 
-      if (jsonDoc.IsArray()) {
-        resizeVector(elementVector, offset + jsonDoc.Size());
-        for (auto v = jsonDoc.Begin(); v != jsonDoc.End(); v++) {
-          parseElement<kind>(elementVector, offset++, v);
-        }
-      } else if (jsonDoc.IsObject()) {
-        resizeVector(elementVector, offset + jsonDoc.Size());
+      try {
+        if (jsonDoc.IsArray()) {
+          resizeVector(elementVector, offset + jsonDoc.Size());
+          for (auto v = jsonDoc.Begin(); v != jsonDoc.End(); v++) {
+            parseElement<kind>(elementVector, offset++, v);
+          }
+        } else if (jsonDoc.IsObject()) {
+          resizeVector(elementVector, offset + jsonDoc.Size());
 
-        for (auto m = jsonDoc.MemberBegin(); m != jsonDoc.MemberEnd(); ++m) {
-          auto* val = &m->value;
-          parseElement<kind>(elementVector, offset++, val);
+          for (auto m = jsonDoc.MemberBegin(); m != jsonDoc.MemberEnd(); ++m) {
+            auto* val = &m->value;
+            parseElement<kind>(elementVector, offset++, val);
+          }
         }
+      } catch (const BoltException& e) {
+        if (!e.isUserError()) {
+          throw;
+        }
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        return;
+      } catch (const std::exception& e) {
+        arrayVector->setOffsetAndSize(row, lastOffset, 0);
+        result->setNull(row, true);
+        offset = lastOffset;
+        BOLT_FAIL("json_split exception occurs: {}", e.what());
       }
 
       arrayVector->setNull(row, jsonDoc.IsNull());
@@ -685,6 +718,7 @@ void JsonSplitExpr::jsonToArray(
         context.execCtx()->queryCtx()->queryConfig().enableSonicJsonParse();
   });
 
+  ScopedVarSetter holder{context.mutableThrowOnError(), false};
   if (useSonic_) {
     jsonToArray_Sonic<kind>(
         rows, input, context, resultType, result, hasJsonStringType);

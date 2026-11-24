@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <limits>
 #include <thread>
 
 #include "bolt/common/base/Counters.h"
@@ -484,28 +485,29 @@ void Task::maybeCreateBufferManager() {
       4 * 1024 * 1024,
   };
   config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
-      1024LL * 1024LL * 1024LL;
-  config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 64;
-  config.arbitrationReclaimer = exec::MemoryReclaimer::create();
-  const auto compressionKind =
-      queryCtx_->queryConfig().bufferManagerSpillCompressionKind();
+      queryCtx_->queryConfig().bufferManagerSpillFileSize();
+  const auto& fileConfig = config.spillStoreConfig.fileAllocatorConfig;
   BOLT_USER_CHECK(
-      compressionKind.empty() || compressionKind == "zstd" ||
-          compressionKind == "openzl",
-      "Unsupported BufferManager spill compression kind '{}'; allowed "
-      "values are zstd and openzl",
-      compressionKind);
-  if (compressionKind == "openzl") {
-    config.spillStoreConfig.compressionConfig.kind =
-        memory::bm::compress::CompressionKind::kOpenZlFrame;
-  } else if (
-      compressionKind == "zstd" ||
-      (compressionKind.empty() &&
-       queryCtx_->queryConfig().spillCompressionKind() == "zstd")) {
-    config.spillStoreConfig.compressionConfig.kind =
-        memory::bm::compress::CompressionKind::kZstdFrame;
-    config.spillStoreConfig.compressionConfig.zstd.compressionLevel = 3;
-  }
+      memory::bm::IsFileSegmentAligned(fileConfig.file_size_limit_bytes) &&
+          fileConfig.file_size_limit_bytes >= fileConfig.bucket_sizes.back(),
+      "{} must be 4 KiB aligned and at least {} bytes; got {}",
+      core::QueryConfig::kBufferManagerSpillFileSize,
+      fileConfig.bucket_sizes.back(),
+      fileConfig.file_size_limit_bytes);
+  const auto maxFiles =
+      queryCtx_->queryConfig().bufferManagerSpillMaxFilesPerBucket();
+  BOLT_USER_CHECK(
+      maxFiles > 0 && maxFiles <= std::numeric_limits<uint32_t>::max(),
+      "{} must be between 1 and {}; got {}",
+      core::QueryConfig::kBufferManagerSpillMaxFilesPerBucket,
+      std::numeric_limits<uint32_t>::max(),
+      maxFiles);
+  config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket =
+      static_cast<uint32_t>(maxFiles);
+  config.arbitrationReclaimer = exec::MemoryReclaimer::create();
+  config.spillCompression = memory::bm::SpillCompressionOptions{
+      .kind = queryCtx_->queryConfig().bufferManagerSpillCompressionKind(),
+      .level = queryCtx_->queryConfig().bufferManagerSpillCompressionLevel()};
   BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Task::maybeCreateBufferManager", &config);
   bmBufferManager_ =
@@ -1097,7 +1099,6 @@ void Task::resume(std::shared_ptr<Task> self) {
         }
         driver->state().isTerminated = true;
         driver->state().setThread();
-        self->driverClosedLocked();
         offThreadDrivers.push_back(std::move(driver));
       }
     }
@@ -1107,6 +1108,8 @@ void Task::resume(std::shared_ptr<Task> self) {
   for (auto& driver : offThreadDrivers) {
     self->driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
+    std::lock_guard<std::timed_mutex> l(self->mutex_);
+    self->driverClosedLocked();
   }
 }
 
@@ -2156,7 +2159,6 @@ ContinueFuture Task::terminate(TaskState terminalState) {
         if (enterForTerminateLocked(driver->state()) ==
             StopReason::kTerminate) {
           offThreadDrivers.push_back(std::move(driver));
-          driverClosedLocked();
         }
       }
     }
@@ -2171,6 +2173,8 @@ ContinueFuture Task::terminate(TaskState terminalState) {
   for (auto& driver : offThreadDrivers) {
     driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
+    std::lock_guard<std::timed_mutex> l(mutex_);
+    driverClosedLocked();
   }
 
   // We continue all Drivers waiting for promises known to the

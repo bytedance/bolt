@@ -108,15 +108,21 @@ CompressionRecordResult CompressionManager::BuildSpillRecord(
       std::shared_ptr<const OpenZlCompressor> compressor;
       if (impl_->config.openZl.graphCacheCapacity == 0) {
         compressor = BuildOpenZlCompressor(
-            *descriptor, payload.size(), std::move(fingerprint));
+            *descriptor,
+            payload.size(),
+            std::move(fingerprint),
+            impl_->config.openZl.compressionLevel);
       } else {
         auto cache = impl_->openZlGraphCache.wlock();
         auto cached = cache->get(fingerprint);
         if (cached.has_value()) {
           compressor = std::move(*cached);
         } else {
-          compressor =
-              BuildOpenZlCompressor(*descriptor, payload.size(), fingerprint);
+          compressor = BuildOpenZlCompressor(
+              *descriptor,
+              payload.size(),
+              fingerprint,
+              impl_->config.openZl.compressionLevel);
           cache->add(fingerprint, compressor);
         }
       }

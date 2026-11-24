@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 
 #include "bolt/connectors/Connector.h"
@@ -35,6 +36,8 @@ class MemoryPool;
 } // namespace paimon
 
 namespace bytedance::bolt::connector::paimon {
+
+class BoltPaimonMemoryPool;
 
 struct PaimonDataSourceReadOptions {
   uint64_t naturalReadSize;
@@ -74,12 +77,11 @@ class PaimonDataSource : public DataSource {
   uint64_t getCompletedRows() override {
     return completedRows_;
   }
-  uint64_t getCompletedBytes() override {
-    return completedBytes_;
-  }
-  std::unordered_map<std::string, RuntimeCounter> runtimeStats() override {
-    return {};
-  }
+  uint64_t getCompletedBytes() override;
+  std::vector<uint64_t> getCompletedBytesReads() override;
+  std::vector<uint64_t> getCompletedCntReads() override;
+  std::vector<uint64_t> getCompletedScanTimeReads() override;
+  std::unordered_map<std::string, RuntimeCounter> runtimeStats() override;
   void addDynamicFilter(column_index_t, const std::shared_ptr<common::Filter>&)
       override {}
 
@@ -96,10 +98,11 @@ class PaimonDataSource : public DataSource {
   std::unique_ptr<::paimon::BatchReader> currentReader_;
   std::unique_ptr<::paimon::TableRead> tableRead_;
   std::vector<std::shared_ptr<::paimon::Split>> inputSplits_;
-  std::shared_ptr<::paimon::MemoryPool> paimonPool_;
+  std::shared_ptr<BoltPaimonMemoryPool> paimonPool_;
 
   uint64_t completedRows_{0};
-  uint64_t completedBytes_{0};
+  // Task statistics may read this while the driver evaluates a filter.
+  std::atomic<uint64_t> totalRemainingFilterTimeNs_{0};
 
   std::unique_ptr<exec::ExprSet> remainingFilterExprSet_;
   VectorPtr filterResult_;

@@ -98,11 +98,8 @@ class Split final : public exec::VectorFunction {
           }
           constexpr bool isSpark34Plus =
               (kSparkVersion >= SparkVersion::SPARK_3_4);
-          auto res = javaStyle::javaStyleSplitFastEmptyPattern<isSpark34Plus>(
-              std::string_view(current), "", limit);
-          for (const auto& s : res) {
-            arrayWriter.add_item().setNoCopy(StringView(s));
-          }
+          javaStyle::javaStyleSplitFastEmptyPatternWriter<isSpark34Plus>(
+              std::string_view(current), limit, arrayWriter);
           resultWriter.commit();
         });
       } else if constexpr (!isDelimRegex) {
@@ -146,11 +143,15 @@ class Split final : public exec::VectorFunction {
         }
         constexpr bool isSpark34Plus =
             (kSparkVersion >= SparkVersion::SPARK_3_4);
-
-        auto res = javaStyle::javaStyleSplit<isSpark34Plus>(
-            std::string_view(current), std::string_view(pattern), limit);
-        for (const auto& s : res) {
-          arrayWriter.add_item().setNoCopy(StringView(s));
+        if (pattern.empty()) {
+          javaStyle::javaStyleSplitFastEmptyPatternWriter<isSpark34Plus>(
+              std::string_view(current), limit, arrayWriter);
+        } else {
+          auto res = javaStyle::javaStyleSplitNoEmpty<isSpark34Plus>(
+              std::string_view(current), std::string_view(pattern), limit);
+          for (const auto& s : res) {
+            arrayWriter.add_item().setNoCopy(StringView(s));
+          }
         }
         resultWriter.commit();
       });

@@ -14,17 +14,28 @@
  * limitations under the License.
  */
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
+#include <paimon/fs/file_system_factory.h>
+#include <paimon/predicate/literal.h>
+#include <paimon/predicate/predicate_builder.h>
+#include <atomic>
 #include <filesystem>
 #include <memory>
+#include <numeric>
 #include <string>
+#include <thread>
 
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
+#include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/FileSink.h"
+#include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/TimestampConversion.h"
@@ -41,10 +52,53 @@ using namespace bytedance::bolt::dwio::common;
 
 namespace {
 
+class CountingInputStream : public ::paimon::InputStream {
+ public:
+  explicit CountingInputStream(std::unique_ptr<::paimon::InputStream> input)
+      : input_(std::move(input)) {}
+
+  ::paimon::Status Close() override {
+    return input_->Close();
+  }
+  ::paimon::Status Seek(int64_t offset, ::paimon::SeekOrigin origin) override {
+    return input_->Seek(offset, origin);
+  }
+  ::paimon::Result<int64_t> GetPos() const override {
+    return input_->GetPos();
+  }
+  ::paimon::Result<int32_t> Read(char* buffer, uint32_t size) override {
+    return input_->Read(buffer, size);
+  }
+  ::paimon::Result<int32_t> Read(char* buffer, uint32_t size, uint64_t offset)
+      override {
+    reads.emplace_back(offset, size);
+    return input_->Read(buffer, size, offset);
+  }
+  void ReadAsync(
+      char* buffer,
+      uint32_t size,
+      uint64_t offset,
+      std::function<void(::paimon::Status)>&& callback) override {
+    input_->ReadAsync(buffer, size, offset, std::move(callback));
+  }
+  ::paimon::Result<std::string> GetUri() const override {
+    return input_->GetUri();
+  }
+  ::paimon::Result<uint64_t> Length() const override {
+    return input_->Length();
+  }
+
+  std::vector<std::pair<uint64_t, uint32_t>> reads;
+
+ private:
+  std::unique_ptr<::paimon::InputStream> input_;
+};
+
 class PaimonParquetReaderTest : public ::testing::Test,
                                 public bytedance::bolt::test::VectorTestBase {
  protected:
   static void SetUpTestCase() {
+    filesystems::registerLocalFileSystem();
     memory::MemoryManager::Options options;
     options.allocatorCapacity = 8L << 30;
     memory::MemoryManager::testingSetInstance(options);
@@ -481,6 +535,52 @@ std::unique_ptr<::paimon::FileBatchReader> openReader(
   return std::move(readerRes).value();
 }
 
+// All-null numeric columns are returned as constant vectors by the Parquet
+// reader. Paimon's residual predicate filter requires a plain Arrow value type.
+TEST_F(PaimonParquetReaderTest, AllNullBigintExportsPlainArrowType) {
+  constexpr int32_t kRows = 37;
+  constexpr int32_t kBatchSize = 16;
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      BaseVector::createNullConstant(BIGINT(), kRows, leafPool_.get()),
+  });
+  auto path = tempPath("paimon_parquet_all_null_bigint.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+
+  auto reader = openReader(path, kBatchSize, leafPool_.get());
+  vector_size_t totalRows = 0;
+  while (true) {
+    auto batchRes = reader->NextBatch();
+    ASSERT_TRUE(batchRes.ok()) << batchRes.status().ToString();
+    if (::paimon::BatchReader::IsEofBatch(batchRes.value())) {
+      break;
+    }
+    auto pair = std::move(batchRes).value();
+    auto releaseBatch = folly::makeGuard([&]() {
+      if (pair.first->release) {
+        pair.first->release(pair.first.get());
+      }
+      if (pair.second->release) {
+        pair.second->release(pair.second.get());
+      }
+    });
+    // BIGINT must be exported as int64 ("l"), rather than run-end encoded
+    // ("+r"), so Paimon's literal converter can evaluate predicates on it.
+    ASSERT_STREQ(pair.second->children[1]->format, "l");
+    auto batch = std::dynamic_pointer_cast<RowVector>(
+        importFromArrowAsOwner(*pair.second, *pair.first, {}, leafPool_.get()));
+    ASSERT_NE(batch, nullptr);
+    for (vector_size_t row = 0; row < batch->size(); ++row) {
+      EXPECT_TRUE(data->equalValueAt(batch.get(), totalRows + row, row));
+    }
+    totalRows += batch->size();
+  }
+  EXPECT_EQ(totalRows, kRows);
+  reader->Close();
+}
+
 // ---- GetPreviousBatchFirstRowNumber tests
 // ----------------------------------------------------------
 
@@ -600,4 +700,249 @@ TEST_F(
   reader->Close();
 }
 
+TEST_F(PaimonParquetReaderTest, RuntimeStatsConcurrentSnapshots) {
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+  constexpr int64_t kUpdates = 10000;
+  std::atomic<bool> start{false};
+  std::thread writer([&] {
+    while (!start.load()) {
+      std::this_thread::yield();
+    }
+    dwio::common::RuntimeStatistics delta;
+    delta.processedStrides = 1;
+    delta.skippedStrides = 2;
+    for (int64_t i = 0; i < kUpdates; ++i) {
+      paimonPool->addRuntimeStats(delta);
+    }
+  });
+  start.store(true);
+  dwio::common::RuntimeStatistics previous;
+  for (int64_t i = 0; i < kUpdates; ++i) {
+    const auto stats = paimonPool->runtimeStats();
+    EXPECT_GE(stats.processedStrides, previous.processedStrides);
+    EXPECT_LE(stats.processedStrides, kUpdates);
+    EXPECT_GE(stats.skippedStrides, previous.skippedStrides);
+    EXPECT_LE(stats.skippedStrides, 2 * kUpdates);
+    previous = stats;
+  }
+  writer.join();
+  const auto stats = paimonPool->runtimeStats();
+  EXPECT_EQ(stats.processedStrides, kUpdates);
+  EXPECT_EQ(stats.skippedStrides, 2 * kUpdates);
+}
+
+TEST_F(PaimonParquetReaderTest, RuntimeStatsAcrossFiles) {
+  auto schema = ROW({"id"}, {BIGINT()});
+  auto path = tempPath("runtime_stats.parquet");
+  auto writer = createWriter(path, schema);
+  constexpr int32_t kRowsPerGroup = 100;
+  constexpr int32_t kGroups = 3;
+  for (int32_t group = 0; group < kGroups; ++group) {
+    writer->write(makeRowVector(
+        {"id"}, {makeFlatVector<int64_t>(kRowsPerGroup, [group](auto row) {
+          return group * kRowsPerGroup + row;
+        })}));
+    writer->flush();
+  }
+  writer->close();
+
+  // No pruning, partial pruning, and an entirely pruned file.
+  for (int64_t lowerBound : {0, 100, 300}) {
+    SCOPED_TRACE(lowerBound);
+    auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+    PaimonParquetReader format({});
+    auto builderResult = format.CreateReaderBuilder(31);
+    ASSERT_TRUE(builderResult.ok());
+    auto builder = std::move(builderResult).value();
+    builder->WithMemoryPool(paimonPool);
+    for (int32_t file = 1; file <= 2; ++file) {
+      auto readerResult = builder->Build(path);
+      ASSERT_TRUE(readerResult.ok());
+      auto reader = std::move(readerResult).value();
+      auto arrowSchema = reader->GetFileSchema();
+      ASSERT_TRUE(arrowSchema.ok());
+      auto predicate = ::paimon::PredicateBuilder::GreaterOrEqual(
+          0, "id", ::paimon::FieldType::BIGINT, ::paimon::Literal(lowerBound));
+      ASSERT_NE(predicate, nullptr);
+      ASSERT_TRUE(reader
+                      ->SetReadSchema(
+                          arrowSchema.value().get(), predicate, std::nullopt)
+                      .ok());
+      if (arrowSchema.value()->release) {
+        arrowSchema.value()->release(arrowSchema.value().get());
+      }
+
+      int64_t rows = 0;
+      for (;;) {
+        auto batch = reader->NextBatch();
+        ASSERT_TRUE(batch.ok()) << batch.status().ToString();
+        auto pair = std::move(batch).value();
+        if (::paimon::BatchReader::IsEofBatch(pair)) {
+          break;
+        }
+        rows += pair.first->length;
+        pair.first->release(pair.first.get());
+        pair.second->release(pair.second.get());
+      }
+      EXPECT_EQ(rows, kGroups * kRowsPerGroup - lowerBound);
+      reader->Close();
+      reader->Close();
+      reader.reset();
+
+      const auto stats = paimonPool->runtimeStats();
+      // Like Hive, Parquet accounts for metadata pruning at row-group level.
+      EXPECT_EQ(stats.skippedStrides, file * lowerBound / kRowsPerGroup);
+      EXPECT_EQ(
+          stats.processedStrides,
+          file * (kGroups - lowerBound / kRowsPerGroup));
+    }
+  }
+}
+
+TEST_F(PaimonParquetReaderTest, RuntimeStatsFollowReplacedPredicate) {
+  const auto schema = ROW({"id"}, {BIGINT()});
+  const auto path = tempPath("replaced_predicate_stats.parquet");
+  auto writer = createWriter(path, schema);
+  writer->write(makeRowVector({makeFlatVector<int64_t>({1, 2, 3})}));
+  writer->close();
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+  PaimonParquetReader format({});
+  auto builder = std::move(format.CreateReaderBuilder(32)).value();
+  builder->WithMemoryPool(paimonPool);
+  auto reader = std::move(builder->Build(path)).value();
+  for (int64_t bound : {3, 3, 1}) {
+    auto arrowSchema = reader->GetFileSchema();
+    ASSERT_TRUE(arrowSchema.ok());
+    auto predicate = ::paimon::PredicateBuilder::GreaterThan(
+        0, "id", ::paimon::FieldType::BIGINT, ::paimon::Literal(bound));
+    ASSERT_TRUE(
+        reader
+            ->SetReadSchema(arrowSchema.value().get(), predicate, std::nullopt)
+            .ok());
+    arrowSchema.value()->release(arrowSchema.value().get());
+    const auto stats = paimonPool->runtimeStats();
+    EXPECT_EQ(stats.processedStrides, bound == 3 ? 0 : 1);
+    EXPECT_EQ(stats.skippedStrides, bound == 3 ? 1 : 0);
+  }
+  auto batch = reader->NextBatch();
+  ASSERT_TRUE(batch.ok());
+  auto pair = std::move(batch).value();
+  ASSERT_FALSE(::paimon::BatchReader::IsEofBatch(pair));
+  EXPECT_EQ(pair.first->length, 2);
+  pair.first->release(pair.first.get());
+  pair.second->release(pair.second.get());
+  reader->Close();
+  const auto stats = paimonPool->runtimeStats();
+  EXPECT_EQ(stats.processedStrides, 1);
+  EXPECT_EQ(stats.skippedStrides, 0);
+}
+
 } // namespace
+
+TEST_F(PaimonParquetReaderTest, StatisticsPreserveBufferedReadRequests) {
+  constexpr int32_t kRows = 4096;
+  auto data = makeRowVector(
+      {"a", "b", "c", "padding"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(kRows, [](auto row) { return row + 10; }),
+       makeFlatVector<int64_t>(kRows, [](auto row) { return row + 20; }),
+       makeFlatVector<std::string>(kRows, [](auto row) {
+         return std::string(2200, 'x') + std::to_string(row);
+       })});
+  const auto path = tempPath("buffered_statistics.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+  ASSERT_GT(std::filesystem::file_size(path), 8 * 1024 * 1024);
+  auto projected =
+      makeRowVector({"a", "c"}, {data->childAt(0), data->childAt(2)});
+  EnsurePaimonBoltFileSystemRegistered();
+  auto fs = ::paimon::FileSystemFactory::Get("bolt", path, {});
+  ASSERT_TRUE(fs.ok());
+  const auto openStream = [&]() {
+    auto result = fs.value()->Open(path);
+    BOLT_CHECK(result.ok(), "{}", result.status().ToString());
+    return std::make_shared<CountingInputStream>(std::move(result).value());
+  };
+
+  for (bool throughInputStream : {false, true}) {
+    SCOPED_TRACE(throughInputStream);
+    const auto readReference = [&](io::IoStatistics* stats) {
+      auto stream = openStream();
+      std::shared_ptr<ReadFile> file = throughInputStream
+          ? std::static_pointer_cast<ReadFile>(
+                std::make_shared<PaimonReadFile>(stream, PaimonIoOptions{}))
+          : std::static_pointer_cast<ReadFile>(
+                std::make_shared<LocalReadFile>(path));
+      auto input = std::make_unique<dwio::common::BufferedInput>(
+          file, *leafPool_, dwio::common::MetricsLog::voidLog(), stats);
+      dwio::common::ReaderOptions options(leafPool_.get());
+      parquet::ParquetReader reference(std::move(input), options);
+      auto scanSpec =
+          std::make_shared<bytedance::bolt::common::ScanSpec>("<root>");
+      scanSpec->addAllChildFields(projected->type()->asRow());
+      dwio::common::RowReaderOptions rowOptions;
+      rowOptions.setScanSpec(scanSpec);
+      rowOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+          reference.rowType(), std::vector<std::string>{"a", "c"}));
+      auto rowReader = reference.createRowReader(rowOptions);
+      VectorPtr batch =
+          BaseVector::create(projected->type(), 1024, leafPool_.get());
+      int64_t rows = 0;
+      while (auto count = rowReader->next(1024, batch)) {
+        rows += count;
+        for (const auto& child : batch->as<RowVector>()->children()) {
+          child->loadedVector();
+        }
+      }
+      EXPECT_EQ(rows, kRows);
+      return stream->reads;
+    };
+    auto expectedStats = std::make_shared<io::IoStatistics>();
+    const auto originalReads = readReference(nullptr);
+    EXPECT_EQ(readReference(expectedStats.get()), originalReads);
+
+    auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+    PaimonParquetReader format({});
+    auto builder = std::move(format.CreateReaderBuilder(1024)).value();
+    builder->WithMemoryPool(paimonPool);
+    auto stream = openStream();
+    auto result =
+        throughInputStream ? builder->Build(stream) : builder->Build(path);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    auto reader = std::move(result).value();
+    // The existing InputStream counters include unplanned footer reads.
+    EXPECT_GT(paimonPool->ioStats()->rawBytesRead(), 0);
+    ArrowSchema schema{};
+    exportToArrow(projected, schema, ArrowOptions{});
+    ASSERT_TRUE(reader->SetReadSchema(&schema, nullptr, std::nullopt).ok());
+    schema.release(&schema);
+    int64_t rows = 0;
+    for (;;) {
+      auto result = reader->NextBatch();
+      ASSERT_TRUE(result.ok()) << result.status().ToString();
+      auto batch = std::move(result).value();
+      if (::paimon::BatchReader::IsEofBatch(batch)) {
+        break;
+      }
+      rows += batch.first->length;
+      batch.first->release(batch.first.get());
+      batch.second->release(batch.second.get());
+    }
+    EXPECT_EQ(rows, kRows);
+    reader->Close();
+    if (throughInputStream) {
+      EXPECT_EQ(stream->reads, originalReads);
+    }
+    const auto& actual = *paimonPool->ioStats();
+    EXPECT_GT(paimonPool->ioStats()->queryThreadIoLatency().count(), 0);
+    EXPECT_EQ(actual.rawBytesRead(), expectedStats->rawBytesRead());
+    EXPECT_EQ(actual.rawOverreadBytes(), expectedStats->rawOverreadBytes());
+    EXPECT_EQ(actual.rawBytesReads(), expectedStats->rawBytesReads());
+    EXPECT_EQ(actual.cntReads(), expectedStats->cntReads());
+    const auto bytes = actual.rawBytesReads();
+    EXPECT_EQ(
+        std::accumulate(bytes.begin(), bytes.end(), uint64_t{0}),
+        actual.rawBytesRead());
+  }
+}

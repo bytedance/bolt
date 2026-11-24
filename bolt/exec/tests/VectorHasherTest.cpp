@@ -30,6 +30,7 @@
 
 #include "bolt/exec/VectorHasher.h"
 #include <gtest/gtest.h>
+#include <bit>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -238,6 +239,30 @@ TEST_F(VectorHasherTest, flat) {
   }
 }
 
+TEST_F(VectorHasherTest, nanPayloadAndSignedZeroHash) {
+  constexpr auto kNanPayloadA = 0x7ff8000000000001ULL;
+  constexpr auto kNanPayloadB = 0x7ff8000000000011ULL;
+  const auto input = makeFlatVector<double>(
+      {std::bit_cast<double>(kNanPayloadA),
+       std::bit_cast<double>(kNanPayloadB),
+       0.0,
+       -0.0});
+  SelectivityVector rows(input->size());
+  auto hasher = VectorHasher::create(DOUBLE(), 0);
+  hasher->decode(*input, rows);
+  raw_vector<uint64_t> hashes(input->size());
+  hasher->hash(rows, false, hashes);
+
+  EXPECT_EQ(hashes[0], hashes[1]);
+  EXPECT_EQ(hashes[2], hashes[3]);
+  EXPECT_NE(hashes[0], hashes[2]);
+  EXPECT_EQ(input->hashValueAt(0), input->hashValueAt(1));
+  EXPECT_EQ(input->hashValueAt(2), input->hashValueAt(3));
+  const auto allHashes = input->hashAll();
+  EXPECT_EQ(allHashes->valueAt(0), allHashes->valueAt(1));
+  EXPECT_EQ(allHashes->valueAt(2), allHashes->valueAt(3));
+}
+
 TEST_F(VectorHasherTest, nonNullConstant) {
   auto hasher = exec::VectorHasher::create(INTEGER(), 1);
   auto vector = BaseVector::createConstant(INTEGER(), 123, 100, pool());
@@ -343,6 +368,101 @@ TEST_F(VectorHasherTest, dictionary) {
   hasher->hash(allRows_, false, hashes);
   for (int32_t i = 0; i < 100; i++) {
     EXPECT_EQ(hashes[i], folly::hasher<int64_t>()(i % 10 + 3)) << "at " << i;
+  }
+}
+
+TEST_F(VectorHasherTest, nullableHashSelectionAndMix) {
+  constexpr vector_size_t kSize = 1031;
+  auto check = [&](const VectorPtr& input, bool sparse, bool filterNulls) {
+    SelectivityVector selected(input->size());
+    for (int row = 0; row < input->size(); ++row) {
+      selected.setValid(
+          row,
+          (!sparse || row % 3 == 1) && (!filterNulls || !input->isNullAt(row)));
+    }
+    selected.updateBounds();
+    auto hasher = VectorHasher::create(input->type(), 0);
+    hasher->decode(*input, selected);
+    for (bool mix : {false, true}) {
+      raw_vector<uint64_t> hashes(input->size());
+      std::iota(hashes.begin(), hashes.end(), 17);
+      hasher->hash(selected, mix, hashes);
+      for (int row = 0; row < input->size(); ++row) {
+        uint64_t expected = row + 17;
+        if (selected.isValid(row)) {
+          const auto hash = input->isNullAt(row) ? VectorHasher::kNullHash
+                                                 : input->hashValueAt(row);
+          expected = mix ? bits::hashMix(expected, hash) : hash;
+        }
+        EXPECT_EQ(hashes[row], expected) << "row " << row << " mix " << mix;
+      }
+    }
+  };
+  std::vector<VectorPtr> bases{
+      makeFlatVector<int64_t>(
+          64, [](auto row) { return row * 127; }, nullEvery(5)),
+      makeFlatVector<std::string>(
+          64,
+          [](auto row) { return fmt::format("hash_key_{:020}", row); },
+          nullEvery(5)),
+      makeFlatVector<double>(
+          64, [](auto row) { return row / 7.0; }, nullEvery(5)),
+      makeNullableFlatVector<double>(
+          {std::nullopt,
+           -0.0,
+           0.0,
+           std::numeric_limits<double>::quiet_NaN(),
+           std::numeric_limits<double>::infinity(),
+           -std::numeric_limits<double>::infinity()}),
+      makeAllNullFlatVector<int64_t>(64)};
+  for (const auto& base : bases) {
+    auto indices =
+        makeIndices(kSize, [&](auto row) { return (row * 41) % base->size(); });
+    auto dictionary =
+        BaseVector::wrapInDictionary(nullptr, indices, kSize, base);
+    auto nulls = makeNulls(kSize, nullEvery(7));
+    auto invalid = makeIndices(kSize, [&](auto row) {
+      return row % 7 == 0 ? std::numeric_limits<vector_size_t>::max()
+                          : (row * 41) % base->size();
+    });
+    auto wrapper = BaseVector::wrapInDictionary(nulls, invalid, kSize, base);
+    auto reverse = makeIndices(kSize, [](auto row) { return kSize - 1 - row; });
+    auto nested =
+        BaseVector::wrapInDictionary(nullptr, reverse, kSize, wrapper);
+    for (const auto& input : {base, dictionary, wrapper, nested}) {
+      for (bool sparse : {false, true}) {
+        for (bool filterNulls : {false, true}) {
+          check(input, sparse, filterNulls);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(VectorHasherTest, sparseHashSkipsUndecodedDictionaryIndices) {
+  auto base = makeFlatVector<int64_t>(
+      16, [](auto row) { return row; }, nullEvery(5));
+  auto indices = makeIndices(1031, [](auto row) { return row % 16; });
+  auto dictionary = BaseVector::wrapInDictionary(nullptr, indices, 1031, base);
+  SelectivityVector rows(1031, false);
+  for (int row = 1; row < 1031; row += 3) {
+    rows.setValid(row, true);
+  }
+  rows.updateBounds();
+  auto hasher = VectorHasher::create(BIGINT(), 0);
+  raw_vector<uint64_t> hashes(1031);
+  for (bool mix : {false, true}) {
+    hasher->decode(*dictionary, rows);
+    std::fill(hashes.begin(), hashes.end(), 17);
+    hasher->hash(rows, mix, hashes);
+    for (int row = 0; row < 1031; ++row) {
+      uint64_t expected = 17;
+      if (rows.isValid(row)) {
+        const auto hash = base->hashValueAt(row % 16);
+        expected = mix ? bits::hashMix(expected, hash) : hash;
+      }
+      EXPECT_EQ(hashes[row], expected);
+    }
   }
 }
 

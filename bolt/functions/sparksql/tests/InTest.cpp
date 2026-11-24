@@ -35,6 +35,7 @@
 #include "bolt/expression/VectorFunction.h"
 
 #include <stdint.h>
+#include <bit>
 namespace bytedance::bolt::functions::sparksql::test {
 namespace {
 
@@ -151,15 +152,23 @@ TEST_F(InTest, Int64) {
 }
 
 TEST_F(InTest, Float) {
+  const auto nanA = std::bit_cast<float>(uint32_t{0x7fc00001});
+  const auto nanB = std::bit_cast<float>(uint32_t{0x7fc00002});
+
   EXPECT_EQ(in<float>(1.0, {-1.0, 1.0, 2.0}), true);
   EXPECT_EQ(in<float>(0, {-1.0, 1.0}), false);
   EXPECT_EQ(in<float>(0, {std::nullopt, 1.0}), std::nullopt);
   EXPECT_EQ(in<float>(-0.0, {-1.0, 0.0, 1.0}), true);
   EXPECT_EQ(in<float>(kNan, {-1.0, 0.0, 1.0}), false);
   EXPECT_EQ(in<float>(kNan, {kNan, -1.0, 0.0, 1.0}), true);
+  EXPECT_EQ(in<float>(nanA, {nanB}), true);
+  EXPECT_EQ(in<float>(nanB, {nanA}), true);
 }
 
 TEST_F(InTest, Double) {
+  const auto nanA = std::bit_cast<double>(uint64_t{0x7ff8000000000001});
+  const auto nanB = std::bit_cast<double>(uint64_t{0x7ff8000000000002});
+
   EXPECT_EQ(in<double>(1.0, {-1.0, 1.0, 2.0}), true);
   EXPECT_EQ(in<double>(0, {-1.0, 1.0}), false);
   EXPECT_EQ(in<double>(-0.0, {-1.0, 0.0, 1.0}), true);
@@ -170,6 +179,8 @@ TEST_F(InTest, Double) {
   EXPECT_EQ(in<double>(-kInf, {kNan, -1.0, 0.0, 1.0}), false);
   EXPECT_EQ(in<double>(-kInf, {kNan, -1.0, 0.0, 1.0, kInf}), false);
   EXPECT_EQ(in<double>(-kInf, {kNan, -1.0, 0.0, 1.0, -kInf}), true);
+  EXPECT_EQ(in<double>(nanA, {nanB}), true);
+  EXPECT_EQ(in<double>(nanB, {nanA}), true);
 }
 
 TEST_F(InTest, String) {

@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,7 @@
 #include "arrow/util/type_fwd.h"
 #include "bolt/dwio/parquet/arrow/Encryption.h"
 #include "bolt/dwio/parquet/arrow/Exception.h"
+#include "bolt/dwio/parquet/arrow/LevelRun.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Schema.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
@@ -1384,6 +1386,12 @@ class PARQUET_EXPORT ArrowWriterProperties {
       return this;
     }
 
+    /// Preserve known level runs and use repeated RLE writes (default enabled).
+    Builder* set_enable_level_run_optimization(bool enabled) {
+      enable_level_run_optimization_ = enabled;
+      return this;
+    }
+
     /// Create the final properties.
     std::shared_ptr<ArrowWriterProperties> build() {
       return std::shared_ptr<ArrowWriterProperties>(new ArrowWriterProperties(
@@ -1395,7 +1403,8 @@ class PARQUET_EXPORT ArrowWriterProperties {
           compliant_nested_types_,
           engine_version_,
           use_threads_,
-          executor_));
+          executor_,
+          enable_level_run_optimization_));
     }
 
    private:
@@ -1411,6 +1420,7 @@ class PARQUET_EXPORT ArrowWriterProperties {
 
     bool use_threads_;
     ::arrow::internal::Executor* executor_;
+    bool enable_level_run_optimization_{true};
   };
 
   bool support_deprecated_int96_timestamps() const {
@@ -1455,6 +1465,10 @@ class PARQUET_EXPORT ArrowWriterProperties {
     return use_threads_;
   }
 
+  bool enable_level_run_optimization() const {
+    return enable_level_run_optimization_;
+  }
+
   /// \brief Returns the executor used to write columns in parallel.
   ::arrow::internal::Executor* executor() const;
 
@@ -1468,7 +1482,8 @@ class PARQUET_EXPORT ArrowWriterProperties {
       bool compliant_nested_types,
       EngineVersion engine_version,
       bool use_threads,
-      ::arrow::internal::Executor* executor)
+      ::arrow::internal::Executor* executor,
+      bool enable_level_run_optimization)
       : write_timestamps_as_int96_(write_nanos_as_int96),
         coerce_timestamps_enabled_(coerce_timestamps_enabled),
         coerce_timestamps_unit_(coerce_timestamps_unit),
@@ -1477,7 +1492,8 @@ class PARQUET_EXPORT ArrowWriterProperties {
         compliant_nested_types_(compliant_nested_types),
         engine_version_(engine_version),
         use_threads_(use_threads),
-        executor_(executor) {}
+        executor_(executor),
+        enable_level_run_optimization_(enable_level_run_optimization) {}
 
   const bool write_timestamps_as_int96_;
   const bool coerce_timestamps_enabled_;
@@ -1488,6 +1504,7 @@ class PARQUET_EXPORT ArrowWriterProperties {
   const EngineVersion engine_version_;
   const bool use_threads_;
   ::arrow::internal::Executor* executor_;
+  const bool enable_level_run_optimization_;
 };
 
 /// \brief State object used for writing Arrow data directly to a Parquet
@@ -1507,6 +1524,19 @@ struct ArrowWriteContext {
     return ::arrow::Status::OK();
   }
 
+  struct LevelScratch {
+    std::optional<LevelRunScratch> runs;
+    // Release dense levels first to reduce page faults across files.
+    std::shared_ptr<ResizableBuffer> rep_levels_buffer;
+  };
+
+  LevelScratch& GetLevelScratch() {
+    if (!level_scratch) {
+      level_scratch = std::make_shared<LevelScratch>();
+    }
+    return *level_scratch;
+  }
+
   int64_t scratch_allocated_bytes() const {
     int64_t total_bytes = 0;
     if (data_buffer != nullptr) {
@@ -1514,6 +1544,15 @@ struct ArrowWriteContext {
     }
     if (def_levels_buffer != nullptr) {
       total_bytes += def_levels_buffer->capacity();
+    }
+    if (level_scratch) {
+      if (level_scratch->rep_levels_buffer) {
+        total_bytes += level_scratch->rep_levels_buffer->capacity();
+      }
+      if (auto& runs = level_scratch->runs) {
+        total_bytes += runs->definition.bytes_builder()->capacity() +
+            runs->repetition.bytes_builder()->capacity();
+      }
     }
     return total_bytes;
   }
@@ -1527,6 +1566,8 @@ struct ArrowWriteContext {
 
   // We use the shared ownership of this buffer
   std::shared_ptr<ResizableBuffer> def_levels_buffer;
+  // Retain dense repetition levels and run hints independently across leaves.
+  std::shared_ptr<LevelScratch> level_scratch;
 };
 
 PARQUET_EXPORT

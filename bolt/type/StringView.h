@@ -81,14 +81,15 @@ struct StringView {
     if (isInline()) {
       // Zero the inline part.
       // this makes sure that inline strings can be compared for equality with 2
-      // int64 compares.
+      // int64 compares. Both halves (prefix_ and value_.data) must always be
+      // zeroed, including when size_ == 0, so that two empty inline StringViews
+      // are bitwise-identical and the SIMD/raw-word equality compare in
+      // HashTable etc. is correct.
       memset(prefix_, 0, kPrefixSize);
+      value_.data = nullptr;
       if (size_ == 0) {
         return;
       }
-      // small string: inlined. Zero the last 8 bytes first to allow for whole
-      // word comparison.
-      value_.data = nullptr;
       memcpy(prefix_, data, size_);
     } else {
       // large string: store pointer

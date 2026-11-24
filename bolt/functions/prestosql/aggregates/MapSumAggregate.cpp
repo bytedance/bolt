@@ -218,21 +218,10 @@ class MapSumAggregate : public exec::Aggregate {
 
     BOLT_CHECK_NOT_NULL(mapVector);
 
-    const SelectivityVector* baseRows = &rows;
-    SelectivityVector innerRows{mapVector->size(), false};
-    if (!decodedMaps_.isIdentityMapping()) {
-      if (decodedMaps_.isConstantMapping()) {
-        innerRows.setValid(decodedMaps_.index(0), true);
-        innerRows.updateBounds();
-      } else {
-        bolt::translateToInnerRows(
-            rows, decodedMaps_.indices(), decodedMaps_.nulls(), innerRows);
-      }
-      baseRows = &innerRows;
-    }
-
-    decodedKeys_.decode(*mapVector->mapKeys(), *baseRows);
-    decodedValues_.decode(*mapVector->mapValues(), *baseRows);
+    // Map rows and child element indices are different index spaces. Decode
+    // the children fully before accessing their elements by map offset/size.
+    decodedKeys_.decode(*mapVector->mapKeys());
+    decodedValues_.decode(*mapVector->mapValues());
     rows.applyToSelected([&](vector_size_t row) {
       char* group;
       if constexpr (isSingleGroup) {

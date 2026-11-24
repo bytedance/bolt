@@ -209,6 +209,8 @@ struct WriterOptions {
   // and a global static thread pool with this number of threads is created.
   // If 0 or less, threading is disabled (`set_use_threads` is set to false).
   int32_t threadPoolSize = 0;
+  // Encode known contiguous definition and repetition levels in bulk.
+  bool enableLevelRunOptimization = true;
 
   std::shared_ptr<arrow::WriterProperties::Builder> getWriterPropertiesBuilder(
       arrow::MemoryPool* arrowPool) const;

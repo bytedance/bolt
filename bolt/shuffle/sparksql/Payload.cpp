@@ -714,8 +714,8 @@ BlockPayload::deserializeRowVectorModeBuffers(
     } else if (lengthPtr[i] == kZeroLengthBuffer) {
       buffers.push_back(zeroLengthNullBuffer());
     } else {
-      buffers.push_back(
-          arrow::SliceBuffer(valueBuffer, bufferOffset, lengthPtr[i]));
+      buffers.push_back(sliceBufferWithParentManager(
+          valueBuffer, bufferOffset, lengthPtr[i]));
       bufferOffset += lengthPtr[i];
     }
   }

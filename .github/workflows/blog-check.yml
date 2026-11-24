@@ -7,12 +7,14 @@ on:
     paths:
       - "doc/blog/**"
       - "scripts/normalize_blog_posts.py"
+      - "scripts/tests/test_normalize_blog_posts.py"
       - ".markdownlint-cli2.yaml"
       - ".github/workflows/blog-check.yml"
   pull_request:
     paths:
       - "doc/blog/**"
       - "scripts/normalize_blog_posts.py"
+      - "scripts/tests/test_normalize_blog_posts.py"
       - ".markdownlint-cli2.yaml"
       - ".github/workflows/blog-check.yml"
 
@@ -22,6 +24,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Test blog post normalization
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Setup Node.js
         uses: actions/setup-node@v6

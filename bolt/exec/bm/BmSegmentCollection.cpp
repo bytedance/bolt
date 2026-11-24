@@ -26,6 +26,12 @@
 namespace bytedance::bolt::exec::bm {
 namespace {
 
+std::shared_ptr<memory::MemoryPool> defaultAllocationPool(
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
+  BOLT_CHECK_NOT_NULL(bufferManager);
+  return bufferManager->defaultAllocationPool();
+}
+
 void zeroUnusedHeapTail(BlockRef& block) {
   BOLT_DCHECK_LE(block.used, block.size);
   if (block.ptr != nullptr && block.used < block.size) {
@@ -55,8 +61,12 @@ BmSegmentCollection::BmSegmentCollection(
     memory::bm::MemoryTag tag,
     const BmRowLayout* layout,
     uint32_t rowBlockSize,
-    uint32_t heapBlockSize)
+    uint32_t heapBlockSize,
+    std::shared_ptr<memory::MemoryPool> allocationPool)
     : bufferManager_(std::move(bufferManager)),
+      allocationPool_(
+          allocationPool != nullptr ? std::move(allocationPool)
+                                    : defaultAllocationPool(bufferManager_)),
       tag_(tag),
       layout_(layout),
       rowBlockSize_(rowBlockSize),
@@ -64,6 +74,7 @@ BmSegmentCollection::BmSegmentCollection(
       activeSegments_(kMaxPartitions, kNoSegment),
       partitionSegments_(kMaxPartitions) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
+  BOLT_CHECK_NOT_NULL(allocationPool_);
   BOLT_CHECK_NOT_NULL(layout_);
   rowStride_ = layout_->rowSize();
   BOLT_CHECK_GT(rowStride_, 0);
