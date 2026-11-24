@@ -28,7 +28,7 @@ namespace {
 
 using Kind = CellNestedLayout::Kind;
 
-/// Lengths decoded at a time while counting a space's positions.
+/// Lengths decoded at a time while counting a column group's positions.
 constexpr uint32_t kLengthsPerRead = 1024;
 
 } // namespace
@@ -40,36 +40,36 @@ CellNestedAssembler::CellNestedAssembler(
     : layout_(std::move(type)),
       pool_(pool),
       payloadDecoder_(layout_.layout(), decompressor, pool),
-      payloadPositions_(layout_.numSpaces(), 0),
+      payloadPositions_(layout_.numGroups(), 0),
       offsets_(layout_.numNodes()) {
-  // The spaces' decoders open what payloadDecoder_ decompressed.
-  for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
+  // The column groups' decoders open what payloadDecoder_ decompressed.
+  for (uint32_t g = 0; g < layout_.numGroups(); ++g) {
     decoders_.push_back(std::make_unique<CellPayloadDecoder>(
-        CellLayout::create(layout_.space(s).rowType), nullptr, pool));
+        CellLayout::create(layout_.group(g).rowType), nullptr, pool));
   }
 }
 
 void CellNestedAssembler::beginPayload(ShuffleByteSource& in) {
   const uint32_t rowCount = payloadDecoder_.readPayload(in);
   payloadPositions_[0] = rowCount;
-  // Spaces are numbered after their owners': a space's positions are known
-  // by the time it opens.
-  for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
-    const auto& space = layout_.space(s);
-    decoders_[s]->openPayload(
+  // Column groups are numbered after their owners': a group's positions are
+  // known by the time it opens.
+  for (uint32_t g = 0; g < layout_.numGroups(); ++g) {
+    const auto& group = layout_.group(g);
+    decoders_[g]->openPayload(
         payloadDecoder_,
-        space.columns,
-        static_cast<uint32_t>(payloadPositions_[s]));
-    for (const uint32_t x : space.containers) {
+        group.columns,
+        static_cast<uint32_t>(payloadPositions_[g]));
+    for (const uint32_t x : group.containers) {
       countPositions(x);
     }
   }
-  // Every space's fixed bytes and string data, per row.
+  // Every column group's fixed bytes and string data, per row.
   uint64_t bytes = 0;
   uint64_t strings = 0;
-  for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
-    const auto& decoder = *decoders_[s];
-    bytes += payloadPositions_[s] * decoder.rowBytes();
+  for (uint32_t g = 0; g < layout_.numGroups(); ++g) {
+    const auto& decoder = *decoders_[g];
+    bytes += payloadPositions_[g] * decoder.rowBytes();
     const auto& cellLayout = decoder.layout();
     for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
       if (cellLayout.isStringColumn(col)) {
@@ -83,8 +83,8 @@ void CellNestedAssembler::beginPayload(ShuffleByteSource& in) {
 
 void CellNestedAssembler::countPositions(uint32_t x) {
   const auto& node = layout_.node(x);
-  const auto& decoder = *decoders_[node.space];
-  const uint32_t col = node.spaceColumn;
+  const auto& decoder = *decoders_[node.group];
+  const uint32_t col = node.groupColumn;
   const auto bytes = decoder.streamBytes(decoder.layout().firstStream(col));
   StreamCursor<int32_t> cursor;
   cursor.reset(
@@ -114,13 +114,13 @@ void CellNestedAssembler::countPositions(uint32_t x) {
   if (!cursor.finished()) {
     failMalformedPayload("malformed container length stream");
   }
-  payloadPositions_[node.ownedSpace] = total;
+  payloadPositions_[node.ownedGroup] = total;
 }
 
 bool CellNestedAssembler::takesPayload() const {
-  for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
-    if (static_cast<uint64_t>(decoders_[s]->batchRows()) +
-            payloadPositions_[s] >
+  for (uint32_t g = 1; g < layout_.numGroups(); ++g) {
+    if (static_cast<uint64_t>(decoders_[g]->batchRows()) +
+            payloadPositions_[g] >
         CellNestedLayout::kMaxPositions) {
       return false;
     }
@@ -173,21 +173,21 @@ RowVectorPtr CellNestedAssembler::nextBatch(
       n = std::min<uint64_t>(
           n, std::max<uint64_t>(1, (budget - used) / payloadRowBytes_));
     }
-    appendSpace(0, n, capacity);
+    appendGroup(0, n, capacity);
   }
   return rows.batchRows() == 0 ? nullptr : assemble();
 }
 
-void CellNestedAssembler::appendSpace(
-    uint32_t s,
+void CellNestedAssembler::appendGroup(
+    uint32_t g,
     uint64_t positions,
     vector_size_t capacity) {
-  auto& decoder = *decoders_[s];
-  const auto& space = layout_.space(s);
+  auto& decoder = *decoders_[g];
+  const auto& group = layout_.group(g);
   const vector_size_t at = decoder.batchRows();
   // A batch of the rows opens at the reader's capacity, one of elements at
   // its first append's: it grows from there as entries need it.
-  const vector_size_t open = s == 0
+  const vector_size_t open = g == 0
       ? capacity
       : static_cast<vector_size_t>(std::max<uint64_t>(positions, 1));
   uint64_t left = positions;
@@ -198,12 +198,12 @@ void CellNestedAssembler::appendSpace(
     left -= piece;
   } while (left > 0);
 
-  for (const uint32_t x : space.containers) {
+  for (const uint32_t x : group.containers) {
     const auto& node = layout_.node(x);
-    auto& elements = *decoders_[node.ownedSpace];
+    auto& elements = *decoders_[node.ownedGroup];
     // A null entry's length reads 0.
     const auto* lengths =
-        decoder.batchValues(node.spaceColumn)->as<int32_t>() + at;
+        decoder.batchValues(node.groupColumn)->as<int32_t>() + at;
     vector_size_t* entryOffsets = offsets(x, at + positions);
     const uint64_t base = elements.batchRows();
     uint64_t total = 0;
@@ -216,7 +216,7 @@ void CellNestedAssembler::appendSpace(
         total,
         elements.payloadRowsLeft(),
         "malformed cell shuffle payload: container lengths past their elements");
-    appendSpace(node.ownedSpace, total, capacity);
+    appendGroup(node.ownedGroup, total, capacity);
   }
 }
 
@@ -242,10 +242,10 @@ vector_size_t* CellNestedAssembler::offsets(uint32_t x, uint64_t entries) {
 
 RowVectorPtr CellNestedAssembler::assemble() {
   std::vector<RowVectorPtr> batches;
-  batches.reserve(layout_.numSpaces());
+  batches.reserve(layout_.numGroups());
   for (const auto& decoder : decoders_) {
     batches.push_back(decoder->finishBatch());
-    BOLT_CHECK_NOT_NULL(batches.back(), "a space's batch never opened");
+    BOLT_CHECK_NOT_NULL(batches.back(), "a column group's batch never opened");
   }
   // Children have larger ids than their parent (pre-order), so going down
   // from the last node builds them first.
@@ -254,10 +254,10 @@ RowVectorPtr CellNestedAssembler::assemble() {
     const auto& node = layout_.node(n);
     if (node.kind == Kind::kLeaf && node.type->kind() == TypeKind::UNKNOWN) {
       vectors[n] = BaseVector::createNullConstant(
-          node.type, batches[node.space]->size(), pool_);
+          node.type, batches[node.group]->size(), pool_);
       continue;
     }
-    auto& column = batches[node.space]->childAt(node.spaceColumn);
+    auto& column = batches[node.group]->childAt(node.groupColumn);
     if (node.kind == Kind::kLeaf) {
       vectors[n] = std::move(column);
       continue;

@@ -102,7 +102,7 @@ CellShuffleWriter::CellShuffleWriter(
 CellShuffleWriter::~CellShuffleWriter() {
   // Failed split/stop paths must return the chunk reservations as well.
   shuffleCheck_.reset();
-  shredder_.reset();
+  nestedSplitter_.reset();
   splitter_.reset();
   output_.reset();
   blocks_.reset();
@@ -213,7 +213,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       *boltPool_,
       options_.cellOptions.enableNonTemporalStores);
   if (nestedLayout_ != nullptr) {
-    shredder_ = std::make_unique<CellNestedShredder>(
+    nestedSplitter_ = std::make_unique<CellNestedSplitter>(
         *nestedLayout_, *splitter_, numPartitions_, *boltPool_);
   }
 
@@ -315,7 +315,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
-  if (shredder_ != nullptr) {
+  if (nestedSplitter_ != nullptr) {
     return splitNested(std::move(rv));
   }
   NanosecondTimer splitTimer(&splitWallNs_);
@@ -412,13 +412,13 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     return arrow::Status::OK();
   }
   // Nested position counts can reach their bound even in a small byte payload.
-  shredder_->prepare(*rv, partitioner_->hasPid() ? 1 : 0);
-  if (!shredder_->fitsWindow()) {
+  nestedSplitter_->prepare(*rv, partitioner_->hasPid() ? 1 : 0);
+  if (!nestedSplitter_->fitsWindow()) {
     LOG(INFO) << "CellShuffleWriter seals the window for its nested "
               << "positions: maxWindowRows=" << splitter_->maxWindowRows()
               << ", batchRows=" << numRows;
     sealWindow(SealReason::kPositionLimit);
-    BOLT_CHECK(shredder_->fitsWindow());
+    BOLT_CHECK(nestedSplitter_->fitsWindow());
   }
 
   {
@@ -430,10 +430,11 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     };
     RETURN_NOT_OK(computePartitions(*rv));
     if (FOLLY_UNLIKELY(!dictProbed_)) {
-      probeDictionary(numRows, shredder_->decoded(), shredder_->nullClass());
+      probeDictionary(
+          numRows, nestedSplitter_->decoded(), nestedSplitter_->nullClass());
       dictProbed_ = true;
     }
-    shredder_->split(
+    nestedSplitter_->split(
         std::span(row2Partition_).first(numRows), partition2RowCount_);
     metrics_.totalInputRowNumber += numRows;
     metrics_.totalInputBatches += 1;
@@ -475,7 +476,7 @@ void CellShuffleWriter::probeDictionary(
     if (!layout_.isStringColumn(col)) {
       continue;
     }
-    if (nestedLayout_ != nullptr && !nestedLayout_->inRowSpace(col)) {
+    if (nestedLayout_ != nullptr && !nestedLayout_->inRowGroup(col)) {
       ++nestedStrings;
       continue;
     }
@@ -566,8 +567,8 @@ CellShuffleWriter::SealSpillTimer::SealSpillTimer(CellShuffleWriter& writer)
                                                            : nullptr) {
   if (writer_ != nullptr) {
     writer_->timingSealSpill_ = true;
-    uint64_t* target =
-        writer_->shredder_ != nullptr && writer_->shredder_->isShredding()
+    uint64_t* target = writer_->nestedSplitter_ != nullptr &&
+            writer_->nestedSplitter_->isShredding()
         ? &writer_->shredSpillNs_
         : writer_->activeSpillNs_;
     timer_.emplace(target);
@@ -722,8 +723,8 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   };
   // Idle chunks and unused shredder scratch can be released even during output.
   *actual = allocator_->shrink();
-  if (shredder_ != nullptr) {
-    *actual += shredder_->releaseScratch();
+  if (nestedSplitter_ != nullptr) {
+    *actual += nestedSplitter_->releaseScratch();
   }
   pressure_.freedIdle += *actual;
   boltPool_->release();
@@ -874,9 +875,9 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   const uint64_t convertNs =
       convertWallNs_ > convertSpillNs_ ? convertWallNs_ - convertSpillNs_ : 0;
   const uint64_t shredWallNs =
-      shredder_ != nullptr ? shredder_->shredWallNs() : 0;
+      nestedSplitter_ != nullptr ? nestedSplitter_->shredWallNs() : 0;
   const uint64_t wireWallNs =
-      shredder_ != nullptr ? shredder_->wireWallNs() : 0;
+      nestedSplitter_ != nullptr ? nestedSplitter_->wireWallNs() : 0;
   const uint64_t flattenExcludedNs = wireWallNs + shredSpillNs_;
   const uint64_t flattenNs =
       shredWallNs > flattenExcludedNs ? shredWallNs - flattenExcludedNs : 0;
@@ -895,8 +896,8 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
 
   // The splitter has released its window; return idle chunks, the
   // shredder's scratch and reservation.
-  if (shredder_ != nullptr) {
-    shredder_->releaseScratch();
+  if (nestedSplitter_ != nullptr) {
+    nestedSplitter_->releaseScratch();
   }
   if (allocator_ != nullptr) {
     allocator_->shrink();

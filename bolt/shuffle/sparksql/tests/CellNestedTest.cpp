@@ -803,7 +803,7 @@ TEST_F(CellNestedTest, spillsAndSeals) {
   }
 }
 
-TEST_F(CellNestedTest, sharedSpaceCountsAcrossPartitionSeals) {
+TEST_F(CellNestedTest, sharedColumnGroupCountsAcrossPartitionSeals) {
   // The hot partition seals after every batch; the cold one keeps its
   // positions across all four. Sibling fields share positions, while the
   // inner array has its own. Their null classes change at different batches.

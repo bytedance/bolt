@@ -26,10 +26,10 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// The writer side of a nested layout: splits a batch's rows, then the
-/// elements of its containers space by space, through the splitter's column
-/// subsets. The splitter counts the window's rows itself; for every other
-/// space the shredder counts each partition's committed positions and hands
-/// them to the splitter as the columns' position bases.
+/// elements of its containers column group by column group, through the
+/// splitter's column subsets. The splitter counts the window's rows itself;
+/// for every other column group the shredder counts each partition's committed
+/// positions and hands them to the splitter as the columns' position bases.
 ///
 /// A ROW is read as columns at its own positions: its presence, 1 at each
 /// non-null struct, and its fields with the structs' nulls folded in, so
@@ -40,9 +40,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// it may be where every struct past its end is null, included - takes the
 /// structs' indices and nulls through a dictionary.
 ///
-/// A container space is split in element batches of up to
+/// A container column group is split in element batches of up to
 /// kElementBatchPositions elements, in the order of the entries holding
-/// them, and each batch's counts are committed before the space's next
+/// them, and each batch's counts are committed before the group's next
 /// batch is split, and before the elements of the batch's own containers
 /// are. An element batch's columns are views
 /// of the input: a slice where its elements lie in a row in a flat vector,
@@ -54,29 +54,28 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// element -
 /// goes back with the batch; the rest is kept across batches until
 /// releaseScratch().
-class CellNestedShredder {
+class CellNestedSplitter {
  public:
-  /// Elements one split of a container space covers at most.
+  /// Elements one split of a container column group covers at most.
   static constexpr uint32_t kElementBatchPositions = 64 << 10;
 
-  /// `layout`, `splitter` and `pool` must outlive the shredder.
-  CellNestedShredder(
+  /// `layout`, `splitter` and `pool` must outlive this nested splitter.
+  CellNestedSplitter(
       const CellNestedLayout& layout,
       CellSplitter& splitter,
       uint32_t numPartitions,
       memory::MemoryPool& pool);
 
   /// Takes data columns starting at columnOffset: decodes them, classifies the
-  /// nulls of the rows' columns and counts each space's positions in this
-  /// batch alone. Throws a user error once some space passes
+  /// nulls of the rows' columns and counts each column group's positions in
+  /// this batch alone. Throws a user error once some group passes
   /// CellNestedLayout::kMaxPositions: no payload can carry the batch.
   void prepare(const RowVector& rv, uint32_t columnOffset);
 
-  /// Whether the prepared batch's positions in every space, added to the
-  /// most a partition holds there, stay within kMaxPositions. Follows any
+  /// Whether the prepared batch's positions in every column group, added to
+  /// the most a partition holds there, stay within kMaxPositions. Follows any
   /// seal first - loading lazy vectors and taking scratch in prepare() may
-  /// have pushed a remote window - so after a seal of the window the batch
-  /// fits.
+  /// have pushed an RSS window - so after a seal of the window the batch fits.
   bool fitsWindow();
 
   /// The rows' columns as prepared, per layout column: what the dictionary
@@ -90,7 +89,7 @@ class CellNestedShredder {
   }
 
   /// Counts for an output call's null bodies, indexed by wire column.
-  /// Columns in the same space share a count array. The view and its
+  /// Columns in the same column group share a count array. The view and its
   /// arrays remain valid until destruction, including across releaseScratch().
   ColumnPositionCounts columnPositionCounts() const {
     return columnPositionCounts_;
@@ -152,17 +151,17 @@ class CellNestedShredder {
     BufferPtr structIndices;
   };
 
-  /// The entries of a space being split: the rows, or an element batch.
+  /// The entries of a column group being split: the rows, or an element batch.
   struct Entries {
     /// The partition of each entry.
     const uint32_t* pid;
-    /// Entry k's index into the vectors of the space's nodes: indices[k], or
+    /// Entry k's index into the vectors of the group's nodes: indices[k], or
     /// start + k when indices is null.
     const vector_size_t* indices;
     vector_size_t start;
     uint32_t size;
-    /// The depth of the entries' space; elementBatches_[depth + 1] takes their
-    /// elements.
+    /// The depth of the entries' column group; elementBatches_[depth + 1]
+    /// takes their elements.
     uint32_t depth;
 
     vector_size_t index(uint32_t k) const {
@@ -171,7 +170,7 @@ class CellNestedShredder {
     }
   };
 
-  /// One element batch of a space at some depth.
+  /// One element batch of a column group at some depth.
   struct ElementBatch {
     BufferPtr pids;
     BufferPtr rowIndexInPid;
@@ -207,8 +206,8 @@ class CellNestedShredder {
   /// Marks node n and below as holding no entry this batch.
   void clearNode(uint32_t n);
 
-  /// Adds to each space below `container` the positions of its entries at
-  /// [begin, end) of its vector; throws once some space passes
+  /// Adds to each column group below `container` the positions of its entries
+  /// at [begin, end) of its vector; throws once some group passes
   /// kMaxPositions.
   void countRange(uint32_t container, vector_size_t begin, vector_size_t end);
 
@@ -218,11 +217,10 @@ class CellNestedShredder {
       uint32_t container,
       const Entries& parent);
 
-  /// Splits a full or last element batch of space `spaceIndex`, commits it,
-  /// then its
-  /// containers' elements.
+  /// Splits a full or last element batch of column group `groupIndex`,
+  /// commits it, then its containers' elements.
   BOLT_CELL_KERNEL void splitElementBatch(
-      uint32_t spaceIndex,
+      uint32_t groupIndex,
       ElementBatch& elements,
       uint32_t depth);
 
@@ -259,8 +257,8 @@ class CellNestedShredder {
   std::vector<BufferPtr> viewNulls_;
   vector_size_t numRows_{0};
 
-  /// Per space: committed positions per partition (none for the rows), the
-  /// largest, this batch's exact total and what was committed of it.
+  /// Per column group: committed positions per partition (none for the rows),
+  /// the largest, this batch's exact total and what was committed of it.
   BufferPtr countsBuffer_;
   std::vector<uint32_t*> counts_;
   /// Output view of counts_: nullptr entries use the splitter's row counts.
@@ -273,10 +271,9 @@ class CellNestedShredder {
   uint64_t seals_{0};
 
   /// One element batch per depth: a batch stays open while the batches of
-  /// the spaces below it split. Per partition, the current batch's positions
-  /// and an element's running index; `touched_` lists the partitions the
-  /// batch
-  /// holds.
+  /// the column groups below it split. Per partition, the current batch's
+  /// positions and an element's running index; `touched_` lists the partitions
+  /// the batch holds.
   std::vector<ElementBatch> elementBatches_;
   BufferPtr elementCounts_;
   BufferPtr runningIndex_;

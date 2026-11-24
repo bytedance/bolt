@@ -26,18 +26,18 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// The reader side of a nested layout: batches of its payloads in the
-/// logical row type. One decoder reads each payload; a decoder per space
-/// opens the space's columns at the space's positions, which the lengths of
+/// logical row type. One decoder reads each payload; a decoder per column group
+/// opens the group's columns at the group's positions, which the lengths of
 /// its owner's entries add up to, counted from their stream before any
 /// value is read. A batch takes the rows' next positions, then of each
-/// container's space as many as the lengths just appended call for, and so
-/// down, and comes out as ARRAY, MAP and ROW vectors over the spaces'
+/// container's group as many as the lengths just appended call for, and so
+/// down, and comes out as ARRAY, MAP and ROW vectors over the groups'
 /// batches, a ROW null where its presence is.
 ///
-/// Every check of a flat payload holds per space; besides, a length must
+/// Every check of a flat payload holds per column group; besides, a length must
 /// not be negative, a length stream must hold exactly its entries' lengths,
-/// and a space at most CellNestedLayout::kMaxPositions positions. A batch
-/// closes before a new payload's positions would take some space's batch
+/// and a column group at most CellNestedLayout::kMaxPositions positions. A
+/// batch closes before a new payload's positions would take some group's batch
 /// past that. As for a flat payload, the rows' batch opens at the caller's
 /// capacity.
 class CellNestedAssembler {
@@ -64,20 +64,20 @@ class CellNestedAssembler {
       const std::function<bool()>& nextPayload);
 
  private:
-  /// The positions of container x's space: its lengths in the payload just
-  /// opened, added up.
+  /// The positions of container x's column group: its lengths in the payload
+  /// just opened, added up.
   void countPositions(uint32_t x);
 
-  /// Whether the batch takes the payload just begun as well: every space's
-  /// positions.
+  /// Whether the batch takes the payload just begun as well: every column
+  /// group's positions.
   bool takesPayload() const;
 
-  /// Bytes the batch's values take, every space's together.
+  /// Bytes the batch's values take, every column group's together.
   uint64_t batchBytes() const;
 
-  /// Appends the next `positions` positions of space s, then the elements
-  /// their containers' entries hold.
-  void appendSpace(uint32_t s, uint64_t positions, vector_size_t capacity);
+  /// Appends the next `positions` positions of column group g, then the
+  /// elements their containers' entries hold.
+  void appendGroup(uint32_t g, uint64_t positions, vector_size_t capacity);
 
   /// The offsets of container x's entries in the batch, room for `entries`.
   vector_size_t* offsets(uint32_t x, uint64_t entries);
@@ -89,12 +89,12 @@ class CellNestedAssembler {
   memory::MemoryPool* const pool_;
   CellPayloadDecoder payloadDecoder_;
   std::vector<std::unique_ptr<CellPayloadDecoder>> decoders_;
-  /// Per space, the payload's positions.
+  /// Per column group, the payload's positions.
   std::vector<uint64_t> payloadPositions_;
   /// Per container node, its batch entries' offsets.
   std::vector<BufferPtr> offsets_;
-  /// A payload row's decoded bytes, every space's together: what the byte
-  /// budget counts by.
+  /// A payload row's decoded bytes, every column group's together: what the
+  /// byte budget counts by.
   uint64_t payloadRowBytes_{1};
 };
 

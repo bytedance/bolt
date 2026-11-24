@@ -25,21 +25,48 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// The nested layout (CellFormat.h) of a row type with ARRAY, MAP or ROW
 /// columns: its type tree shredded in pre-order into one plain Cell column
-/// per node, node n being column n of layout(). A leaf is a column of its
-/// own type; an ARRAY or MAP an Integer column of each value's length, null
-/// where the value is; a ROW a SmallInt presence column, 1 at each non-null
-/// struct. Space 0 holds the payload's rows; each ARRAY or MAP owns a
-/// space, numbered in pre-order, holding the elements of its non-null
-/// values; a ROW owns none. A node's column has the positions of its
-/// parent's space or, below a ROW, the ROW's positions. Describes the
-/// shredding only: no data passes through here.
+/// per node, node n being column n of layout() (UNKNOWN leaves omitted).
+/// A leaf is a column of its own type; an ARRAY or MAP an Integer column of
+/// each value's length, null where the value is; a ROW a SmallInt presence
+/// column, 1 at each non-null struct.
+///
+/// Columns that share the same row/element cardinality are grouped into a
+/// ColumnGroup:
+/// - Group 0 holds the payload's top-level rows.
+/// - Each ARRAY or MAP owns a new child ColumnGroup (numbered in pre-order)
+///   holding the elements of its non-null entries.
+/// - A ROW owns no group; its fields stay in the ROW's group.
+///
+/// Example:
+///   ROW<id: BIGINT, tags: ARRAY<VARCHAR>,
+///       items: ARRAY<ROW<k: INT, m: MAP<INT, DOUBLE>>>>
+///
+///   Pre-order nodes -> flat CellLayout columns (c0..c8):
+///     n0 (kLeaf,  id)    -> c0: BIGINT              [Group 0]
+///     n1 (kArray, tags)  -> c1: INT (lengths)       [Group 0] -> owns Group 1
+///     n2 (kLeaf,  tag)   -> c2: VARCHAR             [Group 1]
+///     n3 (kArray, items) -> c3: INT (lengths)       [Group 0] -> owns Group 2
+///     n4 (kRow,   item)  -> c4: SMALLINT (presence) [Group 2] (owns no group)
+///     n5 (kLeaf,  k)     -> c5: INT                 [Group 2]
+///     n6 (kMap,   m)     -> c6: INT (lengths)       [Group 2] -> owns Group 3
+///     n7 (kLeaf,  key)   -> c7: INT                 [Group 3]
+///     n8 (kLeaf,  val)   -> c8: DOUBLE              [Group 3]
+///
+///   ColumnGroups (sibling ARRAYs share depth=1 but have separate groups
+///   because their element counts M1 and M2 are independent):
+///     Group 0 (depth=0, N rows): columns=[c0, c1, c3], containers=[n1, n3]
+///       |- sum(c1) = M1 -> Group 1 (depth=1): columns=[c2]
+///       `- sum(c3) = M2 -> Group 2 (depth=1): columns=[c4, c5, c6], [n6]
+///                            `- sum(c6) = M3 -> Group 3 (depth=2): [c7, c8]
+///
+/// Describes the shredding only: no data passes through here.
 class CellNestedLayout {
  public:
   static constexpr uint32_t kNone = ~0u;
 
-  /// Positions a container's space holds in one payload at most, 2^31 - 8:
-  /// they are read into one vector, whose null bits must round up to whole
-  /// bytes within an int32 count.
+  /// Positions a container's column group holds in one payload at most,
+  /// 2^31 - 8: they are read into one vector, whose null bits must round up
+  /// to whole bytes within an int32 count.
   static constexpr uint32_t kMaxPositions = kMaxPayloadRows - 7;
 
   enum class Kind : uint8_t {
@@ -53,27 +80,29 @@ class CellNestedLayout {
     Kind kind;
     /// The logical type: a non-UNKNOWN leaf's is its column's.
     TypePtr type;
-    /// The space the node's column has its positions in.
-    uint32_t space;
+    /// The column group the node's column has its positions in.
+    uint32_t group;
     /// The node's column index in layout(), or kNone for UNKNOWN leaves.
     uint32_t layoutColumn{kNone};
-    /// The column's index among its space's columns, or kNone for UNKNOWN.
-    uint32_t spaceColumn{kNone};
-    /// A container's space; kNone for a leaf or a ROW.
-    uint32_t ownedSpace{kNone};
+    /// The column's index among its group's columns, or kNone for UNKNOWN.
+    uint32_t groupColumn{kNone};
+    /// A container's child column group; kNone for a leaf or a ROW.
+    uint32_t ownedGroup{kNone};
     /// An ARRAY's element; a MAP's key, then its value; a ROW's fields.
     std::vector<uint32_t> children;
   };
 
-  struct Space {
-    /// Containers between the space and the rows.
+  /// Columns sharing one row/element position count and decoded by one
+  /// CellPayloadDecoder on read.
+  struct ColumnGroup {
+    /// Containers between this column group and the top-level rows.
     uint32_t depth;
-    /// The layout() columns at the space's positions, ascending (UNKNOWN
+    /// The layout() columns at this group's positions, ascending (UNKNOWN
     /// leaves omitted).
     std::vector<uint32_t> columns;
-    /// The containers among the space's nodes, in node order.
+    /// The containers among this group's nodes, in node order.
     std::vector<uint32_t> containers;
-    /// The row type of `columns`, a decoder's for the space.
+    /// The row type of `columns`, a decoder's for this group.
     RowTypePtr rowType;
   };
 
@@ -109,15 +138,15 @@ class CellNestedLayout {
     return topNodes_;
   }
 
-  uint32_t numSpaces() const {
-    return static_cast<uint32_t>(spaces_.size());
+  uint32_t numGroups() const {
+    return static_cast<uint32_t>(groups_.size());
   }
 
-  const Space& space(uint32_t s) const {
-    return spaces_[s];
+  const ColumnGroup& group(uint32_t g) const {
+    return groups_[g];
   }
 
-  /// The deepest space's depth.
+  /// The deepest column group's depth.
   uint32_t maxDepth() const {
     return maxDepth_;
   }
@@ -132,20 +161,20 @@ class CellNestedLayout {
     return nodes_[nodeOfColumn_[col]];
   }
 
-  /// Whether a layout column has the rows' positions (space 0).
-  bool inRowSpace(uint32_t col) const {
-    return nodes_[nodeOfColumn_[col]].space == 0;
+  /// Whether a layout column has the rows' positions (group 0).
+  bool inRowGroup(uint32_t col) const {
+    return nodes_[nodeOfColumn_[col]].group == 0;
   }
 
  private:
-  /// Adds `type`'s node, at the positions of `space`, and its subtree.
-  uint32_t addNode(const TypePtr& type, uint32_t space);
+  /// Adds `type`'s node, at the positions of `group`, and its subtree.
+  uint32_t addNode(const TypePtr& type, uint32_t group);
 
   RowTypePtr logicalType_;
   std::vector<Node> nodes_;
   std::vector<uint32_t> nodeOfColumn_;
   std::vector<uint32_t> topNodes_;
-  std::vector<Space> spaces_;
+  std::vector<ColumnGroup> groups_;
   uint32_t maxDepth_{0};
   CellLayout layout_;
 };

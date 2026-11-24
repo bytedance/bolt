@@ -601,7 +601,7 @@ void CellSplitter::split(const SplitBatch& batch) {
   }
 
   if (batch.windowRowCounts != nullptr) {
-    return; // the caller owns this space's counts, not windowRowCounts_
+    return; // the caller owns this group's counts, not windowRowCounts_
   }
   // Commit row counts only after every column has been appended. A Run spill
   // during the split reads cell bytes without closing this partial batch.

@@ -100,16 +100,6 @@ class BufferedFile {
   static constexpr uint64_t kCopyFileRangeMinBytes = 256 << 10;
 
   void writeAllFd(const void* data, size_t bytes, uint64_t& writeTimeNs);
-  void pwriteAllFd(
-      uint64_t offset,
-      const void* data,
-      size_t bytes,
-      uint64_t& writeTimeNs);
-  void preadDirect(
-      int srcFd,
-      uint64_t srcOffset,
-      uint64_t bytes,
-      uint64_t& writeTimeNs);
 
   int fd_{-1};
   std::vector<char> buffer_;

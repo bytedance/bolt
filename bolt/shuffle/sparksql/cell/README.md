@@ -126,8 +126,8 @@ CompositeShuffleWriter
 - `CellShuffleWriter` partitions rows, chooses the layout, probes
   dictionaries, classifies nulls, and controls spills and seals. Large
   batches are sliced to 200 MiB locally or 8 MiB on Celeborn.
-- Native nested input passes through `CellNestedShredder`, one space at a
-  time. The adapter instead packs complex columns into one VARBINARY column.
+- Native nested input passes through `CellNestedSplitter`, one column group at
+  a time. The adapter instead packs complex columns into one VARBINARY column.
 - `CellSplitter` stages values in 64-byte lines and appends encoded blocks
   or raw bytes to `DataCells`. `NullCells` keeps the payload's null state.
 
@@ -167,7 +167,7 @@ CompositeShuffleReader (StreamByteSource + CodecDecompressor)
                   flat / adapter     nested
                         |              |
                CellPayloadDecoder  CellNestedAssembler
-              (+ adapter unpack)   (decoder per space)
+              (+ adapter unpack)  (decoder per group)
                            \          /
                          RowVector batches
 ```
@@ -200,7 +200,7 @@ CompositeShuffleReader (StreamByteSource + CodecDecompressor)
 | Segment | One partition's slice of a spilled run in the spill file, copied verbatim by the merge. |
 | Frame (COMBINED / SEPARATE) | The unit of compression of a run: one frame over all streams (`kCombined`, or `kCombinedUncompressed` when stored), or one per stream (`kSeparate`). |
 | Block | A unit on the wire, opened by a `ShuffleBlockKind` byte: a `kCellPayload`, `kCompositeRows`, or `kRows` block. |
-| Position space | In a nested layout, the positions a column has: space 0 is the payload's rows; each ARRAY or MAP owns a space holding its non-null entries' elements. |
+| Column group | In a nested layout, columns sharing the same row/element cardinality (`CellNestedLayout::ColumnGroup`): group 0 holds the payload's rows; each ARRAY or MAP owns a child column group holding its non-null entries' elements. |
 | Null body / null record | Per payload, a `NullTag` per wire column (`kAllNull`, `kNoNull`, `kRawNull`); for a `kRawNull` column, 28-byte records, each a run of up to 32767 positions of one null-ness followed by a bitmap of up to 200 positions. |
 | Dictionary | For a string column chosen by the probe, per partition, segments of up to 16 entries in at most 63 serialized bytes; matched rows store one index byte. |
 
@@ -428,15 +428,15 @@ Integer column of lengths followed by its element's columns, or its key's and
 value's; a ROW is a SmallInt presence column (1 at each non-null struct)
 followed by its fields.
 
-**Position spaces.** Space 0 holds the rows. Each ARRAY or MAP owns a space
-holding the elements of its non-null entries, numbered in pre-order. A ROW
-owns none: its fields have the ROW's positions. `CellNestedShredder` splits
-the rows' columns, then each space in element batches of up to 64K
+**Column groups.** Group 0 holds the rows. Each ARRAY or MAP owns a column
+group holding the elements of its non-null entries, numbered in pre-order. A
+ROW owns none: its fields stay in the ROW's group. `CellNestedSplitter` splits
+the rows' columns, then each column group in element batches of up to 64K
 positions, and gives the splitter each partition's position counts as the
 null-position base of those columns. The shredder owns these counts and the
 wire-column mapping. At seal and finish, the writer passes a read-only view
 of the per-column counts to the splitter for that output call's null bodies;
-the splitter keeps no space metadata or borrowed count mapping between calls.
+the splitter keeps no group metadata or borrowed count mapping between calls.
 
 **Struct-null folding.** A field is null wherever a ROW above it at the same
 positions is null, and a container below a null struct holds no element. A
@@ -446,10 +446,10 @@ shorter than its structs, takes the structs' indices and nulls through a
 dictionary.
 
 **Assembly.** `CellNestedAssembler` reads each payload with one decoder and
-opens a decoder per space at the space's positions, counted from the length
-streams before any value is read. A batch takes the rows' next positions,
-then as many positions of each container's space as the lengths call for,
-and comes out as ARRAY, MAP and ROW vectors.
+opens a decoder per column group at the group's positions, counted from the
+length streams before any value is read. A batch takes the rows' next
+positions, then as many positions of each container's group as the lengths
+call for, and comes out as ARRAY, MAP and ROW vectors.
 
 **Adapter fallback.** `CellShuffleTypeAdapter` packs a row's complex columns
 into one trailing VARBINARY column of CompactRows, and the reader unpacks
@@ -480,8 +480,8 @@ Writer and reader decide alike from the same logical type, which is why
   columns`). A nested schema above it falls back to the adapter.
 - **`kMaxPayloadRows`** (2^31 - 1): a window is sealed before a partition
   would pass it (`SealReason::kPositionLimit`).
-- **`kMaxPositions`** (2^31 - 8): the most positions one space holds in a
-  payload. A window is sealed before a batch's positions would pass it.
+- **`kMaxPositions`** (2^31 - 8): the most positions one column group holds
+  in a payload. A window is sealed before a batch's positions would pass it.
 - **Runs per payload:** a reader accepts at most
   `kMaxPayloadRuns` (2^24) runs in a payload. Locally, every
   run that writes any of a partition's cells, however few, adds one to its
@@ -513,7 +513,7 @@ shift throughput by several percent. Mark new hot kernels the same way.
 **Files that need an interleaved A/B for any change:**
 `CellSplitter.cpp` and `.h`, `CellBuffer.h` (the append fast path,
 `NullCells::setNull`), `CellEncoding.h`, `CellPayload.cpp` (decoder),
-`CellNestedShredder.cpp`, `CellNestedAssembler.cpp`, `RunCompressor.cpp`,
+`CellNestedSplitter.cpp`, `CellNestedAssembler.cpp`, `RunCompressor.cpp`,
 and the batch loop in `CellShuffleWriter.cpp`. Unrelated-looking edits here
 can move code and change timings; byte-level output can also change, so
 compare `bytes_written` as well as time.
@@ -574,8 +574,8 @@ output.
 | `CellSplitter.h` / `.cpp` | Per-type split loops, staging lines, dictionary form, flush, run and seal orchestration |
 | `CellShuffleWriter.h` / `.cpp` | The writer: layout choice, cell sizing, dictionary probe, memory pressure, seals |
 | `CellShuffleTypeAdapter.h` / `.cpp` | Packs and unpacks complex columns as one binary column |
-| `CellNestedLayout.h` / `.cpp` | Nested layout: nodes and position spaces of a shredded row type |
-| `CellNestedShredder.h` / `.cpp` | Writer side of the nested layout |
+| `CellNestedLayout.h` / `.cpp` | Nested layout: nodes and column groups of a shredded row type |
+| `CellNestedSplitter.h` / `.cpp` | Writer side of the nested layout |
 | `CellNestedAssembler.h` / `.cpp` | Reader side of the nested layout |
 | `CellOutput.h` / `.cpp` | `CellOutput`, `LocalCellOutput` (spill file and merge), `RssCellOutput` (pushes) |
 | `RunCompressor.h` / `.cpp` | Run and null-body compression policy, stream and one-shot forms |

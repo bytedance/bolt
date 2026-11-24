@@ -61,23 +61,6 @@ void BufferedFile::writeAllFd(
       written < 0 ? folly::errnoStr(errno) : "short write");
 }
 
-void BufferedFile::pwriteAllFd(
-    uint64_t offset,
-    const void* data,
-    size_t bytes,
-    uint64_t& writeTimeNs) {
-  ssize_t written;
-  {
-    NanosecondTimer timer(&writeTimeNs);
-    written = folly::pwriteFull(fd_, data, bytes, static_cast<off_t>(offset));
-  }
-  BOLT_CHECK_EQ(
-      written,
-      static_cast<ssize_t>(bytes),
-      "shuffle file patch failed: {}",
-      written < 0 ? folly::errnoStr(errno) : "short write");
-}
-
 void BufferedFile::write(
     const void* data,
     size_t bytes,
@@ -142,7 +125,16 @@ void BufferedFile::patch(
   const auto* src = static_cast<const char*>(data);
   if (offset < flushedEnd_) {
     const size_t onFd = std::min<uint64_t>(bytes, flushedEnd_ - offset);
-    pwriteAllFd(offset, src, onFd, writeTimeNs);
+    ssize_t written;
+    {
+      NanosecondTimer timer(&writeTimeNs);
+      written = folly::pwriteFull(fd_, src, onFd, static_cast<off_t>(offset));
+    }
+    BOLT_CHECK_EQ(
+        written,
+        static_cast<ssize_t>(onFd),
+        "shuffle file patch failed: {}",
+        written < 0 ? folly::errnoStr(errno) : "short write");
     offset += onFd;
     src += onFd;
     bytes -= onFd;
@@ -184,38 +176,6 @@ void BufferedFile::read(uint64_t offset, void* out, size_t bytes) const {
   }
   if (bytes > 0) {
     ::memcpy(dst, buffer_.data() + (offset - flushedEnd_), bytes);
-  }
-}
-
-void BufferedFile::preadDirect(
-    int srcFd,
-    uint64_t srcOffset,
-    uint64_t bytes,
-    uint64_t& writeTimeNs) {
-  if (bytes == 0) {
-    return;
-  }
-  if (buffer_.capacity() < kWriteBufferBytes) {
-    buffer_.reserve(kWriteBufferBytes);
-  }
-  while (bytes > 0) {
-    if (buffer_.size() == kWriteBufferBytes) {
-      flush(writeTimeNs);
-    }
-    const size_t space = kWriteBufferBytes - buffer_.size();
-    const size_t piece = static_cast<size_t>(std::min<uint64_t>(bytes, space));
-    const size_t prevSize = buffer_.size();
-    buffer_.resize(prevSize + piece);
-    const ssize_t n = folly::preadFull(
-        srcFd, buffer_.data() + prevSize, piece, static_cast<off_t>(srcOffset));
-    BOLT_CHECK_EQ(
-        n,
-        static_cast<ssize_t>(piece),
-        "shuffle spill read failed: {}",
-        n < 0 ? folly::errnoStr(errno) : "unexpected EOF");
-    srcOffset += piece;
-    bytes -= piece;
-    end_ += piece;
   }
 }
 
@@ -265,8 +225,32 @@ void BufferedFile::copyFrom(
     }
 #endif
     if (onFd > 0) {
-      preadDirect(src.fd_, srcOffset, onFd, writeTimeNs);
-      srcOffset += onFd;
+      if (buffer_.capacity() < kWriteBufferBytes) {
+        buffer_.reserve(kWriteBufferBytes);
+      }
+      while (onFd > 0) {
+        if (buffer_.size() == kWriteBufferBytes) {
+          flush(writeTimeNs);
+        }
+        const size_t space = kWriteBufferBytes - buffer_.size();
+        const size_t piece =
+            static_cast<size_t>(std::min<uint64_t>(onFd, space));
+        const size_t prevSize = buffer_.size();
+        buffer_.resize(prevSize + piece);
+        const ssize_t n = folly::preadFull(
+            src.fd_,
+            buffer_.data() + prevSize,
+            piece,
+            static_cast<off_t>(srcOffset));
+        BOLT_CHECK_EQ(
+            n,
+            static_cast<ssize_t>(piece),
+            "shuffle spill read failed: {}",
+            n < 0 ? folly::errnoStr(errno) : "unexpected EOF");
+        srcOffset += piece;
+        onFd -= piece;
+        end_ += piece;
+      }
     }
   }
   if (bytes > 0) {

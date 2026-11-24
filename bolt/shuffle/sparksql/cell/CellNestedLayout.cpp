@@ -72,7 +72,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       supports(logicalType_),
       "no nested Cell layout for {}",
       logicalType_->toString());
-  spaces_.push_back(Space{0, {}, {}, nullptr});
+  groups_.push_back(ColumnGroup{0, {}, {}, nullptr});
   for (const auto& child : logicalType_->children()) {
     topNodes_.push_back(addNode(child, 0));
   }
@@ -90,9 +90,9 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
     const uint32_t layoutCol = static_cast<uint32_t>(types.size());
     node.layoutColumn = layoutCol;
     nodeOfColumn_.push_back(n);
-    auto& space = spaces_[node.space];
-    node.spaceColumn = static_cast<uint32_t>(space.columns.size());
-    space.columns.push_back(layoutCol);
+    auto& group = groups_[node.group];
+    node.groupColumn = static_cast<uint32_t>(group.columns.size());
+    group.columns.push_back(layoutCol);
     names.push_back(fmt::format("n{}", n));
     // A leaf's column has its own type, a container's its lengths, a
     // ROW's its presence.
@@ -104,40 +104,40 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       types.push_back(INTEGER());
     }
   }
-  for (auto& space : spaces_) {
-    std::vector<std::string> spaceNames;
-    std::vector<TypePtr> spaceTypes;
-    spaceNames.reserve(space.columns.size());
-    spaceTypes.reserve(space.columns.size());
-    for (const auto col : space.columns) {
-      spaceNames.push_back(names[col]);
-      spaceTypes.push_back(types[col]);
+  for (auto& group : groups_) {
+    std::vector<std::string> groupNames;
+    std::vector<TypePtr> groupTypes;
+    groupNames.reserve(group.columns.size());
+    groupTypes.reserve(group.columns.size());
+    for (const auto col : group.columns) {
+      groupNames.push_back(names[col]);
+      groupTypes.push_back(types[col]);
     }
-    space.rowType = ROW(std::move(spaceNames), std::move(spaceTypes));
+    group.rowType = ROW(std::move(groupNames), std::move(groupTypes));
   }
   layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
 }
 
-uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
+uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t group) {
   const auto id = static_cast<uint32_t>(nodes_.size());
   Node node;
   node.kind = kindOf(type);
   node.type = type;
-  node.space = space;
+  node.group = group;
   if (node.kind == Kind::kArray || node.kind == Kind::kMap) {
-    node.ownedSpace = static_cast<uint32_t>(spaces_.size());
-    spaces_[space].containers.push_back(id);
-    const uint32_t depth = spaces_[space].depth + 1;
+    node.ownedGroup = static_cast<uint32_t>(groups_.size());
+    groups_[group].containers.push_back(id);
+    const uint32_t depth = groups_[group].depth + 1;
     maxDepth_ = std::max(maxDepth_, depth);
-    spaces_.push_back(Space{depth, {}, {}, nullptr});
+    groups_.push_back(ColumnGroup{depth, {}, {}, nullptr});
   }
   // A ROW's fields have its positions, a container's children those of its
-  // space.
-  const uint32_t childSpace = node.kind == Kind::kRow ? space : node.ownedSpace;
+  // owned column group.
+  const uint32_t childGroup = node.kind == Kind::kRow ? group : node.ownedGroup;
   nodes_.push_back(std::move(node));
   for (uint32_t i = 0; i < type->size(); ++i) {
     // Adding the child may reallocate nodes_.
-    const uint32_t child = addNode(type->childAt(i), childSpace);
+    const uint32_t child = addNode(type->childAt(i), childGroup);
     nodes_[id].children.push_back(child);
   }
   return id;

@@ -96,7 +96,8 @@ struct SplitBatch {
   /// batch, used as the base offset for null positions.
   /// - nullptr (flat batches and nested root rows): split() uses its own
   ///   windowRowCounts_ and advances it by partition2RowCount.
-  /// - non-null (nested child spaces shredded by CellNestedShredder, whose
+  /// - non-null (nested child column groups split by CellNestedSplitter,
+  /// whose
   ///   element counts differ from top-level row counts): the caller supplies
   ///   and advances its own per-partition counts without touching
   ///   windowRowCounts_.

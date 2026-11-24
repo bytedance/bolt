@@ -36,7 +36,7 @@ bolt_add_library(
   cell/CellBuffer.cpp
   cell/CellNestedAssembler.cpp
   cell/CellNestedLayout.cpp
-  cell/CellNestedShredder.cpp
+  cell/CellNestedSplitter.cpp
   cell/CellOutput.cpp
   cell/CellPayload.cpp
   cell/CellSplitter.cpp

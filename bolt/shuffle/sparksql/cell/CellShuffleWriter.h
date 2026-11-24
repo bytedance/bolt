@@ -26,7 +26,7 @@
 
 #include "bolt/shuffle/sparksql/base/CompositeShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
-#include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedSplitter.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
@@ -165,8 +165,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// pressure requests a seal at the next batch boundary.
   void prepareChunkGrowth();
   ColumnPositionCounts columnPositionCounts() const {
-    return shredder_ != nullptr ? shredder_->columnPositionCounts()
-                                : ColumnPositionCounts{};
+    return nestedSplitter_ != nullptr ? nestedSplitter_->columnPositionCounts()
+                                      : ColumnPositionCounts{};
   }
   void sealWindow(SealReason reason);
   /// Seals the whole window - on RSS, pushes it - and returns its memory;
@@ -248,7 +248,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellOutput> output_;
   std::unique_ptr<CellSplitter> splitter_;
   std::unique_ptr<CellShuffleCheck> shuffleCheck_;
-  std::unique_ptr<CellNestedShredder> shredder_;
+  std::unique_ptr<CellNestedSplitter> nestedSplitter_;
 
   /// Per row, its index among the batch's rows of its partition, for null
   /// positions; built only when a column has some nulls, counting through
