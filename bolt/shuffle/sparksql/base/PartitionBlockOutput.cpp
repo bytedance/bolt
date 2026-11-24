@@ -219,44 +219,62 @@ void BufferedFile::preadDirect(
   }
 }
 
-void BufferedFile::copyFromFd(
-    int srcFd,
+void BufferedFile::copyFrom(
+    const BufferedFile& src,
     uint64_t srcOffset,
     uint64_t bytes,
     uint64_t& writeTimeNs) {
+  BOLT_CHECK(&src != this, "BufferedFile::copyFrom self-copy is not supported");
+  BOLT_CHECK(
+      srcOffset <= src.end_ && bytes <= src.end_ - srcOffset,
+      "BufferedFile::copyFrom out of range");
   if (bytes == 0) {
     return;
   }
+  if (srcOffset < src.flushedEnd_) {
+    uint64_t onFd = std::min(bytes, src.flushedEnd_ - srcOffset);
+    bytes -= onFd;
 #ifdef __linux__
-  if (bytes >= kCopyFileRangeMinBytes) {
-    flush(writeTimeNs);
-    while (bytes > 0) {
-      loff_t inOff = static_cast<loff_t>(srcOffset);
-      ssize_t copied;
-      {
-        NanosecondTimer timer(&writeTimeNs);
-        copied = ::copy_file_range(
-            srcFd, &inOff, fd_, nullptr, static_cast<size_t>(bytes), 0);
-      }
-      if (copied < 0) {
-        if (errno == EINTR) {
-          continue;
+    if (onFd >= kCopyFileRangeMinBytes) {
+      flush(writeTimeNs);
+      while (onFd > 0) {
+        loff_t inOff = static_cast<loff_t>(srcOffset);
+        ssize_t copied;
+        {
+          NanosecondTimer timer(&writeTimeNs);
+          copied = ::copy_file_range(
+              src.fd_, &inOff, fd_, nullptr, static_cast<size_t>(onFd), 0);
         }
-        if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
-            errno == EOPNOTSUPP) {
-          break;
+        if (copied < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
+              errno == EOPNOTSUPP) {
+            break;
+          }
+          BOLT_FAIL(
+              "shuffle copy_file_range failed: {}", folly::errnoStr(errno));
         }
-        BOLT_FAIL("shuffle copy_file_range failed: {}", folly::errnoStr(errno));
+        BOLT_CHECK_GT(copied, 0, "shuffle copy_file_range hit unexpected EOF");
+        srcOffset += static_cast<uint64_t>(copied);
+        onFd -= static_cast<uint64_t>(copied);
+        flushedEnd_ += static_cast<uint64_t>(copied);
+        end_ = flushedEnd_;
       }
-      BOLT_CHECK_GT(copied, 0, "shuffle copy_file_range hit unexpected EOF");
-      srcOffset += static_cast<uint64_t>(copied);
-      bytes -= static_cast<uint64_t>(copied);
-      flushedEnd_ += static_cast<uint64_t>(copied);
-      end_ = flushedEnd_;
+    }
+#endif
+    if (onFd > 0) {
+      preadDirect(src.fd_, srcOffset, onFd, writeTimeNs);
+      srcOffset += onFd;
     }
   }
-#endif
-  preadDirect(srcFd, srcOffset, bytes, writeTimeNs);
+  if (bytes > 0) {
+    write(
+        src.buffer_.data() + (srcOffset - src.flushedEnd_),
+        static_cast<size_t>(bytes),
+        writeTimeNs);
+  }
 }
 
 void BufferedFile::close(uint64_t& writeTimeNs) {
@@ -667,22 +685,10 @@ void DataFileWriter::copyFrom(
   uint64_t offset = begin;
   if (offset < spill.diskEnd_) {
     const uint64_t onDisk = std::min(bytes, spill.diskEnd_ - offset);
-    const uint64_t flushedEnd = spill.file_.flushedEnd();
-    if (offset < flushedEnd) {
-      const uint64_t onFd = std::min(onDisk, flushedEnd - offset);
-      file_.copyFromFd(spill.file_.fd(), offset, onFd, writeTimeNs_);
-      lengths_[pid_] += static_cast<int64_t>(onFd);
-      offset += onFd;
-      bytes -= onFd;
-    }
-    if (offset < spill.diskEnd_ && bytes > 0) {
-      const uint64_t inBuf = std::min(bytes, spill.diskEnd_ - offset);
-      std::vector<char> tmp(inBuf);
-      spill.file_.read(offset, tmp.data(), inBuf);
-      write(tmp.data(), inBuf);
-      offset += inBuf;
-      bytes -= inBuf;
-    }
+    file_.copyFrom(spill.file_, offset, onDisk, writeTimeNs_);
+    lengths_[pid_] += static_cast<int64_t>(onDisk);
+    offset += onDisk;
+    bytes -= onDisk;
   }
   spill.visitMemory(offset, bytes, [this](const char* data, size_t piece) {
     write(data, piece);

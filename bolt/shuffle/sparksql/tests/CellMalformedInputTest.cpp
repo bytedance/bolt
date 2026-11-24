@@ -812,7 +812,7 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
        "row count beyond the configured limit"},
       {"runs past the reader's limit",
        bigint,
-       with(bigints, kRunCountAt, CellDecodeLimits{}.maxRunCount + 1),
+       with(bigints, kRunCountAt, kMaxPayloadRuns + 1),
        "run count beyond the configured limit"},
       {"no null body",
        bigint,
@@ -1135,7 +1135,7 @@ TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
   // Reject a malformed block after a valid payload, retaining its cause.
   std::string tooManyRuns(1, static_cast<char>(ShuffleBlockKind::kCellPayload));
   put(tooManyRuns, uint32_t{5});
-  put(tooManyRuns, CellDecodeLimits{}.maxRunCount + 1);
+  put(tooManyRuns, kMaxPayloadRuns + 1);
   put(tooManyRuns, uint64_t{0});
   put(tooManyRuns, uint32_t{1});
   put(tooManyRuns, uint32_t{0});

@@ -50,12 +50,10 @@ class CellNestedAssembler {
   CellNestedAssembler(
       RowTypePtr type,
       ShuffleDecompressor* decompressor,
-      memory::MemoryPool* pool,
-      CellDecodeLimits limits = {});
+      memory::MemoryPool* pool);
 
-  /// Reads one payload, its kind byte consumed. On malformed input returns
-  /// false with `error` set.
-  bool beginPayload(ShuffleByteSource& in, std::string& error);
+  /// Reads one payload, its kind byte consumed. Throws on malformed input.
+  void beginPayload(ShuffleByteSource& in);
 
   /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
   /// one append when that is <= 0. `nextPayload` begins the next payload,
@@ -68,7 +66,7 @@ class CellNestedAssembler {
  private:
   /// The positions of container x's space: its lengths in the payload just
   /// opened, added up.
-  bool countPositions(uint32_t x, std::string& error);
+  void countPositions(uint32_t x);
 
   /// Whether the batch takes the payload just begun as well: every space's
   /// positions.

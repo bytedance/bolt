@@ -662,7 +662,7 @@ void CellSplitter::drainCells(const uint8_t* partitionMask) {
   // Runs write only data cells; they do not summarize column nulls.
   auto in = windowInput({});
   in.runPartitions = partitionMask;
-  output_.spillRun(in);
+  output_.spillCells(in);
   releaseCells(partitionMask);
 }
 
@@ -756,7 +756,7 @@ void CellSplitter::seal(
     };
     auto in = windowInput(positions);
     in.sealPartitions = partitionMask;
-    output_.sealWindow(in);
+    output_.sealPayloads(in);
   }
   if (sealsResident) {
     releaseCells(partitionMask);

@@ -110,10 +110,10 @@ void finishCaches(CellShuffleCheck& check, Cache& cache, uint32_t col = 0) {
 
 class CountingOutput final : public CellOutput {
  public:
-  void spillRun(const CellWindowInput&) override {
+  void spillCells(const CellWindowInput&) override {
     ++calls;
   }
-  void sealWindow(const CellWindowInput&) override {
+  void sealPayloads(const CellWindowInput&) override {
     ++calls;
   }
   void finalize(const CellWindowInput&, ShuffleWriterMetrics&) override {

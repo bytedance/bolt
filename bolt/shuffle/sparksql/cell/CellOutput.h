@@ -71,10 +71,10 @@ class CellOutput {
  public:
   virtual ~CellOutput() = default;
 
-  /// Whether sealWindow() consumes the window's resident cells itself. A
+  /// Whether sealPayloads() consumes the window's resident cells itself. A
   /// backend that does (RSS: every payload is pushed whole at the seal) is
-  /// never asked for a Run; otherwise the splitter drains the cells into a
-  /// Run before sealing.
+  /// never asked to spill cells; otherwise the splitter drains the cells into
+  /// a run before sealing.
   virtual bool sealsResidentCells() const {
     return false;
   }
@@ -83,14 +83,14 @@ class CellOutput {
   /// names (every partition by default) into a Run of the current window.
   /// Does not release the cells: the splitter recycles them (so a
   /// spill fired from inside an append never frees held ids twice).
-  virtual void spillRun(const CellWindowInput& in) = 0;
+  virtual void spillCells(const CellWindowInput& in) = 0;
 
   /// Closes the payloads of the partitions the input names (every
   /// partition by default): records their null bodies and row counts.
   /// The other partitions' payloads stay open. Precondition
   /// (splitter-orchestrated): the named partitions' caches flushed, and
   /// their cells drained unless sealsResidentCells().
-  virtual void sealWindow(const CellWindowInput& in) = 0;
+  virtual void sealPayloads(const CellWindowInput& in) = 0;
 
   /// Final merge. Writes any unsealed window partitions with rows directly
   /// from memory, after any runs that window already spilled (RSS sends them).
@@ -132,8 +132,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       PartitionWriterOptions options,
       memory::MemoryPool* pool);
 
-  void spillRun(const CellWindowInput& in) override;
-  void sealWindow(const CellWindowInput& in) override;
+  void spillCells(const CellWindowInput& in) override;
+  void sealPayloads(const CellWindowInput& in) override;
 
   /// Writes the data file: mergeToDataFile() of this output and the
   /// composite one. Here, not in the writer, because the current window -
@@ -189,13 +189,13 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 
   /// Copies one spilled run segment, in its final form, into the data
   /// file.
-  void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
+  void copySpilledSegment(DataFileWriter& out, const SpillSegment& segment);
 
-  /// Appends one partition's payload for the current (unsealed) window:
+  /// Appends one partition's payload for the current (open) window:
   /// header, null body and row counts straight from memory, then the
   /// mid-window spilled runs and the still-resident cells as one more run,
   /// in that order. The residual never takes a spill round-trip.
-  void writeResidentPayload(
+  void writeOpenPayload(
       DataFileWriter& out,
       const CellWindowInput& in,
       uint32_t pid);
@@ -262,8 +262,8 @@ class RssCellOutput final : public CellOutput {
     return true;
   }
 
-  void spillRun(const CellWindowInput& in) override;
-  void sealWindow(const CellWindowInput& in) override;
+  void spillCells(const CellWindowInput& in) override;
+  void sealPayloads(const CellWindowInput& in) override;
   void finalize(const CellWindowInput& in, ShuffleWriterMetrics& metrics)
       override;
 
@@ -272,8 +272,9 @@ class RssCellOutput final : public CellOutput {
   }
 
  private:
-  /// One writeBlocks() carrying the whole payload of every partition with rows.
-  void sendWindow(const CellWindowInput& in);
+  /// One writeBlocks() carrying the whole payload of every selected partition
+  /// with rows.
+  void sendPayloads(const CellWindowInput& in);
 
   /// Assembles partition `pid`'s payload into `payload`.
   void

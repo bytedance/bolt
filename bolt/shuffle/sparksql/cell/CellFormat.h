@@ -31,7 +31,7 @@
 ///               nullDecodedSize, runCount and variableBytes all 0 (a
 ///               payload of its header alone); W > 0 requires
 ///               nullStoredSize >= 1. The reader limits rowCount to
-///               kMaxPayloadRows and runCount to 2^24 (CellDecodeLimits).
+///               kMaxPayloadRows and runCount to kMaxPayloadRuns (2^24).
 ///   null body   nullStoredSize bytes: one 2-bit NullTag per wire column,
 ///               four to a byte from the low bits, ceil(W / 4) bytes, the
 ///               unused high bits zero and kReserved rejected; then per
@@ -146,6 +146,12 @@ inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 /// its row count. It keeps the u32 row fields exact and a payload
 /// decodable as one vector.
 inline constexpr uint32_t kMaxPayloadRows = kMaxBlockRows;
+
+/// Most runs one payload may contain. runCount is a u32 header field and runs
+/// are parsed one at a time, so this bound guards no memory: it reports a
+/// corrupt count early while staying far above the runs a writer under memory
+/// pressure legitimately spills into one payload (66105 were seen).
+inline constexpr uint32_t kMaxPayloadRuns = 1u << 24;
 
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
 /// 8 bytes FOR base, 64 bytes body.

@@ -54,16 +54,8 @@ class BufferedFile {
     return fd_ >= 0;
   }
 
-  int fd() const {
-    return fd_;
-  }
-
   uint64_t end() const {
     return end_;
-  }
-
-  uint64_t flushedEnd() const {
-    return flushedEnd_;
   }
 
   /// Appends `bytes` sequentially, buffering writes smaller than the write
@@ -86,12 +78,13 @@ class BufferedFile {
   /// Reads `bytes` starting at `offset` from `fd_` and/or the unflushed buffer.
   void read(uint64_t offset, void* out, size_t bytes) const;
 
-  /// Copies `bytes` starting at `srcOffset` from `srcFd` into this file.
-  /// Large copies use Linux copy_file_range() for kernel-to-kernel zero-copy
-  /// (falling back on cross-filesystem/unsupported errors); smaller copies
-  /// pread directly into the write buffer with no bounce copy.
-  void copyFromFd(
-      int srcFd,
+  /// Copies `bytes` starting at `srcOffset` from `src` into this file.
+  /// Flushed bytes use Linux copy_file_range() for large copies (falling back
+  /// on cross-filesystem/unsupported errors) or pread directly into the write
+  /// buffer; unflushed bytes in `src`'s buffer are written directly without a
+  /// temporary copy.
+  void copyFrom(
+      const BufferedFile& src,
       uint64_t srcOffset,
       uint64_t bytes,
       uint64_t& writeTimeNs);

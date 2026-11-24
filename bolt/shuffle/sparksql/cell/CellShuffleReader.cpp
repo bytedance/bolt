@@ -46,8 +46,8 @@ CellShuffleReader::CellShuffleReader(
       "Unsupported Cell logical schema: {}",
       outputType->toString());
   if (nativeNestedTypes && CellNestedLayout::supports(outputType)) {
-    nestedAssembler_ = std::make_unique<CellNestedAssembler>(
-        outputType, decompressor(), pool, CellDecodeLimits{});
+    nestedAssembler_ =
+        std::make_unique<CellNestedAssembler>(outputType, decompressor(), pool);
   } else {
     adapter_ = std::make_unique<CellShuffleTypeAdapter>(outputType);
     decoder_ = std::make_unique<CellPayloadDecoder>(
@@ -63,11 +63,11 @@ bool CellShuffleReader::nextPayload() {
         kind,
         ShuffleBlockKind::kCellPayload,
         "unknown cell shuffle block kind");
-    std::string error;
-    const bool ok = nestedAssembler_ != nullptr
-        ? nestedAssembler_->beginPayload(source, error)
-        : decoder_->beginPayload(source, error);
-    BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
+    if (nestedAssembler_ != nullptr) {
+      nestedAssembler_->beginPayload(source);
+    } else {
+      decoder_->beginPayload(source);
+    }
     incrementPayloadsRead();
   });
 }

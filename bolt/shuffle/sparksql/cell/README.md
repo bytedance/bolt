@@ -483,7 +483,7 @@ Writer and reader decide alike from the same logical type, which is why
 - **`kMaxPositions`** (2^31 - 8): the most positions one space holds in a
   payload. A window is sealed before a batch's positions would pass it.
 - **Runs per payload:** a reader accepts at most
-  `CellDecodeLimits::maxRunCount` (2^24) runs in a payload. Locally, every
+  `kMaxPayloadRuns` (2^24) runs in a payload. Locally, every
   run that writes any of a partition's cells, however few, adds one to its
   open payload; the merge fails the task rather than write a payload of
   more runs than a reader accepts.
@@ -496,7 +496,8 @@ Writer and reader decide alike from the same logical type, which is why
   field shorter than its struct is supported by the shredder, but not in a
   batch that gets sliced.
 - **Malformed input** on the read side is reported as an error, never
-  crashed on; `CellDecodeLimits` bounds the row and run counts. Errors name
+  crashed on; `kMaxPayloadRows` and `kMaxPayloadRuns` bound the row and run
+  counts. Errors name
   the defect, such as a truncated header, an invalid block kind or an
   unsupported layout.
 

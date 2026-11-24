@@ -121,7 +121,7 @@ LocalCellOutput::LocalCellOutput(
   sealed_.resize(options_.numPartitions);
 }
 
-void LocalCellOutput::spillRun(const CellWindowInput& in) {
+void LocalCellOutput::spillCells(const CellWindowInput& in) {
   auto writeGuard = scopedWrite();
   SpilledRun run;
   // Runs are compressed as they spill, in their final form: both disk
@@ -145,7 +145,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   runs_.push_back(std::move(run));
 }
 
-void LocalCellOutput::sealWindow(const CellWindowInput& in) {
+void LocalCellOutput::sealPayloads(const CellWindowInput& in) {
   auto writeGuard = scopedWrite();
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     if (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0) {
@@ -192,11 +192,11 @@ void LocalCellOutput::writeSealedPayload(
   const auto& segments = payload.segments;
   BOLT_CHECK_LE(
       segments.size(),
-      CellDecodeLimits{}.maxRunCount,
+      kMaxPayloadRuns,
       "Cell payload of partition {} holds {} runs, more than maxRunCount ({})",
       pid,
       segments.size(),
-      CellDecodeLimits{}.maxRunCount);
+      kMaxPayloadRuns);
   const uint32_t runCount = static_cast<uint32_t>(segments.size());
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
@@ -222,11 +222,11 @@ void LocalCellOutput::writeSealedPayload(
 
   // Each spilled segment is a run of its own, oldest first.
   for (const auto& segment : segments) {
-    writeSpilledSegment(out, segment);
+    copySpilledSegment(out, segment);
   }
 }
 
-void LocalCellOutput::writeSpilledSegment(
+void LocalCellOutput::copySpilledSegment(
     DataFileWriter& out,
     const SpillSegment& segment) {
   const uint32_t numStreams = layout_->numStreams();
@@ -276,7 +276,7 @@ void LocalCellOutput::writeSpilledSegment(
   out.copyFrom(spill_, segment.begin, segmentBytes);
 }
 
-void LocalCellOutput::writeResidentPayload(
+void LocalCellOutput::writeOpenPayload(
     DataFileWriter& out,
     const CellWindowInput& in,
     uint32_t pid) {
@@ -285,11 +285,11 @@ void LocalCellOutput::writeResidentPayload(
   const uint64_t runs = segments.size() + (total > 0 ? 1 : 0);
   BOLT_CHECK_LE(
       runs,
-      CellDecodeLimits{}.maxRunCount,
+      kMaxPayloadRuns,
       "Cell payload of partition {} holds {} runs, more than maxRunCount ({})",
       pid,
       runs,
-      CellDecodeLimits{}.maxRunCount);
+      kMaxPayloadRuns);
   const auto runCount = static_cast<uint32_t>(runs);
 
   resetBuffer(scratch_, 0, pool_);
@@ -301,7 +301,7 @@ void LocalCellOutput::writeResidentPayload(
   // Mid-window spilled runs first (they hold the older blocks), the
   // resident cells last.
   for (const auto& segment : segments) {
-    writeSpilledSegment(out, segment);
+    copySpilledSegment(out, segment);
   }
   if (total > 0) {
     rawBytesWritten_ += uncompressedRunBytes(layout_->numStreams(), total);
@@ -364,7 +364,7 @@ void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
     writeSealedPayload(out, pid, payload, mergeInput_->encodingTags);
   }
   if (mergeInput_->rowCounts[pid] > 0) {
-    writeResidentPayload(out, *mergeInput_, pid);
+    writeOpenPayload(out, *mergeInput_, pid);
   }
   rawPartitionLengths_[pid] +=
       static_cast<int64_t>(rawBytesWritten_ - rawStart);
@@ -382,16 +382,16 @@ RssCellOutput::RssCellOutput(
       compressor_(options, cellOptions, &compressTimeNs_),
       rawPartitionLengths_(options.numPartitions, 0) {}
 
-void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {
-  BOLT_FAIL("RssCellOutput never spills: windows are sent whole");
+void RssCellOutput::spillCells(const CellWindowInput& /*in*/) {
+  BOLT_FAIL("RssCellOutput never spills: payloads are sent whole");
 }
 
-void RssCellOutput::sealWindow(const CellWindowInput& in) {
-  sendWindow(in);
+void RssCellOutput::sealPayloads(const CellWindowInput& in) {
+  sendPayloads(in);
   ++numSeals_;
 }
 
-void RssCellOutput::sendWindow(const CellWindowInput& in) {
+void RssCellOutput::sendPayloads(const CellWindowInput& in) {
   BufferPtr block;
   blocks_.writeBlocks([&](uint32_t pid, BlockEmitter emit) {
     if (in.rowCounts[pid] == 0 ||
@@ -428,7 +428,7 @@ void RssCellOutput::buildPayload(
 void RssCellOutput::finalize(
     const CellWindowInput& in,
     ShuffleWriterMetrics& metrics) {
-  sendWindow(in);
+  sendPayloads(in);
   LOG(INFO) << "CellShuffleWriter rss: seals=" << numSeals_;
   logCompression(compressor_);
   blocks_.finish(metrics);

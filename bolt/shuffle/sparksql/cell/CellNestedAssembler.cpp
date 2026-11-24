@@ -36,43 +36,32 @@ constexpr uint32_t kLengthsPerRead = 1024;
 CellNestedAssembler::CellNestedAssembler(
     RowTypePtr type,
     ShuffleDecompressor* decompressor,
-    memory::MemoryPool* pool,
-    CellDecodeLimits limits)
+    memory::MemoryPool* pool)
     : layout_(std::move(type)),
       pool_(pool),
-      payloadDecoder_(layout_.layout(), decompressor, pool, limits),
+      payloadDecoder_(layout_.layout(), decompressor, pool),
       payloadPositions_(layout_.numSpaces(), 0),
       offsets_(layout_.numNodes()) {
   // The spaces' decoders open what payloadDecoder_ decompressed.
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     decoders_.push_back(std::make_unique<CellPayloadDecoder>(
-        CellLayout::create(layout_.space(s).rowType), nullptr, pool, limits));
+        CellLayout::create(layout_.space(s).rowType), nullptr, pool));
   }
 }
 
-bool CellNestedAssembler::beginPayload(
-    ShuffleByteSource& in,
-    std::string& error) {
-  uint32_t rowCount = 0;
-  if (!payloadDecoder_.readPayload(in, rowCount, error)) {
-    return false;
-  }
+void CellNestedAssembler::beginPayload(ShuffleByteSource& in) {
+  const uint32_t rowCount = payloadDecoder_.readPayload(in);
   payloadPositions_[0] = rowCount;
   // Spaces are numbered after their owners': a space's positions are known
   // by the time it opens.
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& space = layout_.space(s);
-    if (!decoders_[s]->openPayload(
-            payloadDecoder_,
-            space.columns,
-            static_cast<uint32_t>(payloadPositions_[s]),
-            error)) {
-      return false;
-    }
+    decoders_[s]->openPayload(
+        payloadDecoder_,
+        space.columns,
+        static_cast<uint32_t>(payloadPositions_[s]));
     for (const uint32_t x : space.containers) {
-      if (!countPositions(x, error)) {
-        return false;
-      }
+      countPositions(x);
     }
   }
   // Every space's fixed bytes and string data, per row.
@@ -90,10 +79,9 @@ bool CellNestedAssembler::beginPayload(
   }
   payloadRowBytes_ = std::max<uint64_t>(
       1, (bytes + strings) / std::max<uint32_t>(1, rowCount));
-  return true;
 }
 
-bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
+void CellNestedAssembler::countPositions(uint32_t x) {
   const auto& node = layout_.node(x);
   const auto& decoder = *decoders_[node.space];
   const uint32_t col = node.spaceColumn;
@@ -105,33 +93,28 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
       decoder.nonNullCount(col));
   // The stream is decoded once more when its rows are appended; the
   // lengths are not kept.
-  const auto fail = [&error](const char* what) {
-    error = what;
-    return false;
-  };
   uint64_t total = 0;
   int32_t lengths[kLengthsPerRead];
   for (uint32_t left = decoder.nonNullCount(col); left > 0;) {
     const uint32_t n = std::min(left, kLengthsPerRead);
     if (!cursor.next(n, lengths)) {
-      return fail("malformed container length stream");
+      failMalformedPayload("malformed container length stream");
     }
     for (uint32_t i = 0; i < n; ++i) {
       if (lengths[i] < 0) {
-        return fail("negative container length");
+        failMalformedPayload("negative container length");
       }
       total += static_cast<uint64_t>(lengths[i]);
     }
     if (total > CellNestedLayout::kMaxPositions) {
-      return fail("container lengths beyond the position limit");
+      failMalformedPayload("container lengths beyond the position limit");
     }
     left -= n;
   }
   if (!cursor.finished()) {
-    return fail("malformed container length stream");
+    failMalformedPayload("malformed container length stream");
   }
   payloadPositions_[node.ownedSpace] = total;
-  return true;
 }
 
 bool CellNestedAssembler::takesPayload() const {

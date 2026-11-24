@@ -23,8 +23,8 @@
 #pragma once
 
 #include <span>
-#include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
@@ -36,17 +36,8 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Bounds on untrusted input; zero disables a limit. The defaults are what
-/// the writer can emit. Run and null-body buffers come from the reader
-/// pool, so a corrupt size fails on the pool's capacity.
-struct CellDecodeLimits {
-  uint32_t maxRowCount{kMaxPayloadRows};
-  /// runCount is a u32 header field and runs are parsed one at a time, so
-  /// this bound guards no memory: it reports a corrupt count early. It must
-  /// stay far above the runs a writer under memory pressure legitimately
-  /// spills into one payload (66105 were seen); the writer checks it too.
-  uint32_t maxRunCount{1u << 24};
-};
+/// Throws a malformed-payload runtime exception with a uniform prefix.
+[[noreturn]] FOLLY_NOINLINE void failMalformedPayload(const char* what);
 
 /// Decodes ColumnarPayloads of one schema into RowVectors, streaming: a
 /// payload's encoded bytes are read whole, its rows come out in pieces of
@@ -63,8 +54,7 @@ class CellPayloadDecoder {
   CellPayloadDecoder(
       CellLayout layout,
       ShuffleDecompressor* decompressor,
-      memory::MemoryPool* pool,
-      CellDecodeLimits limits = {});
+      memory::MemoryPool* pool);
 
   CellPayloadDecoder(const CellPayloadDecoder&) = delete;
   CellPayloadDecoder& operator=(const CellPayloadDecoder&) = delete;
@@ -72,29 +62,27 @@ class CellPayloadDecoder {
 
   /// Reads one payload from `in`: header, null body and every run. Its
   /// rows then come out through appendRows(). The previous payload must be
-  /// fully appended. On malformed input returns false with `error` set,
-  /// having consumed an unspecified prefix of `in`.
-  bool beginPayload(ShuffleByteSource& in, std::string& error);
+  /// fully appended. Throws on malformed input, having consumed an unspecified
+  /// prefix of `in`.
+  void beginPayload(ShuffleByteSource& in);
 
   /// Reads one payload as beginPayload() does, but opens no column: the
-  /// decoders of its columns open it with openPayload(). `rowCount` is the
-  /// header's. What it read stays valid until the next readPayload() or
-  /// beginPayload() of this decoder.
-  bool
-  readPayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
+  /// decoders of its columns open it with openPayload(). Returns the header's
+  /// rowCount. What it read stays valid until the next readPayload() or
+  /// beginPayload() of this decoder. Throws on malformed input.
+  uint32_t readPayload(ShuffleByteSource& in);
 
   /// Opens the payload another decoder, `source`, read for this decoder's
   /// columns, column c being source's sourceColumns[c] - one entry per
   /// column of this decoder - of the same type, at
   /// `positions` positions each: they come out through appendRows() as this
   /// decoder's rows, and `source` reads no other payload until they are all
-  /// appended. The previous payload must be fully appended. On malformed
-  /// input returns false with `error` set.
-  bool openPayload(
+  /// appended. The previous payload must be fully appended. Throws on
+  /// malformed input.
+  void openPayload(
       const CellPayloadDecoder& source,
       std::span<const uint32_t> sourceColumns,
-      uint32_t positions,
-      std::string& error);
+      uint32_t positions);
 
   /// Rows of the current payload not appended yet.
   uint32_t payloadRowsLeft() const {
@@ -154,18 +142,21 @@ class CellPayloadDecoder {
     bool allInline;
   };
 
-  /// Read position of one column in the current payload.
-  struct ColumnCursor {
+  struct RawCursor {
     /// Non-null values consumed: the raw-stream offset in values.
     uint64_t valuesRead{0};
-    StreamCursor<int16_t> values16;
-    StreamCursor<int32_t> values32;
-    /// Bigint values, or timestamp seconds.
-    StreamCursor<int64_t> values64;
-    /// Timestamp nanos, string lengths, or dictionary fallback lengths.
-    StreamCursor<int64_t> lengthsOrNanos;
-    /// Strings: the data stream, or the fallback bytes after the
-    /// dictionaries; dataOffset is the next value's start.
+  };
+
+  struct TimestampCursor {
+    StreamCursor<int64_t> seconds;
+    StreamCursor<int64_t> nanos;
+  };
+
+  struct StringCursor {
+    /// String lengths, or dictionary fallback lengths.
+    StreamCursor<int64_t> lengths;
+    /// The data stream, or the fallback bytes after the dictionaries;
+    /// dataOffset is the next value's start.
     std::string_view data;
     uint64_t dataOffset{0};
     bool isDictionary{false};
@@ -179,6 +170,15 @@ class CellPayloadDecoder {
     uint32_t currentMatchedLeft{0};
   };
 
+  /// Read position of one column in the current payload.
+  using ColumnCursor = std::variant<
+      RawCursor,
+      StreamCursor<int16_t>,
+      StreamCursor<int32_t>,
+      StreamCursor<int64_t>,
+      TimestampCursor,
+      StringCursor>;
+
   /// One column of the batch under construction.
   struct ColumnBatch {
     BufferPtr values;
@@ -188,47 +188,37 @@ class CellPayloadDecoder {
     size_t charsLeft{0};
   };
 
-  FOLLY_NOINLINE bool fail(std::string& error, const char* what) const {
-    error = what;
-    return false;
-  }
-
-  /// Header, null body and every run.
-  bool
-  parsePayload(ShuffleByteSource& in, uint32_t& rowCount, std::string& error);
+  /// Header, null body and every run; returns the header's rowCount.
+  uint32_t parsePayload(ShuffleByteSource& in);
 
   /// Reads the null body's tags and locates each kRawNull column's records.
-  bool parseNullBody(
+  void parseNullBody(
       ShuffleByteSource& in,
       uint32_t nullStoredSize,
-      uint32_t nullDecodedSize,
-      std::string& error);
+      uint32_t nullDecodedSize);
 
   /// Expands the located records into bitmaps of `rowCount` rows.
-  bool expandNulls(uint32_t rowCount, std::string& error);
+  void expandNulls(uint32_t rowCount);
 
   /// `onlyRun`: the payload's only run, whose combined buffer the streams may
   /// view in place instead of copying it apart. Sets `streamsInCombinedDecoded`
   /// when stream views point directly into `combinedDecoded_`.
-  bool parseRun(
-      ShuffleByteSource& in,
-      bool onlyRun,
-      bool& streamsInCombinedDecoded,
-      std::string& error);
+  void
+  parseRun(ShuffleByteSource& in, bool onlyRun, bool& streamsInCombinedDecoded);
 
   /// Expands the nulls and opens every column at `rowCount` rows; with none,
   /// runs the whole-stream checks at once.
-  bool openColumns(uint32_t rowCount, std::string& error);
+  void openColumns(uint32_t rowCount);
 
   /// Positions the column's cursor at the payload's first row, checking
   /// what can be checked before any value is read.
-  bool openColumn(uint32_t col, std::string& error);
+  void openColumn(uint32_t col);
 
-  bool openStringColumn(uint32_t col, std::string& error);
+  void openStringColumn(uint32_t col);
 
   /// The whole-stream checks, once the last row was appended: the blocks
   /// and string bytes consumed their streams exactly.
-  bool finishPayload(std::string& error);
+  void finishPayload();
 
   void openBatch(vector_size_t capacity);
 
@@ -253,49 +243,31 @@ class CellPayloadDecoder {
       const Read& read);
 
   template <typename T>
-  bool appendEncoded(
+  void appendEncoded(
       uint32_t col,
       uint32_t numRows,
       uint32_t dense,
-      StreamCursor<T>& cursor,
-      std::string& error);
+      StreamCursor<T>& cursor);
 
   template <typename T>
-  bool appendRaw(uint32_t col, uint32_t numRows, uint32_t dense);
+  void appendRaw(uint32_t col, uint32_t numRows, uint32_t dense);
 
-  bool appendBoolean(
-      uint32_t col,
-      uint32_t numRows,
-      uint32_t dense,
-      std::string& error);
+  void appendBoolean(uint32_t col, uint32_t numRows, uint32_t dense);
 
-  bool appendTimestamp(
-      uint32_t col,
-      uint32_t numRows,
-      uint32_t dense,
-      std::string& error);
+  void appendTimestamp(uint32_t col, uint32_t numRows, uint32_t dense);
 
-  BOLT_CELL_KERNEL bool appendString(
-      uint32_t col,
-      uint32_t numRows,
-      uint32_t dense,
-      std::string& error);
+  BOLT_CELL_KERNEL void
+  appendString(uint32_t col, uint32_t numRows, uint32_t dense);
 
   class StringRows;
 
   /// Ordinary strings and dictionary fallback share the length/data streams.
   /// Keep their block loop separate from dictionary index resolution.
-  BOLT_CELL_KERNEL FOLLY_NOINLINE bool appendStringFlat(
-      uint32_t col,
-      uint32_t dense,
-      StringRows& rows,
-      std::string& error);
+  BOLT_CELL_KERNEL FOLLY_NOINLINE void
+  appendStringFlat(uint32_t col, uint32_t dense, StringRows& rows);
 
-  BOLT_CELL_KERNEL FOLLY_NOINLINE bool appendStringDictionary(
-      uint32_t col,
-      uint32_t dense,
-      StringRows& rows,
-      std::string& error);
+  BOLT_CELL_KERNEL FOLLY_NOINLINE void
+  appendStringDictionary(uint32_t col, uint32_t dense, StringRows& rows);
 
   /// `bytes` of string space in the column's batch buffers.
   FOLLY_NOINLINE char* stringSpace(uint32_t col, uint64_t bytes);
@@ -310,7 +282,6 @@ class CellPayloadDecoder {
   const CellLayout layout_;
   ShuffleDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
-  const CellDecodeLimits limits_;
   /// Fixed bytes of one decoded row, the batch byte estimate's base.
   uint32_t rowBytes_{0};
 
@@ -355,14 +326,13 @@ class CellPayloadDecoder {
 /// ceil(rowCount / 8)-byte bitmap of the column (bit 1 = non-null, unused
 /// high bits zero), counts its non-null rows and moves `cursor` past the
 /// records; never reads past `end`. Writes up to 7 bytes past the bitmap,
-/// which must be writable. False, with `error`, when they are malformed.
-BOLT_CELL_KERNEL bool expandNullRecords(
+/// which must be writable. Throws when malformed.
+BOLT_CELL_KERNEL void expandNullRecords(
     const uint8_t*& cursor,
     const uint8_t* end,
     uint32_t rowCount,
     uint8_t* bitmap,
-    uint32_t& nonNullCount,
-    std::string& error);
+    uint32_t& nonNullCount);
 
 // Buffer helpers shared by both sides, and the writer's payload pieces.
 

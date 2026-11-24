@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
+#include <folly/ScopeGuard.h>
 #include <folly/lang/Assume.h>
 #include <algorithm>
 #include <string_view>
@@ -297,41 +298,68 @@ class CellPayloadDecoder::StringRows {
 CellPayloadDecoder::CellPayloadDecoder(
     CellLayout layout,
     ShuffleDecompressor* decompressor,
-    memory::MemoryPool* pool,
-    CellDecodeLimits limits)
+    memory::MemoryPool* pool)
     : layout_(std::move(layout)),
       decompressor_(decompressor),
       pool_(pool),
-      limits_(limits),
       streamBytes_(layout_.numStreams()),
       streamViews_(layout_.numStreams()) {
   nullTags_.resize(layout_.numColumns());
   records_.resize(layout_.numColumns());
   nonNullCount_.resize(layout_.numColumns());
   bitmaps_.resize(layout_.numColumns());
-  cursors_.resize(layout_.numColumns());
+  cursors_.reserve(layout_.numColumns());
   batch_.resize(layout_.numColumns());
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    rowBytes_ += decodedRowBytes(layout_.rowType()->childAt(col)->kind());
+    const auto kind = layout_.rowType()->childAt(col)->kind();
+    rowBytes_ += decodedRowBytes(kind);
+    switch (kind) {
+      case TypeKind::SMALLINT:
+        cursors_.emplace_back(std::in_place_type<StreamCursor<int16_t>>);
+        break;
+      case TypeKind::INTEGER:
+        cursors_.emplace_back(std::in_place_type<StreamCursor<int32_t>>);
+        break;
+      case TypeKind::BIGINT:
+        cursors_.emplace_back(std::in_place_type<StreamCursor<int64_t>>);
+        break;
+      case TypeKind::TIMESTAMP:
+        cursors_.emplace_back(std::in_place_type<TimestampCursor>);
+        break;
+      case TypeKind::BOOLEAN:
+      case TypeKind::TINYINT:
+      case TypeKind::REAL:
+      case TypeKind::DOUBLE:
+      case TypeKind::HUGEINT:
+        cursors_.emplace_back(std::in_place_type<RawCursor>);
+        break;
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        cursors_.emplace_back(std::in_place_type<StringCursor>);
+        break;
+      default:
+        BOLT_FAIL("unsupported column type");
+    }
   }
 }
 
-bool expandNullRecords(
+[[noreturn]] FOLLY_NOINLINE void failMalformedPayload(const char* what) {
+  BOLT_FAIL("malformed cell shuffle payload: {}", what);
+}
+
+void expandNullRecords(
     const uint8_t*& cursor,
     const uint8_t* end,
     uint32_t rowCount,
     uint8_t* bitmap,
-    uint32_t& nonNullCount,
-    std::string& error) {
+    uint32_t& nonNullCount) {
   if (end - cursor < static_cast<ptrdiff_t>(sizeof(uint32_t))) {
-    error = "truncated null records";
-    return false;
+    failMalformedPayload("truncated null records");
   }
   const uint32_t count = memory::loadUnaligned<uint32_t>(cursor);
   cursor += sizeof(uint32_t);
   if (count > static_cast<uint64_t>(end - cursor) / kNullRecordBytes) {
-    error = "truncated null records";
-    return false;
+    failMalformedPayload("truncated null records");
   }
   BitAppender out(bitmap);
   uint64_t row = 0;
@@ -341,8 +369,7 @@ bool expandNullRecords(
     const uint32_t fill = cursor[2];
     const uint8_t* bits = cursor + (kNullRecordBytes - kNullRecordBitmapBytes);
     if (fill > kNullRecordBits) {
-      error = "null record fill beyond its bitmap";
-      return false;
+      failMalformedPayload("null record fill beyond its bitmap");
     }
     bool clearPastFill =
         (fill & 7) == 0 || (bits[fill >> 3] >> (fill & 7)) == 0;
@@ -350,18 +377,15 @@ bool expandNullRecords(
       clearPastFill = clearPastFill && bits[b] == 0;
     }
     if (!clearPastFill) {
-      error = "non-zero bits past a null record's fill";
-      return false;
+      failMalformedPayload("non-zero bits past a null record's fill");
     }
     const uint32_t runRows = run & kNullRecordMaxRun;
     const uint64_t rows = runRows + fill;
     if (rows == 0) {
-      error = "empty null record";
-      return false;
+      failMalformedPayload("empty null record");
     }
     if (row + rows > rowCount) {
-      error = "null records past the payload's rows";
-      return false;
+      failMalformedPayload("null records past the payload's rows");
     }
     const bool runNull = (run & kNullRecordRunNull) != 0;
     out.appendRun(!runNull, runRows);
@@ -379,33 +403,31 @@ bool expandNullRecords(
   out.appendRun(true, rowCount - row);
   out.finish();
   nonNullCount = static_cast<uint32_t>(rowCount - nulls);
-  return true;
 }
 
-bool CellPayloadDecoder::parseNullBody(
+void CellPayloadDecoder::parseNullBody(
     ShuffleByteSource& in,
     uint32_t nullStoredSize,
-    uint32_t nullDecodedSize,
-    std::string& error) {
+    uint32_t nullDecodedSize) {
   if (nullDecodedSize == 0) {
     auto* nullData = resetBuffer(nullBody_, nullStoredSize, pool_);
     if (!in.read(nullData, nullStoredSize)) {
-      return fail(error, "truncated null body");
+      failMalformedPayload("truncated null body");
     }
   } else {
     if (decompressor_ == nullptr) {
-      return fail(error, "compressed null body without a codec");
+      failMalformedPayload("compressed null body without a codec");
     }
     auto* stored = resetBuffer(compressedScratch_, nullStoredSize, pool_);
     if (!in.read(stored, nullStoredSize)) {
-      return fail(error, "truncated null body");
+      failMalformedPayload("truncated null body");
     }
     auto* decoded = resetBuffer(nullBody_, nullDecodedSize, pool_);
     if (!decompressor_->decompress(
             {reinterpret_cast<const uint8_t*>(stored), nullStoredSize},
             {reinterpret_cast<uint8_t*>(decoded), nullDecodedSize})) {
       // The decompressed length must match exactly.
-      return fail(error, "null body decompression failed");
+      failMalformedPayload("null body decompression failed");
     }
   }
 
@@ -414,12 +436,12 @@ bool CellPayloadDecoder::parseNullBody(
   const auto nullBody = bufferBytes(nullBody_);
   const auto* nullData = reinterpret_cast<const uint8_t*>(nullBody.data());
   if (nullBody.size() < tagBytes) {
-    return fail(error, "null body shorter than its tags");
+    failMalformedPayload("null body shorter than its tags");
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
     const auto tag = getNullTag(nullData, col);
     if (tag == NullTag::kReserved) {
-      return fail(error, "reserved null tag");
+      failMalformedPayload("reserved null tag");
     }
     nullTags_[col] = tag;
   }
@@ -427,7 +449,7 @@ bool CellPayloadDecoder::parseNullBody(
   if ((numColumns % 4) != 0) {
     const uint8_t tail = nullData[tagBytes - 1];
     if ((tail >> ((numColumns % 4) * 2)) != 0) {
-      return fail(error, "non-zero unused null tag bits");
+      failMalformedPayload("non-zero unused null tag bits");
     }
   }
 
@@ -443,19 +465,18 @@ bool CellPayloadDecoder::parseNullBody(
         memory::loadUnaligned<uint32_t>(cursor) >
             static_cast<uint64_t>(end - cursor - sizeof(uint32_t)) /
                 kNullRecordBytes) {
-      return fail(error, "truncated null records");
+      failMalformedPayload("truncated null records");
     }
     records_[col] = cursor;
     cursor += sizeof(uint32_t) +
         uint64_t{memory::loadUnaligned<uint32_t>(cursor)} * kNullRecordBytes;
   }
   if (cursor != end) {
-    return fail(error, "null body length mismatch");
+    failMalformedPayload("null body length mismatch");
   }
-  return true;
 }
 
-bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
+void CellPayloadDecoder::expandNulls(uint32_t rowCount) {
   uint32_t rawNullColumns = 0;
   for (const auto tag : nullTags_) {
     rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
@@ -484,10 +505,7 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
         const uint8_t* const end = cursor + sizeof(uint32_t) +
             uint64_t{memory::loadUnaligned<uint32_t>(cursor)} *
                 kNullRecordBytes;
-        if (!expandNullRecords(
-                cursor, end, rowCount, bitmap, nonNullCount_[col], error)) {
-          return false;
-        }
+        expandNullRecords(cursor, end, rowCount, bitmap, nonNullCount_[col]);
         bitmaps_[col] = bitmap;
         bitmap += bitmapBytes;
         break;
@@ -496,20 +514,18 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
         break;
     }
   }
-  return true;
 }
 
-bool CellPayloadDecoder::parseRun(
+void CellPayloadDecoder::parseRun(
     ShuffleByteSource& in,
     bool onlyRun,
-    bool& streamsInCombinedDecoded,
-    std::string& error) {
+    bool& streamsInCombinedDecoded) {
   uint8_t layoutByte;
   if (!in.read(&layoutByte, 1)) {
-    return fail(error, "truncated run header");
+    failMalformedPayload("truncated run header");
   }
   if (layoutByte > static_cast<uint8_t>(RunLayout::kCombinedUncompressed)) {
-    return fail(error, "unknown run compression layout");
+    failMalformedPayload("unknown run compression layout");
   }
   const auto runLayout = static_cast<RunLayout>(layoutByte);
   const uint32_t numStreams = layout_.numStreams();
@@ -518,23 +534,23 @@ bool CellPayloadDecoder::parseRun(
 
   storedSizes_.resize(storedCount);
   if (!in.read(storedSizes_.data(), storedCount * sizeof(uint64_t))) {
-    return fail(error, "truncated run stored sizes");
+    failMalformedPayload("truncated run stored sizes");
   }
   decodedSizes_.resize(numStreams);
   if (!in.read(decodedSizes_.data(), numStreams * sizeof(uint64_t))) {
-    return fail(error, "truncated run decoded sizes");
+    failMalformedPayload("truncated run decoded sizes");
   }
 
   uint64_t storedSum = 0;
   for (const auto size : storedSizes_) {
     if (addOverflows(storedSum, size, storedSum)) {
-      return fail(error, "run stored sizes overflow");
+      failMalformedPayload("run stored sizes overflow");
     }
   }
   uint64_t decodedSum = 0;
   for (const auto size : decodedSizes_) {
     if (addOverflows(decodedSum, size, decodedSum)) {
-      return fail(error, "run decoded sizes overflow");
+      failMalformedPayload("run decoded sizes overflow");
     }
   }
 
@@ -545,7 +561,7 @@ bool CellPayloadDecoder::parseRun(
         const uint64_t decoded = decodedSizes_[s];
         if (stored == 0) {
           if (decoded != 0) {
-            return fail(error, "empty stored buffer with decoded size");
+            failMalformedPayload("empty stored buffer with decoded size");
           }
           continue; // an empty stream: the codec is not invoked
         }
@@ -555,41 +571,41 @@ bool CellPayloadDecoder::parseRun(
           const size_t offset = stream == nullptr ? 0 : stream->size();
           uint64_t totalSize = 0;
           if (addOverflows(static_cast<uint64_t>(offset), stored, totalSize)) {
-            return fail(error, "run stream size overflow");
+            failMalformedPayload("run stream size overflow");
           }
           auto* out =
               resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
           if (!in.read(out + offset, stored)) {
-            return fail(error, "truncated run buffer");
+            failMalformedPayload("truncated run buffer");
           }
         } else {
           if (decompressor_ == nullptr) {
-            return fail(error, "compressed buffer without a codec");
+            failMalformedPayload("compressed buffer without a codec");
           }
           auto* input = resetBuffer(compressedScratch_, stored, pool_);
           if (!in.read(input, stored)) {
-            return fail(error, "truncated run buffer");
+            failMalformedPayload("truncated run buffer");
           }
           const size_t offset = stream == nullptr ? 0 : stream->size();
           uint64_t totalSize = 0;
           if (addOverflows(static_cast<uint64_t>(offset), decoded, totalSize)) {
-            return fail(error, "run stream size overflow");
+            failMalformedPayload("run stream size overflow");
           }
           auto* out =
               resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
           if (!decompressor_->decompress(
                   {reinterpret_cast<const uint8_t*>(input), stored},
                   {reinterpret_cast<uint8_t*>(out) + offset, decoded})) {
-            return fail(error, "run buffer decompression failed");
+            failMalformedPayload("run buffer decompression failed");
           }
         }
       }
-      return true;
+      return;
 
     case RunLayout::kCombinedUncompressed:
       // The single stored buffer is the concatenation itself.
       if (storedSizes_[0] != decodedSum) {
-        return fail(error, "combined-uncompressed size mismatch");
+        failMalformedPayload("combined-uncompressed size mismatch");
       }
       for (uint32_t s = 0; s < numStreams; ++s) {
         const uint64_t decoded = decodedSizes_[s];
@@ -600,28 +616,28 @@ bool CellPayloadDecoder::parseRun(
         const size_t offset = stream == nullptr ? 0 : stream->size();
         uint64_t totalSize = 0;
         if (addOverflows(static_cast<uint64_t>(offset), decoded, totalSize)) {
-          return fail(error, "run stream size overflow");
+          failMalformedPayload("run stream size overflow");
         }
         auto* out = resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
         if (!in.read(out + offset, decoded)) {
-          return fail(error, "truncated run buffer");
+          failMalformedPayload("truncated run buffer");
         }
       }
-      return true;
+      return;
 
     case RunLayout::kCombined: {
       if (decompressor_ == nullptr) {
-        return fail(error, "compressed buffer without a codec");
+        failMalformedPayload("compressed buffer without a codec");
       }
       auto* input = resetBuffer(compressedScratch_, storedSizes_[0], pool_);
       if (!in.read(input, storedSizes_[0])) {
-        return fail(error, "truncated run buffer");
+        failMalformedPayload("truncated run buffer");
       }
       auto* decodedData = resetBuffer(combinedDecoded_, decodedSum, pool_);
       if (!decompressor_->decompress(
               {reinterpret_cast<const uint8_t*>(input), storedSizes_[0]},
               {reinterpret_cast<uint8_t*>(decodedData), decodedSum})) {
-        return fail(error, "combined buffer decompression failed");
+        failMalformedPayload("combined buffer decompression failed");
       }
       if (onlyRun) {
         // The streams are consecutive in the decoded buffer: view them there.
@@ -633,7 +649,7 @@ bool CellPayloadDecoder::parseRun(
           offset += decodedSizes_[s];
         }
         streamsInCombinedDecoded = true;
-        return true;
+        return;
       }
       size_t offset = 0;
       for (uint32_t s = 0; s < numStreams; ++s) {
@@ -647,48 +663,42 @@ bool CellPayloadDecoder::parseRun(
                 static_cast<uint64_t>(streamOffset),
                 decodedSizes_[s],
                 totalSize)) {
-          return fail(error, "run stream size overflow");
+          failMalformedPayload("run stream size overflow");
         }
         auto* out = resizeBuffer(stream, static_cast<size_t>(totalSize), pool_);
         ::memcpy(out + streamOffset, decodedData + offset, decodedSizes_[s]);
         offset += decodedSizes_[s];
       }
-      return true;
+      return;
     }
   }
-  return fail(error, "unreachable run layout");
+  failMalformedPayload("unreachable run layout");
 }
 
-bool CellPayloadDecoder::beginPayload(
-    ShuffleByteSource& in,
-    std::string& error) {
+void CellPayloadDecoder::beginPayload(ShuffleByteSource& in) {
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
-  uint32_t rowCount = 0;
-  return parsePayload(in, rowCount, error) && openColumns(rowCount, error);
+  const uint32_t rowCount = parsePayload(in);
+  openColumns(rowCount);
 }
 
-bool CellPayloadDecoder::readPayload(
-    ShuffleByteSource& in,
-    uint32_t& rowCount,
-    std::string& error) {
+uint32_t CellPayloadDecoder::readPayload(ShuffleByteSource& in) {
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "a payload of this decoder is open");
-  return parsePayload(in, rowCount, error);
+  return parsePayload(in);
 }
 
-bool CellPayloadDecoder::openPayload(
+void CellPayloadDecoder::openPayload(
     const CellPayloadDecoder& source,
     std::span<const uint32_t> sourceColumns,
-    uint32_t positions,
-    std::string& error) {
+    uint32_t positions) {
   BOLT_CHECK(&source != this, "a decoder cannot open the payload it read");
   BOLT_CHECK_EQ(sourceColumns.size(), layout_.numColumns());
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
-  if (limits_.maxRowCount != 0 && positions > limits_.maxRowCount) {
-    return fail(error, "positions beyond the configured limit");
+  if (positions > kMaxPayloadRows) {
+    failMalformedPayload("positions beyond the configured limit");
   }
   // The source's null tags, records, encoding tags and streams of each
   // column.
@@ -711,18 +721,15 @@ bool CellPayloadDecoder::openPayload(
         layout_.firstStream(col);
     streamViews_[s] = source.streamViews_[from];
   }
-  return openColumns(positions, error);
+  openColumns(positions);
 }
 
-bool CellPayloadDecoder::parsePayload(
-    ShuffleByteSource& in,
-    uint32_t& rowCount,
-    std::string& error) {
+uint32_t CellPayloadDecoder::parsePayload(ShuffleByteSource& in) {
   uint8_t header[kPayloadFixedHeaderBytes];
   if (!in.read(header, sizeof(header))) {
-    return fail(error, "truncated payload header");
+    failMalformedPayload("truncated payload header");
   }
-  rowCount = memory::loadUnaligned<uint32_t>(header);
+  const uint32_t rowCount = memory::loadUnaligned<uint32_t>(header);
   const uint32_t runCount = memory::loadUnaligned<uint32_t>(header + 4);
   // variableBytes (offset 8) is unused here; it must be 0 only in a
   // payload without wire columns.
@@ -732,37 +739,35 @@ bool CellPayloadDecoder::parsePayload(
   if (numColumns == 0 &&
       (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
        memory::loadUnaligned<uint64_t>(header + 8) != 0)) {
-    return fail(
-        error, "payload without wire columns must contain only its header");
+    failMalformedPayload(
+        "payload without wire columns must contain only its header");
   }
   if (numColumns != 0 && nullStoredSize < 1) {
-    return fail(error, "null stored size must be at least 1");
+    failMalformedPayload("null stored size must be at least 1");
   }
   // Bounds on untrusted fields.
-  if (limits_.maxRowCount != 0 && rowCount > limits_.maxRowCount) {
-    return fail(error, "row count beyond the configured limit");
+  if (rowCount > kMaxPayloadRows) {
+    failMalformedPayload("row count beyond the configured limit");
   }
-  if (limits_.maxRunCount != 0 && runCount > limits_.maxRunCount) {
-    return fail(error, "run count beyond the configured limit");
+  if (runCount > kMaxPayloadRuns) {
+    failMalformedPayload("run count beyond the configured limit");
   }
 
-  if (!parseNullBody(in, nullStoredSize, nullDecodedSize, error)) {
-    return false;
-  }
+  parseNullBody(in, nullStoredSize, nullDecodedSize);
 
   encodingTags_.resize((numColumns + 7) / 8);
   if (!in.read(encodingTags_.data(), encodingTags_.size())) {
-    return fail(error, "truncated encoding tags");
+    failMalformedPayload("truncated encoding tags");
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
     const bool tagged = (encodingTags_[col / 8] >> (col % 8)) & 1;
     if (tagged && !layout_.isStringColumn(col)) {
-      return fail(error, "encoding tag on a non-string column");
+      failMalformedPayload("encoding tag on a non-string column");
     }
   }
   if ((numColumns % 8) != 0 &&
       (encodingTags_.back() >> (numColumns % 8)) != 0) {
-    return fail(error, "non-zero unused encoding tag bits");
+    failMalformedPayload("non-zero unused encoding tag bits");
   }
 
   for (auto& stream : streamBytes_) {
@@ -773,34 +778,29 @@ bool CellPayloadDecoder::parsePayload(
   streamViews_.assign(streamBytes_.size(), std::string_view());
   bool streamsInCombinedDecoded = false;
   for (uint32_t run = 0; run < runCount; ++run) {
-    if (!parseRun(in, runCount == 1, streamsInCombinedDecoded, error)) {
-      return false;
-    }
+    parseRun(in, runCount == 1, streamsInCombinedDecoded);
   }
   if (!streamsInCombinedDecoded) {
     for (size_t s = 0; s < streamBytes_.size(); ++s) {
       streamViews_[s] = bufferBytes(streamBytes_[s]);
     }
   }
-  return true;
+  return rowCount;
 }
 
-bool CellPayloadDecoder::openColumns(uint32_t rowCount, std::string& error) {
-  if (!expandNulls(rowCount, error)) {
-    return false;
-  }
+void CellPayloadDecoder::openColumns(uint32_t rowCount) {
+  expandNulls(rowCount);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (!openColumn(col, error)) {
-      return false;
-    }
+    openColumn(col);
   }
   rowCount_ = rowCount;
-  return rowCount_ != 0 || finishPayload(error);
+  if (rowCount_ == 0) {
+    finishPayload();
+  }
 }
 
-bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
+void CellPayloadDecoder::openColumn(uint32_t col) {
   auto& cursor = cursors_[col];
-  cursor.valuesRead = 0;
   const auto kind = layout_.rowType()->childAt(col)->kind();
   const uint32_t stream = layout_.firstStream(col);
   const auto bytes = streamViews_[stream];
@@ -808,44 +808,50 @@ bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
   const uint32_t nonNull = nonNullCount_[col];
   switch (kind) {
     case TypeKind::SMALLINT:
-      cursor.values16.reset(data, bytes.size(), nonNull);
-      return true;
+      std::get<StreamCursor<int16_t>>(cursor).reset(
+          data, bytes.size(), nonNull);
+      return;
     case TypeKind::INTEGER:
-      cursor.values32.reset(data, bytes.size(), nonNull);
-      return true;
+      std::get<StreamCursor<int32_t>>(cursor).reset(
+          data, bytes.size(), nonNull);
+      return;
     case TypeKind::BIGINT:
-      cursor.values64.reset(data, bytes.size(), nonNull);
-      return true;
+      std::get<StreamCursor<int64_t>>(cursor).reset(
+          data, bytes.size(), nonNull);
+      return;
     case TypeKind::TIMESTAMP: {
       const auto nanos = streamViews_[stream + 1];
-      cursor.values64.reset(data, bytes.size(), nonNull);
-      cursor.lengthsOrNanos.reset(
+      auto& ts = std::get<TimestampCursor>(cursor);
+      ts.seconds.reset(data, bytes.size(), nonNull);
+      ts.nanos.reset(
           reinterpret_cast<const uint8_t*>(nanos.data()),
           nanos.size(),
           nonNull);
-      return true;
+      return;
     }
     case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
     case TypeKind::REAL:
     case TypeKind::DOUBLE:
     case TypeKind::HUGEINT:
+      std::get<RawCursor>(cursor).valuesRead = 0;
       // Raw streams: exactly one fixed-width value per non-null row.
       if (bytes.size() !=
           static_cast<uint64_t>(nonNull) * decodedRowBytes(kind)) {
-        return fail(error, "raw stream length mismatch");
+        failMalformedPayload("raw stream length mismatch");
       }
-      return true;
+      return;
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
-      return openStringColumn(col, error);
+      openStringColumn(col);
+      return;
     default:
-      return fail(error, "unsupported column type");
+      failMalformedPayload("unsupported column type");
   }
 }
 
-bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
-  auto& cursor = cursors_[col];
+void CellPayloadDecoder::openStringColumn(uint32_t col) {
+  auto& cursor = std::get<StringCursor>(cursors_[col]);
   const auto lengthBytes = streamViews_[layout_.firstStream(col)];
   const auto dataBytes = streamViews_[layout_.firstStream(col) + 1];
   const uint32_t nonNull = nonNullCount_[col];
@@ -863,18 +869,18 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   if (nonNull == 0) {
     // Every stream of an all-null column must be empty.
     if (!lengthBytes.empty() || !dataBytes.empty()) {
-      return fail(error, "streams of an all-null column are not empty");
+      failMalformedPayload("streams of an all-null column are not empty");
     }
     cursor.isDictionary = false;
-    cursor.lengthsOrNanos.reset(nullptr, 0, 0);
-    return true;
+    cursor.lengths.reset(nullptr, 0, 0);
+    return;
   }
   if (!cursor.isDictionary) {
-    cursor.lengthsOrNanos.reset(
+    cursor.lengths.reset(
         reinterpret_cast<const uint8_t*>(lengthBytes.data()),
         lengthBytes.size(),
         nonNull);
-    return true;
+    return;
   }
 
   // The dictionary sequence in the data stream, then the index
@@ -887,7 +893,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   uint64_t matchedSum = 0;
   while (true) {
     if (pos >= dataSize) {
-      return fail(error, "unterminated dictionary sequence");
+      failMalformedPayload("unterminated dictionary sequence");
     }
     const size_t firstEntry = cursor.entries.size();
     uint32_t serialized = 0;
@@ -895,7 +901,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     uint8_t marker;
     while (true) {
       if (pos >= dataSize) {
-        return fail(error, "unterminated dictionary sequence");
+        failMalformedPayload("unterminated dictionary sequence");
       }
       marker = data[pos];
       static_assert(
@@ -909,14 +915,14 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
       // entry length and the entry count.
       const uint32_t length = marker;
       if (length > kDictEntryMaxLen) {
-        return fail(error, "dictionary entry too long");
+        failMalformedPayload("dictionary entry too long");
       }
       if (dataSize - pos < 1 + static_cast<size_t>(length)) {
-        return fail(error, "dictionary entry out of bounds");
+        failMalformedPayload("dictionary entry out of bounds");
       }
       serialized += 1 + length;
       if (serialized > kDictSerializedBudget) {
-        return fail(error, "dictionary over its serialized budget");
+        failMalformedPayload("dictionary over its serialized budget");
       }
       cursor.entries.emplace_back(
           reinterpret_cast<const char*>(data) + pos + 1, length);
@@ -924,7 +930,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
       pos += 1 + length;
     }
     if (dataSize - pos < 4) {
-      return fail(error, "truncated dictionary matched count");
+      failMalformedPayload("truncated dictionary matched count");
     }
     const uint32_t matchedRows = memory::loadUnaligned<uint32_t>(data + pos);
     pos += 4;
@@ -934,7 +940,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
          matchedRows,
          allInline});
     if (addOverflows(matchedSum, matchedRows, matchedSum)) {
-      return fail(error, "matched counts overflow");
+      failMalformedPayload("matched counts overflow");
     }
     if (marker == kDictLastMarker) {
       break;
@@ -942,69 +948,55 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   }
   // Matched rows are non-null rows.
   if (matchedSum > nonNull) {
-    return fail(error, "matched counts beyond non-null rows");
+    failMalformedPayload("matched counts beyond non-null rows");
   }
   // Length stream: matchedSum 1-byte indexes, then the fallback lengths.
   if (lengthBytes.size() < matchedSum) {
-    return fail(error, "index bytes out of bounds");
+    failMalformedPayload("index bytes out of bounds");
   }
   cursor.indexes = reinterpret_cast<const uint8_t*>(lengthBytes.data());
   cursor.matchedRows = matchedSum;
   cursor.currentDictionary = 0;
   cursor.currentMatchedLeft = cursor.dictionaries[0].matchedRows;
-  cursor.lengthsOrNanos.reset(
+  cursor.lengths.reset(
       cursor.indexes + matchedSum,
       lengthBytes.size() - matchedSum,
       nonNull - matchedSum);
   cursor.data = dataBytes.substr(pos);
-  return true;
 }
 
-bool CellPayloadDecoder::finishPayload(std::string& error) {
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    const auto& cursor = cursors_[col];
-    switch (layout_.rowType()->childAt(col)->kind()) {
-      case TypeKind::SMALLINT:
-        if (!cursor.values16.finished()) {
-          return fail(error, "malformed value stream");
-        }
-        break;
-      case TypeKind::INTEGER:
-        if (!cursor.values32.finished()) {
-          return fail(error, "malformed value stream");
-        }
-        break;
-      case TypeKind::BIGINT:
-        if (!cursor.values64.finished()) {
-          return fail(error, "malformed value stream");
-        }
-        break;
-      case TypeKind::TIMESTAMP:
-        if (!cursor.values64.finished() || !cursor.lengthsOrNanos.finished()) {
-          return fail(error, "malformed timestamp stream");
-        }
-        break;
-      case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY:
-        if (!cursor.lengthsOrNanos.finished()) {
-          return fail(
-              error,
-              cursor.isDictionary ? "malformed fallback length stream"
-                                  : "malformed string length stream");
-        }
-        // The data stream must end exactly at the last value.
-        if (cursor.dataOffset != cursor.data.size()) {
-          return fail(
-              error,
-              cursor.isDictionary ? "fallback data length mismatch"
-                                  : "string data length mismatch");
-        }
-        break;
-      default:
-        break;
+void CellPayloadDecoder::finishPayload() {
+  for (const auto& variant : cursors_) {
+    if (const auto* c16 = std::get_if<StreamCursor<int16_t>>(&variant)) {
+      if (!c16->finished()) {
+        failMalformedPayload("malformed value stream");
+      }
+    } else if (const auto* c32 = std::get_if<StreamCursor<int32_t>>(&variant)) {
+      if (!c32->finished()) {
+        failMalformedPayload("malformed value stream");
+      }
+    } else if (const auto* c64 = std::get_if<StreamCursor<int64_t>>(&variant)) {
+      if (!c64->finished()) {
+        failMalformedPayload("malformed value stream");
+      }
+    } else if (const auto* ts = std::get_if<TimestampCursor>(&variant)) {
+      if (!ts->seconds.finished() || !ts->nanos.finished()) {
+        failMalformedPayload("malformed timestamp stream");
+      }
+    } else if (const auto* str = std::get_if<StringCursor>(&variant)) {
+      if (!str->lengths.finished()) {
+        failMalformedPayload(
+            str->isDictionary ? "malformed fallback length stream"
+                              : "malformed string length stream");
+      }
+      // The data stream must end exactly at the last value.
+      if (str->dataOffset != str->data.size()) {
+        failMalformedPayload(
+            str->isDictionary ? "fallback data length mismatch"
+                              : "string data length mismatch");
+      }
     }
   }
-  return true;
 }
 
 void CellPayloadDecoder::openBatch(vector_size_t capacity) {
@@ -1073,13 +1065,11 @@ void CellPayloadDecoder::appendRows(uint32_t numRows, vector_size_t capacity) {
     openBatch(
         std::max<vector_size_t>(capacity, static_cast<vector_size_t>(numRows)));
   }
-  std::string error;
-  const auto failMalformed = [&] {
+  auto rollback = folly::makeGuard([&] {
     rowCount_ = 0;
     rowsRead_ = 0;
     dropBatch();
-    BOLT_FAIL("malformed cell shuffle payload: {}", error);
-  };
+  });
   const uint64_t rows = static_cast<uint64_t>(batchRows_) + numRows;
   if (rows > static_cast<uint64_t>(batchCapacity_)) {
     growBatch(rows);
@@ -1088,53 +1078,51 @@ void CellPayloadDecoder::appendRows(uint32_t numRows, vector_size_t capacity) {
     const auto kind = layout_.rowType()->childAt(col)->kind();
     auto& cursor = cursors_[col];
     const uint32_t dense = appendNulls(col, numRows);
-    bool ok = true;
     switch (kind) {
       case TypeKind::SMALLINT:
-        ok = appendEncoded(col, numRows, dense, cursor.values16, error);
+        appendEncoded(
+            col, numRows, dense, std::get<StreamCursor<int16_t>>(cursor));
         break;
       case TypeKind::INTEGER:
-        ok = appendEncoded(col, numRows, dense, cursor.values32, error);
+        appendEncoded(
+            col, numRows, dense, std::get<StreamCursor<int32_t>>(cursor));
         break;
       case TypeKind::BIGINT:
-        ok = appendEncoded(col, numRows, dense, cursor.values64, error);
+        appendEncoded(
+            col, numRows, dense, std::get<StreamCursor<int64_t>>(cursor));
         break;
       case TypeKind::BOOLEAN:
-        ok = appendBoolean(col, numRows, dense, error);
+        appendBoolean(col, numRows, dense);
         break;
       case TypeKind::TIMESTAMP:
-        ok = appendTimestamp(col, numRows, dense, error);
+        appendTimestamp(col, numRows, dense);
         break;
       case TypeKind::TINYINT:
-        ok = appendRaw<int8_t>(col, numRows, dense);
+        appendRaw<int8_t>(col, numRows, dense);
         break;
       case TypeKind::REAL:
-        ok = appendRaw<float>(col, numRows, dense);
+        appendRaw<float>(col, numRows, dense);
         break;
       case TypeKind::DOUBLE:
-        ok = appendRaw<double>(col, numRows, dense);
+        appendRaw<double>(col, numRows, dense);
         break;
       case TypeKind::HUGEINT:
-        ok = appendRaw<int128_t>(col, numRows, dense);
+        appendRaw<int128_t>(col, numRows, dense);
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
-        ok = appendString(col, numRows, dense, error);
+        appendString(col, numRows, dense);
         break;
       default:
-        ok = fail(error, "unsupported column type");
-        break;
+        failMalformedPayload("unsupported column type");
     }
-    if (!ok) {
-      failMalformed();
-    }
-    cursor.valuesRead += dense;
   }
   batchRows_ += numRows;
   rowsRead_ += numRows;
-  if (numRows > 0 && rowsRead_ == rowCount_ && !finishPayload(error)) {
-    failMalformed();
+  if (numRows > 0 && rowsRead_ == rowCount_) {
+    finishPayload();
   }
+  rollback.dismiss();
 }
 
 void CellPayloadDecoder::growBatch(uint64_t rows) {
@@ -1250,65 +1238,66 @@ bool CellPayloadDecoder::placeValues(
 }
 
 template <typename T>
-bool CellPayloadDecoder::appendEncoded(
+void CellPayloadDecoder::appendEncoded(
     uint32_t col,
     uint32_t numRows,
     uint32_t dense,
-    StreamCursor<T>& cursor,
-    std::string& error) {
+    StreamCursor<T>& cursor) {
   T* out = batch_[col].values->template asMutable<T>() + batchRows_;
   if (!placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
         return cursor.next(count, dst);
       })) {
-    return fail(error, "malformed value stream");
+    failMalformedPayload("malformed value stream");
   }
-  return true;
 }
 
 template <typename T>
-bool CellPayloadDecoder::appendRaw(
+void CellPayloadDecoder::appendRaw(
     uint32_t col,
     uint32_t numRows,
     uint32_t dense) {
   // openColumn() checked that the stream holds exactly the column's
   // non-null values, and no more than those are read: these `dense` are in
   // bounds.
+  auto& cursor = std::get<RawCursor>(cursors_[col]);
   const auto bytes = streamViews_[layout_.firstStream(col)];
-  const char* src = bytes.data() + cursors_[col].valuesRead * sizeof(T);
+  const char* src = bytes.data() + cursor.valuesRead * sizeof(T);
   T* out = batch_[col].values->template asMutable<T>() + batchRows_;
-  return placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
+  placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
     ::memcpy(dst, src, static_cast<size_t>(count) * sizeof(T));
     return true;
   });
+  cursor.valuesRead += dense;
 }
 
-bool CellPayloadDecoder::appendBoolean(
+void CellPayloadDecoder::appendBoolean(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
-    std::string& error) {
+    uint32_t dense) {
   // openColumn() checked that the stream holds exactly the column's
   // non-null values, and no more than those are read: these `dense` are in
   // bounds.
+  auto& cursor = std::get<RawCursor>(cursors_[col]);
   const auto bytes = streamViews_[layout_.firstStream(col)];
   const auto* src =
-      reinterpret_cast<const uint8_t*>(bytes.data()) + cursors_[col].valuesRead;
+      reinterpret_cast<const uint8_t*>(bytes.data()) + cursor.valuesRead;
   auto* out = batch_[col].values->asMutable<uint64_t>();
   for (uint32_t i = 0; i < dense; ++i) {
     if (src[i] > 1) {
-      return fail(error, "invalid boolean byte");
+      failMalformedPayload("invalid boolean byte");
     }
   }
+  cursor.valuesRead += dense;
   if (dense == numRows) {
     for (uint32_t i = 0; i < numRows; ++i) {
       bits::setBit(out, batchRows_ + i, src[i] != 0);
     }
-    return true;
+    return;
   }
   const uint8_t* bitmap = bitmaps_[col];
   if (bitmap == nullptr) {
     bits::fillBits(out, batchRows_, batchRows_ + numRows, false);
-    return true;
+    return;
   }
   uint32_t next = 0;
   scatterRows(
@@ -1322,23 +1311,21 @@ bool CellPayloadDecoder::appendBoolean(
       [&](uint32_t row) {
         bits::setBit(out, batchRows_ + row, src[next++] != 0);
       });
-  return true;
 }
 
-bool CellPayloadDecoder::appendTimestamp(
+void CellPayloadDecoder::appendTimestamp(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
-    std::string& error) {
-  auto& cursor = cursors_[col];
+    uint32_t dense) {
+  auto& cursor = std::get<TimestampCursor>(cursors_[col]);
   auto* scratch = reinterpret_cast<int64_t*>(resetBuffer(
       denseScratch_, 2 * sizeof(int64_t) * static_cast<size_t>(dense), pool_));
   int64_t* seconds = scratch;
   int64_t* nanos = scratch + dense;
   if (dense > 0 &&
-      (!cursor.values64.next(dense, seconds) ||
-       !cursor.lengthsOrNanos.next(dense, nanos))) {
-    return fail(error, "malformed timestamp stream");
+      (!cursor.seconds.next(dense, seconds) ||
+       !cursor.nanos.next(dense, nanos))) {
+    failMalformedPayload("malformed timestamp stream");
   }
   for (uint32_t i = 0; i < dense; ++i) {
     // Untrusted values must not reach the Timestamp constructor's range
@@ -1346,7 +1333,7 @@ bool CellPayloadDecoder::appendTimestamp(
     if (seconds[i] < Timestamp::kMinSeconds ||
         seconds[i] > Timestamp::kMaxSeconds || nanos[i] < 0 ||
         nanos[i] > static_cast<int64_t>(Timestamp::kMaxNanos)) {
-      return fail(error, "timestamp out of range");
+      failMalformedPayload("timestamp out of range");
     }
   }
   auto* out = batch_[col].values->asMutable<Timestamp>() + batchRows_;
@@ -1354,12 +1341,12 @@ bool CellPayloadDecoder::appendTimestamp(
     for (uint32_t i = 0; i < numRows; ++i) {
       out[i] = Timestamp(seconds[i], nanos[i]);
     }
-    return true;
+    return;
   }
   const uint8_t* bitmap = bitmaps_[col];
   if (bitmap == nullptr) {
     std::fill_n(out, numRows, Timestamp());
-    return true;
+    return;
   }
   uint32_t next = 0;
   scatterRows(
@@ -1374,19 +1361,17 @@ bool CellPayloadDecoder::appendTimestamp(
         out[row] = Timestamp(seconds[next], nanos[next]);
         ++next;
       });
-  return true;
 }
 
-bool CellPayloadDecoder::appendString(
+void CellPayloadDecoder::appendString(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
-    std::string& error) {
-  auto& cursor = cursors_[col];
+    uint32_t dense) {
+  auto& cursor = std::get<StringCursor>(cursors_[col]);
   auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
   if (dense == 0) {
     std::fill_n(out, numRows, StringView());
-    return true;
+    return;
   }
   StringRows rows(
       out,
@@ -1394,23 +1379,21 @@ bool CellPayloadDecoder::appendString(
       payloadBitmapBytes(),
       rowsRead_,
       numRows);
-  const bool ok = cursor.isDictionary
-      ? appendStringDictionary(col, dense, rows, error)
-      : appendStringFlat(col, dense, rows, error);
-  if (ok) {
-    rows.finish();
+  if (cursor.isDictionary) {
+    appendStringDictionary(col, dense, rows);
+  } else {
+    appendStringFlat(col, dense, rows);
   }
-  return ok;
+  rows.finish();
 }
 
 // Flatten only the decoding/materialization kernels: allocation, error
 // reporting and length decoding keep explicit noinline boundaries.
-[[gnu::flatten]] FOLLY_NOINLINE bool CellPayloadDecoder::appendStringFlat(
+[[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringFlat(
     uint32_t col,
     uint32_t dense,
-    StringRows& rows,
-    std::string& error) {
-  auto& cursor = cursors_[col];
+    StringRows& rows) {
+  auto& cursor = std::get<StringCursor>(cursors_[col]);
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
   static_assert(kLengthsPerBlock == 8);
   using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
@@ -1437,8 +1420,7 @@ bool CellPayloadDecoder::appendString(
       // Any negative or oversized length has a bit above the int32 range.
       // Unsigned sums of malformed lengths are discarded before use.
       if (lengthBits > std::numeric_limits<int32_t>::max()) {
-        return fail(
-            error,
+        failMalformedPayload(
             cursor.isDictionary ? "fallback length out of range"
                                 : "string length out of range");
       }
@@ -1446,8 +1428,7 @@ bool CellPayloadDecoder::appendString(
       for (uint32_t i = 0; i < count; ++i) {
         const auto length = static_cast<uint64_t>(lengths[i]);
         if (length > std::numeric_limits<int32_t>::max()) {
-          return fail(
-              error,
+          failMalformedPayload(
               cursor.isDictionary ? "fallback length out of range"
                                   : "string length out of range");
         }
@@ -1459,8 +1440,7 @@ bool CellPayloadDecoder::appendString(
     }
     // At most eight validated int32 lengths: neither sum can overflow.
     if (dataBytes > cursor.data.size() - cursor.dataOffset) {
-      return fail(
-          error,
+      failMalformedPayload(
           cursor.isDictionary ? "fallback data length mismatch"
                               : "string data length mismatch");
     }
@@ -1490,34 +1470,31 @@ bool CellPayloadDecoder::appendString(
       });
     }
     cursor.dataOffset += dataBytes;
-    return true;
   };
 
   uint32_t remaining = dense;
   while (remaining > 0) {
     const int64_t* lengths = nullptr;
-    const uint32_t count = cursor.lengthsOrNanos.nextBlock(remaining, lengths);
+    const uint32_t count = cursor.lengths.nextBlock(remaining, lengths);
     if (count == 0) {
-      return fail(
-          error,
+      failMalformedPayload(
           cursor.isDictionary ? "malformed fallback length stream"
                               : "malformed string length stream");
     }
-    if (!(count == kLengthsPerBlock ? take(FullBlock{}, lengths)
-                                    : take(count, lengths))) {
-      return false;
+    if (count == kLengthsPerBlock) {
+      take(FullBlock{}, lengths);
+    } else {
+      take(count, lengths);
     }
     remaining -= count;
   }
-  return true;
 }
 
-[[gnu::flatten]] FOLLY_NOINLINE bool CellPayloadDecoder::appendStringDictionary(
+[[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringDictionary(
     uint32_t col,
     uint32_t dense,
-    StringRows& rows,
-    std::string& error) {
-  auto& cursor = cursors_[col];
+    StringRows& rows) {
+  auto& cursor = std::get<StringCursor>(cursors_[col]);
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
   static_assert(kLengthsPerBlock == 8);
   using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
@@ -1536,7 +1513,7 @@ bool CellPayloadDecoder::appendString(
       maxIndex = std::max(maxIndex, indexes[i]);
     }
     if (maxIndex >= dictionary.numEntries) {
-      return fail(error, "dictionary index out of range");
+      failMalformedPayload("dictionary index out of range");
     }
     const auto* entries = cursor.entries.data() + dictionary.firstEntry;
     if (dictionary.allInline) {
@@ -1564,7 +1541,6 @@ bool CellPayloadDecoder::appendString(
         }
       });
     }
-    return true;
   };
   while (hits > 0) {
     while (cursor.currentMatchedLeft == 0) {
@@ -1576,15 +1552,18 @@ bool CellPayloadDecoder::appendString(
     const auto& dictionary = cursor.dictionaries[cursor.currentDictionary];
     const uint32_t count =
         std::min({hits, cursor.currentMatchedLeft, kLengthsPerBlock});
-    if (!(count == kLengthsPerBlock ? takeMatched(FullBlock{}, dictionary)
-                                    : takeMatched(count, dictionary))) {
-      return false;
+    if (count == kLengthsPerBlock) {
+      takeMatched(FullBlock{}, dictionary);
+    } else {
+      takeMatched(count, dictionary);
     }
     cursor.matchedRead += count;
     cursor.currentMatchedLeft -= count;
     hits -= count;
   }
-  return remaining == 0 || appendStringFlat(col, remaining, rows, error);
+  if (remaining > 0) {
+    appendStringFlat(col, remaining, rows);
+  }
 }
 
 FOLLY_NOINLINE char* CellPayloadDecoder::stringSpace(
