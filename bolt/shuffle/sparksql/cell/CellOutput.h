@@ -174,10 +174,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     uint64_t variableBytes{0};
   };
 
-  /// Logs the resident window and the task's seal and run totals: two INFO
-  /// lines, the runs listed at most 16.
-  void logWindowDiagnostics(const CellWindowInput& in);
-
   /// The non-empty segments of `pid` across runs [from, end), oldest first.
   static std::vector<SpillSegment> partitionSegments(
       const std::vector<SpilledRun>& runs,
@@ -227,9 +223,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   std::vector<size_t> openFrom_;
   /// Per partition: its sealed payloads, oldest first.
   std::vector<std::vector<SealedPayload>> sealed_;
-  /// Seals, and the partition payloads they closed.
+  /// Window and partition seals completed so far.
   uint64_t numSeals_{0};
-  uint64_t numSealedPayloads_{0};
   /// The merge: spilled segments copied.
   uint64_t copiedSegments_{0};
   /// Borrowed finalize() input for writePartitionShare().

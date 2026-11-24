@@ -154,52 +154,52 @@ class CompositeShuffleWriter::CompositeRowWriter {
     BOLT_CHECK(
         owner_.compositeActive_ || owner_.isStopped(),
         "composite write while ordinary side is active");
-    size_t nextRow = 0;
+    BufferPtr block;
     BufferPtr compressedBuffer;
-    owner_.output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
-      return nextBlock(pid, block, nextRow, compressedBuffer);
+    owner_.output().writeBlocks([&](uint32_t pid, BlockEmitter emit) {
+      emitPartitionBlocks(pid, block, compressedBuffer, emit);
     });
     converter_.reset();
     hasHeldRows_ = false;
+    block.reset();
     compressedBuffer.reset();
     owner_.boltPool_->release();
   }
 
-  /// The BlockSource of write(): partition `pid`'s next block, from its row
-  /// `nextRow` on, compressed through `compressedBuffer`.
-  bool nextBlock(
+  /// Emits partition `pid`'s held rows as framed CompositeRows blocks.
+  void emitPartitionBlocks(
       uint32_t pid,
       BufferPtr& block,
-      size_t& nextRow,
-      BufferPtr& compressedBuffer) {
+      BufferPtr& compressedBuffer,
+      BlockEmitter emit) {
     auto& rows = heldRows_[pid];
-    if (nextRow >= rows.size()) {
-      rows.clear();
-      nextRow = 0;
-      return false;
-    }
-    const size_t begin = nextRow;
-    uint64_t raw = 0;
+    size_t nextRow = 0;
     while (nextRow < rows.size()) {
-      const uint64_t bytes = framedRowBytes(rows[nextRow]);
-      if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
-        break;
+      const size_t begin = nextRow;
+      uint64_t raw = 0;
+      while (nextRow < rows.size()) {
+        const uint64_t bytes = framedRowBytes(rows[nextRow]);
+        if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
+          break;
+        }
+        raw += bytes;
+        ++nextRow;
       }
-      raw += bytes;
-      ++nextRow;
+      buildRowBlock(
+          ShuffleBlockKind::kCompositeRows,
+          rows.data() + begin,
+          nextRow - begin,
+          raw,
+          codec_.get(),
+          block,
+          compressedBuffer,
+          owner_.boltPool_,
+          compressTimeNs_);
+      rawPartitionBytes_[pid] +=
+          static_cast<int64_t>(kRowBlockHeaderBytes + raw);
+      emit(block->asMutable<char>(), block->size());
     }
-    buildRowBlock(
-        ShuffleBlockKind::kCompositeRows,
-        rows.data() + begin,
-        nextRow - begin,
-        raw,
-        codec_.get(),
-        block,
-        compressedBuffer,
-        owner_.boltPool_,
-        compressTimeNs_);
-    rawPartitionBytes_[pid] += static_cast<int64_t>(kRowBlockHeaderBytes + raw);
-    return true;
+    rows.clear();
   }
 
   /// Reentrancy state for split/write. A flush reached while kBusy (e.g. a

@@ -207,14 +207,12 @@ TEST_F(SpillMemoryTest, sharedFileSerializesProducersAndRejectsOverlap) {
                              uint32_t targetPid,
                              size_t bytes,
                              char fill) {
-    bool emitted = false;
-    output.writeBlocks([&](uint32_t pid, BufferPtr& block) {
-      if (pid != targetPid || emitted) {
-        return false;
+    output.writeBlocks([&](uint32_t pid, BlockEmitter emit) {
+      if (pid != targetPid) {
+        return;
       }
-      emitted = true;
-      block = AlignedBuffer::allocate<char>(bytes, pool_.get(), fill);
-      return true;
+      std::string data(bytes, fill);
+      emit(data.data(), data.size());
     });
   };
 
@@ -225,14 +223,11 @@ TEST_F(SpillMemoryTest, sharedFileSerializesProducersAndRejectsOverlap) {
 
   // Attempting to write to `second` while `first` holds the shared write guard
   // must fail fast.
-  bool nestedTriggered = false;
   BOLT_ASSERT_THROW(
-      first.writeBlocks([&](uint32_t pid, BufferPtr& block) {
-        if (pid == 0 && !nestedTriggered) {
-          nestedTriggered = true;
+      first.writeBlocks([&](uint32_t pid, BlockEmitter /*emit*/) {
+        if (pid == 0) {
           emitBytes(second, 0, 16, 'c');
         }
-        return false;
       }),
       "concurrent or nested write to shared ShuffleSpillFile");
 
@@ -303,14 +298,12 @@ TEST_F(SpillMemoryTest, spillFilesCountCreatedPhysicalFiles) {
   // runs that stay wholly in memory create no file, while multiple runs
   // flushed into the same shared ShuffleSpillFile still create one file.
   const auto writeRun = [&](LocalBlockOutput& output, size_t bytes) {
-    bool emitted = false;
-    output.writeBlocks([&](uint32_t pid, BufferPtr& block) {
-      if (pid != 0 || emitted || bytes == 0) {
-        return false;
+    output.writeBlocks([&](uint32_t pid, BlockEmitter emit) {
+      if (pid != 0 || bytes == 0) {
+        return;
       }
-      emitted = true;
-      block = AlignedBuffer::allocate<char>(bytes, pool_.get(), 'a');
-      return true;
+      std::string data(bytes, 'a');
+      emit(data.data(), data.size());
     });
   };
   const auto makeOptions = [&]() {

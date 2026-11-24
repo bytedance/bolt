@@ -26,7 +26,7 @@
 #include <utility>
 #include <vector>
 
-#include "bolt/buffer/Buffer.h"
+#include <folly/Function.h>
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
@@ -420,9 +420,13 @@ class PartialSpiller {
   ShuffleSpillFile& spill_;
 };
 
-/// Produces the next opaque block of partition `pid` into `block`; false
-/// once that partition has no more.
-using BlockSource = std::function<bool(uint32_t pid, BufferPtr& block)>;
+/// Consumes one opaque, already-framed block for the current partition.
+/// The bytes are written or pushed before returning, so the caller may reuse
+/// its buffer immediately.
+using BlockEmitter = folly::FunctionRef<void(char* data, size_t bytes)>;
+
+/// Emits zero or more opaque blocks for partition `pid` via `emit`.
+using BlockProducer = folly::FunctionRef<void(uint32_t pid, BlockEmitter emit)>;
 
 /// The output of a shuffle writer as whole, already-framed blocks per
 /// partition: a local spill file merged partition by partition into the
@@ -433,10 +437,10 @@ class PartitionBlockOutput {
  public:
   virtual ~PartitionBlockOutput() = default;
 
-  /// Writes one unit over all partitions: `next` is called for partition 0,
-  /// 1, ... until it returns false for each, and every block is written
-  /// before the next call, so the producer may reuse the buffer.
-  virtual void writeBlocks(const BlockSource& next) = 0;
+  /// Writes one unit over all partitions: `produce` is called once for each
+  /// partition 0, 1, ..., emitting zero or more blocks via `emit`. Every block
+  /// is written before `emit` returns, so the producer may reuse its buffer.
+  virtual void writeBlocks(BlockProducer produce) = 0;
 
   /// Ends the output on its own - writes a data file of its blocks alone, or
   /// ends the map attempt - and fills partitionLengths, totalBytesWritten,
@@ -458,7 +462,7 @@ class LocalBlockOutput final : public PartitionBlockOutput,
   /// `spill` must outlive this object.
   LocalBlockOutput(PartitionWriterOptions options, ShuffleSpillFile& spill);
 
-  void writeBlocks(const BlockSource& next) override;
+  void writeBlocks(BlockProducer produce) override;
 
   /// mergeToDataFile() of this output alone.
   void finish(ShuffleWriterMetrics& metrics) override;
@@ -485,7 +489,7 @@ class RssBlockOutput final : public PartitionBlockOutput {
  public:
   explicit RssBlockOutput(PartitionWriterOptions options);
 
-  void writeBlocks(const BlockSource& next) override;
+  void writeBlocks(BlockProducer produce) override;
 
   /// Ends the map attempt; partition lengths are the bytes pushed.
   void finish(ShuffleWriterMetrics& metrics) override;

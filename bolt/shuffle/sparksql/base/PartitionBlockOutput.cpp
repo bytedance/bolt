@@ -735,16 +735,13 @@ LocalBlockOutput::LocalBlockOutput(
       options_.numPartitions, 0, "numPartitions must be non-negative");
 }
 
-void LocalBlockOutput::writeBlocks(const BlockSource& next) {
+void LocalBlockOutput::writeBlocks(BlockProducer produce) {
   auto writeGuard = scopedWrite();
   const auto numPartitions = static_cast<uint32_t>(options_.numPartitions);
   std::vector<uint64_t> ends(numPartitions + 1);
   ends[0] = spill_.end();
-  BufferPtr block;
   for (uint32_t pid = 0; pid < numPartitions; ++pid) {
-    while (next(pid, block)) {
-      spill_.append(block->as<char>(), block->size());
-    }
+    produce(pid, [&](char* data, size_t bytes) { spill_.append(data, bytes); });
     ends[pid + 1] = spill_.end();
   }
   spill_.flush();
@@ -774,25 +771,22 @@ RssBlockOutput::RssBlockOutput(PartitionWriterOptions options)
       client_, "a remote shuffle output requires an RSS client");
 }
 
-void RssBlockOutput::writeBlocks(const BlockSource& next) {
+void RssBlockOutput::writeBlocks(BlockProducer produce) {
   BOLT_CHECK(!finished_, "writeBlocks after finish");
   const auto numPartitions = static_cast<uint32_t>(options_.numPartitions);
-  BufferPtr block;
   for (uint32_t pid = 0; pid < numPartitions; ++pid) {
-    while (next(pid, block)) {
+    produce(pid, [&](char* data, size_t bytes) {
       int32_t pushed;
       {
         NanosecondTimer timer(&pushTimeNs_);
         pushed = client_->pushPartitionData(
-            static_cast<int32_t>(pid),
-            block->asMutable<char>(),
-            static_cast<int64_t>(block->size()));
+            static_cast<int32_t>(pid), data, static_cast<int64_t>(bytes));
       }
       BOLT_CHECK_GE(pushed, 0, "RSS pushPartitionData failed");
       partitionLengths_[pid] += pushed;
       pushedBytes_ += pushed;
       ++numPushes_;
-    }
+    });
   }
 }
 
