@@ -1283,7 +1283,7 @@ class QueryConfig {
   }
 
   bool orderByRadixSortEnabled() const {
-    return get<bool>(kOrderByRadixSortEnabled, false);
+    return get<bool>(kOrderByRadixSortEnabled, true);
   }
 
   bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {

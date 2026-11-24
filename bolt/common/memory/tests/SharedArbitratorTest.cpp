@@ -538,7 +538,11 @@ DEBUG_ONLY_TEST_P(
   ASSERT_EQ(taskPausedCount, 1);
 }
 
-DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, reclaimToOrderBy) {
+// This test pauses a task from another thread during arbitration. The serial
+// Driver::next path does not support StopReason::kPause.
+DEBUG_ONLY_TEST_P(
+    SharedArbitrationTestWithParallelExecutionModeOnly,
+    reclaimToOrderBy) {
   const int numVectors = 32;
   std::vector<RowVectorPtr> vectors;
   for (int i = 0; i < numVectors; ++i) {

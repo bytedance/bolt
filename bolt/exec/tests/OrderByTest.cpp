@@ -550,7 +550,7 @@ TEST_P(OrderByTest, sortBufferConfig) {
       .assertResults(
           "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
   if (BOLT_TEST_VALUE_ENABLED()) {
-    ASSERT_TRUE(legacySortBufferUsed);
+    ASSERT_FALSE(legacySortBufferUsed);
   }
 
   legacySortBufferUsed = false;
@@ -2044,8 +2044,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
     auto tempDirectory = exec::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideMemoryPool(
-        memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
+    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
+        queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
     auto expectedResult =
         AssertQueryBuilder(
             PlanBuilder()
@@ -2121,6 +2121,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
                 .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                 .planNode())
             .queryCtx(queryCtx)
+            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
             .maxDrivers(1)
             .assertResults(expectedResult);
       }
