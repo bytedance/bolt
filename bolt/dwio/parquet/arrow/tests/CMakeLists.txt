@@ -33,6 +33,7 @@ add_executable(
   FileDeserializeTest.cpp
   FileSerializeTest.cpp
   LevelConversionTest.cpp
+  LevelRunTest.cpp
   LZ4HadoopCodecTest.cpp
   MetadataTest.cpp
   PageIndexTest.cpp
@@ -46,6 +47,14 @@ add_test(bolt_dwio_parquet_arrow_test bolt_dwio_parquet_arrow_test)
 target_link_libraries(bolt_dwio_parquet_arrow_test bolt_gtest_main)
 
 if(BOLT_BUILD_BENCHMARKS)
+  add_executable(bolt_dwio_parquet_level_run_benchmark LevelRunBenchmark.cpp)
+  target_link_libraries(
+    bolt_dwio_parquet_level_run_benchmark
+    PRIVATE
+      bolt_testutils
+      ${FOLLY_BENCHMARK}
+  )
+
   add_executable(
     bolt_dwio_parquet_level_conversion_benchmark
     LevelConversionBenchmark.cpp

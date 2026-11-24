@@ -524,8 +524,8 @@ class GrowingBitWriter {
         buffer_->Resize(start_offset, /*shrink_to_fit=*/false));
   }
 
-  int bytes_written() const {
-    return byte_offset_ + static_cast<int>(bit_util::BytesForBits(bit_offset_));
+  int64_t bytes_written() const {
+    return int64_t{byte_offset_} + bit_util::BytesForBits(bit_offset_);
   }
 
   bool PutValue(uint64_t v, int num_bits) {
@@ -538,7 +538,7 @@ class GrowingBitWriter {
     bit_offset_ += num_bits;
 
     if (bit_offset_ >= 64) {
-      EnsureSize(byte_offset_ + 8);
+      EnsureSize(int64_t{byte_offset_} + 8);
       auto buffered_values = bit_util::ToLittleEndian(buffered_values_);
       std::memcpy(buffer_->mutable_data() + byte_offset_, &buffered_values, 8);
       buffered_values_ = 0;
@@ -553,7 +553,7 @@ class GrowingBitWriter {
 
   void Flush(bool align = false) {
     int num_bytes = static_cast<int>(bit_util::BytesForBits(bit_offset_));
-    EnsureSize(byte_offset_ + num_bytes);
+    EnsureSize(int64_t{byte_offset_} + num_bytes);
     auto buffered_values = bit_util::ToLittleEndian(buffered_values_);
     std::memcpy(
         buffer_->mutable_data() + byte_offset_, &buffered_values, num_bytes);
@@ -567,7 +567,7 @@ class GrowingBitWriter {
 
   uint8_t* GetNextBytePtr(int num_bytes = 1) {
     Flush(/*align=*/true);
-    EnsureSize(byte_offset_ + num_bytes);
+    EnsureSize(int64_t{byte_offset_} + num_bytes);
     uint8_t* ptr = buffer_->mutable_data() + byte_offset_;
     byte_offset_ += num_bytes;
     return ptr;
@@ -595,9 +595,16 @@ class GrowingBitWriter {
   }
 
  private:
-  void EnsureSize(int size) {
+  void EnsureSize(int64_t size) {
     if (size > buffer_->size()) {
-      PARQUET_THROW_NOT_OK(buffer_->Resize(size, /*shrink_to_fit=*/false));
+      constexpr int64_t kMaxSize = std::numeric_limits<int32_t>::max();
+      if (ARROW_PREDICT_FALSE(size > kMaxSize)) {
+        throw ParquetException("Level encoding size overflow");
+      }
+      // Arrow can round capacity past the largest representable page size.
+      const auto writableSize = std::clamp(buffer_->capacity(), size, kMaxSize);
+      PARQUET_THROW_NOT_OK(
+          buffer_->Resize(writableSize, /*shrink_to_fit=*/false));
     }
   }
 
@@ -4272,6 +4279,7 @@ class IncrementalLevelRleEncoder::Impl {
         literal_indicator_byte_offset_(-1) {}
 
   void Reset(int16_t max_level, int prefix_size) {
+    max_level_ = max_level;
     bit_width_ = bit_util::Log2(max_level + 1);
     prefix_size_ = prefix_size;
     bit_writer_.Reset(prefix_size_);
@@ -4283,8 +4291,58 @@ class IncrementalLevelRleEncoder::Impl {
   }
 
   void Put(const int16_t* levels, int64_t num_levels) {
-    for (int64_t i = 0; i < num_levels; ++i) {
-      Put(static_cast<uint64_t>(levels[i]));
+    // Check once per batch so the scalar loop needs no overflow branch.
+    while (num_levels > 0) {
+      if (ARROW_PREDICT_FALSE(repeat_count_ == kMaxRepeatCount)) {
+        FlushRepeatedRun();
+      }
+      const int64_t batch =
+          std::min<int64_t>(num_levels, kMaxRepeatCount - repeat_count_);
+      for (int64_t i = 0; i < batch; ++i) {
+        Put(static_cast<uint64_t>(levels[i]));
+      }
+      levels += batch;
+      num_levels -= batch;
+    }
+  }
+
+  void PutRepeated(int16_t value, int64_t count) {
+    if (count < 0) {
+      throw ParquetException("Negative repeated level count");
+    }
+    if (count == 0) {
+      return;
+    }
+    if (value < 0 || value > max_level_) {
+      throw ParquetException("Repeated level out of range");
+    }
+    // Each full run needs a five-byte header plus its value. The existing
+    // bit writer and Flush() use int32 byte offsets, even though counts are
+    // int64. Reject an unrepresentable output before changing encoder state.
+    if (ARROW_PREDICT_FALSE(count >= kMaxRepeatCount)) {
+      const int64_t fullRuns = count / kMaxRepeatCount;
+      const int bytesPerRun =
+          5 + static_cast<int>(bit_util::CeilDiv(bit_width_, 8));
+      if (fullRuns >
+          (std::numeric_limits<int32_t>::max() - bit_writer_.bytes_written()) /
+              bytesPerRun) {
+        throw ParquetException("Repeated level encoding size overflow");
+      }
+    }
+    const auto repeatedValue = static_cast<uint64_t>(value);
+    while (count > 0) {
+      while (count > 0 &&
+             (current_value_ != repeatedValue || repeat_count_ < 8)) {
+        Put(repeatedValue);
+        --count;
+      }
+      const int64_t increment =
+          std::min<int64_t>(count, kMaxRepeatCount - repeat_count_);
+      repeat_count_ += static_cast<int>(increment);
+      count -= increment;
+      if (count > 0) {
+        FlushRepeatedRun();
+      }
     }
   }
 
@@ -4323,9 +4381,11 @@ class IncrementalLevelRleEncoder::Impl {
   }
 
  private:
+  static constexpr int32_t kMaxRepeatCount =
+      std::numeric_limits<int32_t>::max();
+
   void Put(uint64_t value) {
     DCHECK(bit_width_ == 64 || value < (1ULL << bit_width_));
-
     if (current_value_ == value) {
       ++repeat_count_;
       if (repeat_count_ > 8) {
@@ -4411,6 +4471,7 @@ class IncrementalLevelRleEncoder::Impl {
 
   ResizableBuffer* buffer_;
   int bit_width_;
+  int16_t max_level_{0};
   int prefix_size_;
   GrowingBitWriter bit_writer_;
   int64_t buffered_values_[8];
@@ -4440,6 +4501,10 @@ void IncrementalLevelRleEncoder::Put(
     const int16_t* levels,
     int64_t num_levels) {
   impl_->Put(levels, num_levels);
+}
+
+void IncrementalLevelRleEncoder::PutRepeated(int16_t value, int64_t count) {
+  impl_->PutRepeated(value, count);
 }
 
 int32_t IncrementalLevelRleEncoder::Flush() {

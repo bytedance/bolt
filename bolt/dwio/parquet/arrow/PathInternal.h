@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include "bolt/dwio/parquet/arrow/LevelRun.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -49,6 +51,7 @@ class Array;
 } // namespace arrow
 namespace bytedance::bolt::parquet::arrow {
 
+class ColumnWriter;
 struct ArrowWriteContext;
 
 namespace arrow {
@@ -112,7 +115,15 @@ struct MultipathLevelBuilderResult {
 
   /// Whether the leaf array is nullable.
   bool leaf_is_nullable;
+  LevelRunHints level_runs;
 };
+
+// Keep hints within the synchronous write of the leaf that owns their levels.
+::arrow::Status WriteArrowLeaf(
+    ColumnWriter& writer,
+    const MultipathLevelBuilderResult& leaf,
+    const ::arrow::Array& values,
+    ArrowWriteContext* context);
 
 /// \brief Logic for being able to write out nesting (rep/def level) data that
 /// is needed for writing to parquet.

@@ -16,8 +16,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+
+#include "bolt/dwio/parquet/arrow/LevelRun.h"
 
 namespace arrow {
 
@@ -44,11 +47,62 @@ class IncrementalLevelRleEncoder {
 
   void Reset(int16_t maxLevel, int prefixSize);
   void Put(const int16_t* levels, int64_t numLevels);
+  // Equivalent to count scalar Puts; splits runs above INT32_MAX without
+  // changing the surrounding page lifecycle. A zero count is a no-op.
+  void PutRepeated(int16_t value, int64_t count);
   int32_t Flush();
 
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+// One cursor per stream and per synchronous write. Page resets do not rewind
+// it.
+class LevelRunCursor {
+ public:
+  explicit LevelRunCursor(LevelRunView runs) : runs_(runs) {}
+
+  void Put(
+      IncrementalLevelRleEncoder& encoder,
+      const int16_t* levels,
+      int64_t offset,
+      int64_t count) {
+    if (runs_.size == 0) {
+      encoder.Put(levels, count);
+      return;
+    }
+    const auto end = offset + count;
+    auto position = offset;
+    while (index_ < runs_.size && position < end) {
+      const auto& run = runs_.data[index_];
+      const auto runEnd = run.offset + run.count;
+      if (runEnd <= position) {
+        ++index_;
+        continue;
+      }
+      if (run.offset >= end) {
+        break;
+      }
+      if (position < run.offset) {
+        encoder.Put(levels + (position - offset), run.offset - position);
+        position = run.offset;
+      }
+      const auto length = std::min(end, runEnd) - position;
+      encoder.PutRepeated(run.value, length);
+      position += length;
+      if (position == runEnd) {
+        ++index_;
+      }
+    }
+    if (position < end) {
+      encoder.Put(levels + (position - offset), end - position);
+    }
+  }
+
+ private:
+  LevelRunView runs_;
+  int64_t index_{0};
 };
 
 } // namespace bytedance::bolt::parquet::arrow

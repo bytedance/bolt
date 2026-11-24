@@ -123,6 +123,7 @@
 #include "arrow/type_traits.h"
 #include "arrow/util/bit_run_reader.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/bitmap_reader.h"
 #include "arrow/util/bitmap_visit.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
@@ -171,10 +172,41 @@ bool LazyNoNulls(const Array& array) {
 }
 
 struct PathWriteContext {
-  PathWriteContext(
-      ::arrow::MemoryPool* pool,
-      std::shared_ptr<::arrow::ResizableBuffer> def_levels_buffer)
-      : rep_levels(pool), def_levels(std::move(def_levels_buffer), pool) {}
+  PathWriteContext(ArrowWriteContext* context, bool repeated)
+      : rep_levels(context->memory_pool),
+        def_levels(context->def_levels_buffer, context->memory_pool),
+        run_context(
+            context->properties->enable_level_run_optimization() ? context
+                                                                 : nullptr),
+        // Short lists can produce many small definition runs between empty
+        // or null records. Record a full bitmap word on repeated paths.
+        min_run_length(repeated ? 64 : kMinLevelRunLength) {}
+
+  IterationResult
+  RecordRun(bool definition, int64_t offset, int64_t count, int16_t value) {
+    if (!scratch) {
+      auto& retained = run_context->GetLevelScratch().runs;
+      if (!retained) {
+        retained.emplace(run_context->memory_pool);
+      }
+      scratch = &*retained;
+      scratch->definition.bytes_builder()->Rewind(0);
+      scratch->repetition.bytes_builder()->Rewind(0);
+    }
+    auto& runs = definition ? scratch->definition : scratch->repetition;
+    if (runs.length() != 0) {
+      auto& previous = runs.mutable_data()[runs.length() - 1];
+      if (previous.offset + previous.count == offset &&
+          previous.value == value) {
+        previous.count += count;
+        return kDone;
+      }
+    }
+    last_status =
+        runs.Append(LevelRun{.offset = offset, .count = count, .value = value});
+    return ARROW_PREDICT_TRUE(last_status.ok()) ? kDone : kError;
+  }
+
   IterationResult ReserveDefLevels(int64_t elements) {
     last_status = def_levels.Reserve(elements);
     if (ARROW_PREDICT_TRUE(last_status.ok())) {
@@ -191,12 +223,24 @@ struct PathWriteContext {
     return kError;
   }
 
-  IterationResult AppendDefLevels(int64_t count, int16_t def_level) {
-    last_status = def_levels.Append(count, def_level);
-    if (ARROW_PREDICT_TRUE(last_status.ok())) {
-      return kDone;
+  IterationResult AppendDefLevels(
+      int64_t count,
+      int16_t def_level,
+      bool already_reserved = false) {
+    const auto offset = def_levels.length();
+    if (already_reserved) {
+      DCHECK_LE(count, def_levels.capacity() - offset);
+      def_levels.UnsafeAppend(count, def_level);
+    } else {
+      last_status = def_levels.Append(count, def_level);
     }
-    return kError;
+    if (ARROW_PREDICT_FALSE(!last_status.ok())) {
+      return kError;
+    }
+    if (count >= min_run_length && run_context) {
+      return RecordRun(/*definition=*/true, offset, count, def_level);
+    }
+    return kDone;
   }
 
   void UnsafeAppendDefLevel(int16_t def_level) {
@@ -213,11 +257,15 @@ struct PathWriteContext {
   }
 
   IterationResult AppendRepLevels(int64_t count, int16_t rep_level) {
+    const auto offset = rep_levels.length();
     last_status = rep_levels.Append(count, rep_level);
-    if (ARROW_PREDICT_TRUE(last_status.ok())) {
-      return kDone;
+    if (ARROW_PREDICT_FALSE(!last_status.ok())) {
+      return kError;
     }
-    return kError;
+    if (count >= min_run_length && run_context) {
+      return RecordRun(/*definition=*/false, offset, count, rep_level);
+    }
+    return kDone;
   }
 
   bool EqualRepDefLevelsLengths() const {
@@ -239,6 +287,9 @@ struct PathWriteContext {
   Status last_status;
   TypedBufferBuilder<int16_t> rep_levels;
   TypedBufferBuilder<int16_t> def_levels;
+  ArrowWriteContext* const run_context;
+  const int64_t min_run_length;
+  LevelRunScratch* scratch = nullptr;
   std::vector<ElementRange> visited_elements;
 };
 
@@ -326,7 +377,29 @@ struct NullableTerminalNode {
           is_set ? def_level_if_present_ : def_level_if_null_);
     };
 
-    if (elements > 16) { // 16 guarantees at least one unrolled loop.
+    if (elements >= 64 && context->run_context) {
+      ::arrow::internal::BitmapUInt64Reader reader(
+          bitmap_, range.start + element_offset_, elements);
+      while (reader.position() < elements) {
+        const int64_t count =
+            std::min<int64_t>(64, elements - reader.position());
+        const uint64_t word = reader.NextWord();
+        if (word == 0 || word == (~uint64_t{0} >> (64 - count))) {
+          RETURN_IF_ERROR(context->AppendDefLevels(
+              count,
+              word ? def_level_if_present_ : def_level_if_null_,
+              /*already_reserved=*/true));
+        } else {
+          // Expand the word already loaded by the bitmap reader.
+          auto& levels = context->def_levels;
+          auto* out = levels.mutable_data() + levels.length();
+          for (int i = 0; i < count; ++i) {
+            out[i] = def_level_if_null_ + ((word >> i) & 1);
+          }
+          levels.bytes_builder()->UnsafeAdvance(count * sizeof(int16_t));
+        }
+      }
+    } else if (elements > 16) { // 16 guarantees at least one unrolled loop.
       ::arrow::internal::VisitBitsUnrolled(
           bitmap_, range.start + element_offset_, elements, bit_visitor);
     } else {
@@ -458,9 +531,20 @@ class ListPathNode {
       // to the previous list (and doesn't jump to the start of any list
       // further up in nesting due to the constraints mentioned at the start
       // of the function).
-      RETURN_IF_ERROR(context->AppendRepLevel(prev_rep_level_));
-      RETURN_IF_ERROR(
-          context->AppendRepLevels(size_check.Size() - 1, rep_level_));
+      // Reserve and fill the whole list in one append. Its first child
+      // starts the list at the enclosing repetition depth.
+      auto& levels = context->rep_levels;
+      const auto offset = levels.length();
+      const auto size = size_check.Size();
+      context->last_status = levels.Append(size, rep_level_);
+      if (ARROW_PREDICT_FALSE(!context->last_status.ok())) {
+        return kError;
+      }
+      levels.mutable_data()[offset] = prev_rep_level_;
+      if (size - 1 >= context->min_run_length && context->run_context) {
+        RETURN_IF_ERROR(context->RecordRun(
+            /*definition=*/false, offset + 1, size - 1, rep_level_));
+      }
       DCHECK_EQ(size_check.start, child_range->end)
           << size_check.start << " != " << child_range->end;
       child_range->end = size_check.end;
@@ -602,10 +686,16 @@ Status WritePath(
     PathInfo* path_info,
     ArrowWriteContext* arrow_context,
     MultipathLevelBuilder::CallbackFunction writer) {
-  std::vector<ElementRange> stack(path_info->path.size());
   MultipathLevelBuilderResult builder_result;
   builder_result.leaf_array = path_info->primitive_array;
   builder_result.leaf_is_nullable = path_info->leaf_is_nullable;
+
+  if (const auto& scratch = arrow_context->level_scratch) {
+    const auto& repBuffer = scratch->rep_levels_buffer;
+    if (repBuffer && repBuffer->size() != 0) {
+      RETURN_NOT_OK(repBuffer->Resize(0, /*shrink_to_fit=*/false));
+    }
+  }
 
   if (path_info->max_def_level == 0) {
     // This case only occurs when there are no nullable or repeated
@@ -615,15 +705,21 @@ Status WritePath(
     builder_result.post_list_visited_elements.push_back({0, leaf_length});
     return writer(builder_result);
   }
+  std::vector<ElementRange> stack(path_info->path.size());
   stack[0] = root_range;
   RETURN_NOT_OK(arrow_context->def_levels_buffer->Resize(
       /*new_size=*/0, /*shrink_to_fit*/ false));
-  PathWriteContext context(
-      arrow_context->memory_pool, arrow_context->def_levels_buffer);
+  PathWriteContext context(arrow_context, path_info->max_rep_level > 0);
   // We should need at least this many entries so reserve the space ahead of
   // time.
   RETURN_NOT_OK(context.def_levels.Reserve(root_range.Size()));
   if (path_info->max_rep_level > 0) {
+    auto& repBuffer = arrow_context->GetLevelScratch().rep_levels_buffer;
+    if (!repBuffer) {
+      repBuffer = AllocateBuffer(arrow_context->memory_pool);
+    }
+    context.rep_levels =
+        TypedBufferBuilder<int16_t>(repBuffer, arrow_context->memory_pool);
     RETURN_NOT_OK(context.rep_levels.Reserve(root_range.Size()));
   }
 
@@ -697,6 +793,14 @@ Status WritePath(
   }
 
   builder_result.def_levels = context.def_levels.data();
+  if (context.scratch) {
+    auto& runs = *context.scratch;
+    builder_result.level_runs = {
+        .definition =
+            {.data = runs.definition.data(), .size = runs.definition.length()},
+        .repetition = {
+            .data = runs.repetition.data(), .size = runs.repetition.length()}};
+  }
   return writer(builder_result);
 }
 

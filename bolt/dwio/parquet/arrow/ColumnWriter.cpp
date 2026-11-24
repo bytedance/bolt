@@ -71,6 +71,7 @@
 #include "bolt/dwio/parquet/arrow/Metadata.h"
 #include "bolt/dwio/parquet/arrow/PageBufferArena.h"
 #include "bolt/dwio/parquet/arrow/PageIndex.h"
+#include "bolt/dwio/parquet/arrow/PathInternal.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Schema.h"
@@ -80,6 +81,7 @@
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
 #include "bolt/dwio/parquet/arrow/util/Crc32.h"
 #include "bolt/dwio/parquet/arrow/util/VisitArrayInline.h"
+#include "folly/ScopeGuard.h"
 
 using arrow::Array;
 using arrow::ArrayData;
@@ -1107,8 +1109,19 @@ const std::shared_ptr<WriterProperties>& default_writer_properties() {
   return default_writer_properties;
 }
 
+namespace {
+struct LeafLevelRuns {
+  LevelRunCursor definition;
+  LevelRunCursor repetition;
+  const int16_t* def_levels;
+  const int16_t* rep_levels;
+};
+
 class ColumnWriterImpl {
  public:
+  // Borrowed for a single WriteArrow call, including all of its page splits.
+  LeafLevelRuns* level_runs = nullptr;
+
   ColumnWriterImpl(
       ColumnChunkMetaDataBuilder* metadata,
       std::unique_ptr<PageWriter> pager,
@@ -1224,13 +1237,29 @@ class ColumnWriterImpl {
   // Write multiple definition levels
   void WriteDefinitionLevels(int64_t num_levels, const int16_t* levels) {
     DCHECK(!closed_);
-    definition_levels_encoder_.Put(levels, num_levels);
+    if (level_runs && num_levels > 0) {
+      level_runs->definition.Put(
+          definition_levels_encoder_,
+          levels,
+          levels - level_runs->def_levels,
+          num_levels);
+    } else {
+      definition_levels_encoder_.Put(levels, num_levels);
+    }
   }
 
   // Write multiple repetition levels
   void WriteRepetitionLevels(int64_t num_levels, const int16_t* levels) {
     DCHECK(!closed_);
-    repetition_levels_encoder_.Put(levels, num_levels);
+    if (level_runs && num_levels > 0) {
+      level_runs->repetition.Put(
+          repetition_levels_encoder_,
+          levels,
+          levels - level_runs->rep_levels,
+          num_levels);
+    } else {
+      repetition_levels_encoder_.Put(levels, num_levels);
+    }
   }
 
   // Serialize the buffered Data Pages
@@ -1394,6 +1423,38 @@ class ColumnWriterImpl {
     memcpy(combined, values->data(), values->size());
   }
 };
+} // namespace
+
+Status arrow::WriteArrowLeaf(
+    ColumnWriter& writer,
+    const MultipathLevelBuilderResult& leaf,
+    const ::arrow::Array& values,
+    ArrowWriteContext* context) {
+  auto write = [&] {
+    return writer.WriteArrow(
+        leaf.def_levels,
+        leaf.rep_levels,
+        leaf.def_rep_level_count,
+        values,
+        context,
+        leaf.leaf_is_nullable);
+  };
+  if (!leaf.level_runs.definition.size && !leaf.level_runs.repetition.size) {
+    return write();
+  }
+  auto* impl = dynamic_cast<ColumnWriterImpl*>(&writer);
+  if (!impl) {
+    return write();
+  }
+  LeafLevelRuns runs{
+      .definition = LevelRunCursor(leaf.level_runs.definition),
+      .repetition = LevelRunCursor(leaf.level_runs.repetition),
+      .def_levels = leaf.def_levels,
+      .rep_levels = leaf.rep_levels};
+  auto* previous = std::exchange(impl->level_runs, &runs);
+  auto restore = folly::makeGuard([&] { impl->level_runs = previous; });
+  return write();
+}
 
 void ColumnWriterImpl::AddDataPage() {
   int64_t definition_levels_rle_size = 0;
