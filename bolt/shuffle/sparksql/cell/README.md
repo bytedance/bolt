@@ -223,7 +223,7 @@ budget far above the real one would waste much of the real memory. The
 
 - `prepareChunkGrowth()` handles local growth pressure by flushing spill
   memory, then spilling cells as needed. Celeborn requests a seal instead.
-- `prepareRemoteSlice()` reserves room for the next slice and its push;
+- `prepareRssSlice()` reserves room for the next slice and its push;
   reservation failure or memory pressure pushes the current window first
   (`SealReason::kReserveFailed`).
 
@@ -415,8 +415,8 @@ wire layout.
 - Adaptive compression skips nine attempts after a frame does not shrink,
   then retries. History is tracked per stream, combined frames, or null
   bodies as applicable.
-- The `CellShuffleWriter compression` log reports totals; `VLOG(1)` adds
-  per-stream detail.
+- The `CellShuffleWriter compression` log reports totals when compression is
+  enabled.
 
 ## 6. Nested types
 

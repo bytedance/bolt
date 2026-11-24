@@ -69,41 +69,18 @@ class DataRunSink final : public RunSink {
   DataFileWriter& file_;
 };
 
-/// The compressor's totals at INFO, its per-stream detail at VLOG(1).
-void logCompression(const RunCompressor& compressor, const CellLayout& layout) {
-  LOG(INFO) << "CellShuffleWriter compression: "
-            << compressor.stats().toString();
-  if (!VLOG_IS_ON(1)) {
+/// Logs compressor totals once at finalize when compression was active.
+void logCompression(const RunCompressor& compressor) {
+  if (compressor.codec() == nullptr) {
     return;
   }
-  const auto& streams = compressor.streamStats();
-  for (uint32_t s = 0; s < streams.size() && s < layout.numStreams(); ++s) {
-    const auto& stats = streams[s];
-    if (stats.tried + stats.skipped == 0) {
-      continue;
-    }
-    VLOG(1) << "CellShuffleWriter compression stream " << s << " (column "
-            << layout.stream(s).column << ", kind "
-            << static_cast<int>(layout.stream(s).kind)
-            << "): tried=" << stats.tried << " compressed=" << stats.compressed
-            << " skipped=" << stats.skipped << " ratio="
-            << (stats.inBytes > 0 ? double(stats.outBytes) / stats.inBytes
-                                  : 1.0);
+  const auto& stats = compressor.stats();
+  if (stats.storedRuns + stats.combinedRuns + stats.separateRuns +
+          stats.compressedNullBodies + stats.storedNullBodies ==
+      0) {
+    return;
   }
-}
-
-/// Fails unless a reader takes a payload of partition `pid` holding
-/// `runCount` runs: written, it would fail every reader of the partition.
-void checkPayloadRuns(uint32_t pid, uint64_t runCount) {
-  constexpr uint32_t kMaxRunCount = CellDecodeLimits{}.maxRunCount;
-  BOLT_CHECK_LE(
-      runCount,
-      kMaxRunCount,
-      "Cell payload of partition {} holds {} runs, more than the {} a reader "
-      "accepts (CellDecodeLimits::maxRunCount)",
-      pid,
-      runCount,
-      kMaxRunCount);
+  LOG(INFO) << "CellShuffleWriter compression: " << stats.toString();
 }
 
 /// Writes partition `pid`'s resident cells to `sink` as one run; nothing
@@ -157,7 +134,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
     ends[pid + 1] = spill_.end();
   }
   // A spill exists to free memory: hand the workspace capacity back too.
-  compressor_.releaseWorkspace();
+  compressor_.releaseBuffers();
   scratch_.reset();
   spill_.flush();
   runs_.push_back(std::move(run));
@@ -197,7 +174,7 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     ++numSealedPayloads_;
   }
   // A seal exists to free memory: hand the workspace capacity back too.
-  compressor_.releaseWorkspace();
+  compressor_.releaseBuffers();
   spill_.flush();
   ++numSeals_;
 }
@@ -209,7 +186,13 @@ void LocalCellOutput::writeSealedPayload(
     std::span<const uint8_t> encodingTags) {
   const uint32_t rows = payload.rows;
   const auto& segments = payload.segments;
-  checkPayloadRuns(pid, segments.size());
+  BOLT_CHECK_LE(
+      segments.size(),
+      CellDecodeLimits{}.maxRunCount,
+      "Cell payload of partition {} holds {} runs, more than maxRunCount ({})",
+      pid,
+      segments.size(),
+      CellDecodeLimits{}.maxRunCount);
   const uint32_t runCount = static_cast<uint32_t>(segments.size());
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
@@ -296,7 +279,13 @@ void LocalCellOutput::writeResidentPayload(
   const uint64_t total = residentBytes(in, pid);
   const auto segments = partitionSegments(runs_, pid, openFrom_[pid]);
   const uint64_t runs = segments.size() + (total > 0 ? 1 : 0);
-  checkPayloadRuns(pid, runs);
+  BOLT_CHECK_LE(
+      runs,
+      CellDecodeLimits{}.maxRunCount,
+      "Cell payload of partition {} holds {} runs, more than maxRunCount ({})",
+      pid,
+      runs,
+      CellDecodeLimits{}.maxRunCount);
   const auto runCount = static_cast<uint32_t>(runs);
 
   resetBuffer(scratch_, 0, pool_);
@@ -342,9 +331,7 @@ std::vector<LocalCellOutput::SpillSegment> LocalCellOutput::partitionSegments(
   return segments;
 }
 
-void LocalCellOutput::logWindowDiagnostics(
-    const CellWindowInput& in,
-    bool windowHasData) {
+void LocalCellOutput::logWindowDiagnostics(const CellWindowInput& in) {
   uint64_t sealedRows = 0;
   uint64_t nullBytes = 0;
   for (const auto& payloads : sealed_) {
@@ -355,8 +342,8 @@ void LocalCellOutput::logWindowDiagnostics(
   }
   uint64_t rows = 0;
   uint64_t resident = 0;
-  if (windowHasData) {
-    for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+  for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+    if (in.rowCounts[pid] > 0) {
       rows += in.rowCounts[pid];
       resident += residentBytes(in, pid);
     }
@@ -393,22 +380,21 @@ void LocalCellOutput::appendBlockKind() {
 
 void LocalCellOutput::finalize(
     const CellWindowInput& in,
-    bool windowHasData,
     ShuffleWriterMetrics& metrics) {
   // The residual window never takes a spill round-trip: whatever is still
   // in memory is written straight into the data file by the merge,
   // alongside any runs the window already spilled mid-stream.
-  logWindowDiagnostics(in, windowHasData);
-  mergeInput_ = MergeInput{windowHasData ? &in : nullptr, in.encodingTags};
+  logWindowDiagnostics(in);
+  mergeInput_ = &in;
   rawPartitionLengths_.assign(in.numPartitions, 0);
   {
     SCOPE_EXIT {
-      mergeInput_.reset();
+      mergeInput_ = nullptr;
     };
     // Per partition: the Cell payloads, then the composite blocks.
     mergeToDataFile(options_, spill_, {this, &composite_}, metrics);
   }
-  compressor_.releaseWorkspace();
+  compressor_.releaseBuffers();
   segmentSizes_.clear();
   segmentSizes_.shrink_to_fit();
   scratch_.reset();
@@ -416,19 +402,17 @@ void LocalCellOutput::finalize(
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
   LOG(INFO) << "CellShuffleWriter merge: segments copied=" << copiedSegments_;
-  logCompression(compressor_, *layout_);
+  logCompression(compressor_);
 }
 
 void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
-  BOLT_CHECK(
-      mergeInput_.has_value(), "Cell payloads merged outside finalize()");
+  BOLT_CHECK_NOT_NULL(mergeInput_, "Cell payloads merged outside finalize()");
   const uint64_t rawStart = rawBytesWritten_;
   for (const auto& payload : sealed_[pid]) {
     writeSealedPayload(out, pid, payload, mergeInput_->encodingTags);
   }
-  if (mergeInput_->resident != nullptr &&
-      mergeInput_->resident->rowCounts[pid] > 0) {
-    writeResidentPayload(out, *mergeInput_->resident, pid);
+  if (mergeInput_->rowCounts[pid] > 0) {
+    writeResidentPayload(out, *mergeInput_, pid);
   }
   rawPartitionLengths_[pid] +=
       static_cast<int64_t>(rawBytesWritten_ - rawStart);
@@ -467,7 +451,7 @@ void RssCellOutput::sendWindow(const CellWindowInput& in) {
     return true;
   });
   // A seal exists to free memory: hand the workspace capacity back too.
-  compressor_.releaseWorkspace();
+  compressor_.releaseBuffers();
 }
 
 void RssCellOutput::buildPayload(
@@ -492,13 +476,10 @@ void RssCellOutput::buildPayload(
 
 void RssCellOutput::finalize(
     const CellWindowInput& in,
-    bool windowHasData,
     ShuffleWriterMetrics& metrics) {
-  if (windowHasData) {
-    sendWindow(in);
-  }
+  sendWindow(in);
   LOG(INFO) << "CellShuffleWriter rss: seals=" << numSeals_;
-  logCompression(compressor_, *layout_);
+  logCompression(compressor_);
   blocks_.finish(metrics);
   metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);

@@ -161,7 +161,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       uint32_t numRows,
       std::span<const DecodedVector> decoded,
       std::span<const NullClass> nullClass);
-  /// Before chunk growth, reserves capacity or spills local data. Remote
+  /// Before chunk growth, reserves capacity or spills local data. RSS
   /// pressure requests a seal at the next batch boundary.
   void prepareChunkGrowth();
   ColumnPositionCounts columnPositionCounts() const {
@@ -169,15 +169,15 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
                                 : ColumnPositionCounts{};
   }
   void sealWindow(SealReason reason);
-  /// Seals the whole window - on a remote shuffle, pushes it - and returns
-  /// its memory; returns the chunk bytes freed.
+  /// Seals the whole window - on RSS, pushes it - and returns its memory;
+  /// returns the chunk bytes freed.
   int64_t releaseWindow(SealReason reason);
   void maybeSeal();
   /// Logs the "CellShuffleWriter pressure" line at stop, whether the
   /// output's finish succeeded or failed: pressure_, the null
   /// classification and seal-spill times, the spill memory's counters.
   void logPressure() const;
-  /// Answers a reclaim by releasing the whole window (remote).
+  /// Answers a reclaim by releasing the whole window (RSS).
   arrow::Status reclaimWindow(int64_t size, int64_t* actual);
 
   /// Lifecycle and reentrancy state of the ordinary (Cell) path.
@@ -192,8 +192,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     return state_ != State::kUninitialized;
   }
 
-  /// Celeborn partition writer: windows are pushed whole, never spilled.
-  const bool isRemote_;
+  /// RSS (Celeborn) partition writer: windows are pushed whole, never spilled.
+  const bool isRss_;
 
   State state_{State::kUninitialized};
   /// A window seal deferred to the next batch boundary (maybeSeal()).

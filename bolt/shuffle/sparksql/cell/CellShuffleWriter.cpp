@@ -39,10 +39,10 @@ constexpr uint32_t kChunkBytes = 4 << 20;
 /// Free enough cells for compaction to return a whole chunk, allowing for
 /// partitions kept together and cells pinned by an append in progress.
 constexpr int64_t kMinReclaimRunBytes = 2 * kChunkBytes;
-/// Slice bound on a remote shuffle, where a window is released only whole
-/// at a batch boundary: one slice bounds how far memory runs past a failed
+/// Slice bound on an RSS shuffle, where a window is released only whole at a
+/// batch boundary: one slice bounds how far memory runs past a failed
 /// reservation before the window can be pushed.
-constexpr int64_t kRemoteSliceBytes = 8 << 20;
+constexpr int64_t kRssSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinRepeatRatio = 4;
@@ -62,12 +62,12 @@ CellShuffleWriter::CellShuffleWriter(
     memory::MemoryPool* boltPool,
     arrow::MemoryPool* arrowPool)
     : CompositeShuffleWriter(std::move(options), boltPool, arrowPool),
-      isRemote_(
+      isRss_(
           options_.partitionWriterOptions.partitionWriterType ==
           PartitionWriterType::kCeleborn) {
   metrics_.useCellShuffle = 1;
   // Composite-only input needs an output before ordinary layout initialization.
-  if (isRemote_) {
+  if (isRss_) {
     BOLT_CHECK_NOT_NULL(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
@@ -280,8 +280,8 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   }
   const int64_t flatSize = rv->estimateFlatSize();
   // Reserve both the slice and room to push the largest partition payload.
-  const auto prepareRemoteSlice = [this](int64_t estimatedBytes) {
-    if (!isRemote_ || !splitter_->hasWindowRows()) {
+  const auto prepareRssSlice = [this](int64_t estimatedBytes) {
+    if (!isRss_ || !splitter_->hasWindowRows()) {
       return;
     }
     const int64_t sliceBytes = estimatedBytes + kChunkBytes;
@@ -294,7 +294,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     }
   };
   const int64_t maxBytes =
-      isRemote_ ? kRemoteSliceBytes : kMaxShuffleWriterBatchBytes;
+      isRss_ ? kRssSliceBytes : kMaxShuffleWriterBatchBytes;
   if (flatSize > maxBytes && rv->size() > 1) {
     const int64_t pieces = std::max<int64_t>(
         1, std::min<int64_t>(rv->size(), (flatSize + maxBytes - 1) / maxBytes));
@@ -305,12 +305,12 @@ arrow::Status CellShuffleWriter::splitOrdinary(
       auto piece =
           std::dynamic_pointer_cast<RowVector>(rv->slice(begin, length));
       BOLT_CHECK_NOT_NULL(piece);
-      prepareRemoteSlice(flatSize * length / rv->size());
+      prepareRssSlice(flatSize * length / rv->size());
       RETURN_NOT_OK(splitBatch(std::move(piece)));
     }
     return arrow::Status::OK();
   }
-  prepareRemoteSlice(flatSize);
+  prepareRssSlice(flatSize);
   return splitBatch(std::move(rv));
 }
 
@@ -596,8 +596,8 @@ void CellShuffleWriter::prepareChunkGrowth() {
   const auto overCap = [&]() {
     return memorySpillThresholdBytes_ > 0 && overBytes() > 0;
   };
-  if (isRemote_) {
-    // Defer remote pushes until the batch is complete.
+  if (isRss_) {
+    // Defer RSS pushes until the batch is complete.
     if (overCap() || !boltPool_->maybeReserve(kChunkBytes)) {
       sealDeferred_ = true;
     }
@@ -656,7 +656,7 @@ void CellShuffleWriter::maybeSeal() {
   }
   pressure_.nullPeakBytes = std::max<uint64_t>(
       pressure_.nullPeakBytes, splitter_->nullFootprintBytes());
-  if (isRemote_ && sealDeferred_) {
+  if (isRss_ && sealDeferred_) {
     // Memory ran short mid-batch: push the window now that it is whole.
     releaseWindow(SealReason::kMemoryPressure);
     return;
@@ -684,7 +684,7 @@ void CellShuffleWriter::maybeSeal() {
     pressure_.partitionsSealed += sealed;
   }
   const uint64_t cellData = splitter_->cellDataBytes();
-  if (!isRemote_ && cellData > cellSpillThresholdBytes_) {
+  if (!isRss_ && cellData > cellSpillThresholdBytes_) {
     // Spill the largest partitions down to half the data threshold.
     SealSpillTimer timer(*this);
     const uint64_t spilled =
@@ -749,7 +749,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
-  if (isRemote_) {
+  if (isRss_) {
     return reclaimWindow(size, actual);
   }
   SealSpillTimer timer(*this);

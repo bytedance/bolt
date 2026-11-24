@@ -200,8 +200,8 @@ class RunCompressor {
   /// as it is.
   uint32_t compressNullBody(BufferPtr& out, size_t at);
 
-  /// Gives the one-shot workspaces back to the spill pool.
-  void releaseWorkspace();
+  /// Releases the one-shot compression buffers back to the spill pool.
+  void releaseBuffers();
 
   /// What the compressor did, counted per run and per frame - never per
   /// byte - so the counting costs nothing measurable.
@@ -239,22 +239,8 @@ class RunCompressor {
     std::string toString() const;
   };
 
-  /// The same, for one stream's kSeparate frames.
-  struct StreamStats {
-    uint64_t tried{0};
-    uint64_t compressed{0};
-    uint64_t skipped{0};
-    uint64_t inBytes{0};
-    uint64_t outBytes{0};
-  };
-
   const Stats& stats() const {
     return stats_;
-  }
-
-  /// Per stream index, when kSeparate runs were written.
-  const std::vector<StreamStats>& streamStats() const {
-    return streamStats_;
   }
 
  private:
@@ -294,7 +280,6 @@ class RunCompressor {
   uint64_t* const compressTimeNs_;
   AdaptiveSkipper skipper_;
   Stats stats_;
-  std::vector<StreamStats> streamStats_;
   std::unique_ptr<Codec> codec_;
   /// Null when one-shot.
   std::unique_ptr<StreamCompressor> streamCompressor_;

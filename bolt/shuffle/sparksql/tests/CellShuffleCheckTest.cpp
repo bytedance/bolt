@@ -116,7 +116,7 @@ class CountingOutput final : public CellOutput {
   void sealWindow(const CellWindowInput&) override {
     ++calls;
   }
-  void finalize(const CellWindowInput&, bool, ShuffleWriterMetrics&) override {
+  void finalize(const CellWindowInput&, ShuffleWriterMetrics&) override {
     ++calls;
   }
   int64_t bytesEvicted() const override {

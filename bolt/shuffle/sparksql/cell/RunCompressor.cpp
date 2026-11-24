@@ -300,9 +300,6 @@ void RunCompressor::write(
     return;
   }
   skipper_.prepareStreams(numStreams);
-  if (streamStats_.size() < numStreams) {
-    streamStats_.resize(numStreams);
-  }
   if (total < kMinSeparateRunBytes) {
     const uint64_t headerAt = sink.reserve(kCombinedRunDecodedSizesOffset);
     sink.write(sizes.data(), sizes.size_bytes());
@@ -346,21 +343,15 @@ void RunCompressor::write(
     }
     const auto visitStream = [&](RunPieceFn fn) { visit(s, fn); };
     uint64_t stored = 0;
-    auto& streamStats = streamStats_[s];
     if (bytes < kMinCompressBytes) {
       ++stats_.tinyFrames;
       stats_.tinyBytes += bytes;
     } else if (skipper_.shouldSkipStream(s)) {
       countFrame(0, bytes, /*skipped=*/true);
-      ++streamStats.skipped;
     } else {
       stored = writeFrame(sink, bytes, visitStream, /*probeEarly=*/true);
       skipper_.recordStream(s, stored > 0);
       countFrame(stored, bytes, /*skipped=*/false);
-      ++streamStats.tried;
-      streamStats.compressed += stored > 0;
-      streamStats.inBytes += bytes;
-      streamStats.outBytes += stored > 0 ? stored : bytes;
     }
     if (stored > 0) {
       header[s] = stored;
@@ -480,7 +471,7 @@ uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
   return static_cast<uint32_t>(bytes);
 }
 
-void RunCompressor::releaseWorkspace() {
+void RunCompressor::releaseBuffers() {
   frame_.reset();
   compressed_.reset();
 }

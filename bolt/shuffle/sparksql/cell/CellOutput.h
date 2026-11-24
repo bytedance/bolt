@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <optional>
 #include <span>
 #include <vector>
 
@@ -93,14 +92,12 @@ class CellOutput {
   /// their cells drained unless sealsResidentCells().
   virtual void sealWindow(const CellWindowInput& in) = 0;
 
-  /// Final merge. `windowHasData` says whether the unsealed window still
-  /// has rows; the backend writes them directly from memory, after any runs
-  /// that window already spilled (RSS sends them). Fills the metrics
-  /// fields it owns (partitionLengths, rawPartitionLengths,
+  /// Final merge. Writes any unsealed window partitions with rows directly
+  /// from memory, after any runs that window already spilled (RSS sends them).
+  /// Fills the metrics fields it owns (partitionLengths, rawPartitionLengths,
   /// totalBytesWritten, totalBytesEvicted, write/evict times).
   virtual void finalize(
       const CellWindowInput& in,
-      bool windowHasData,
       ShuffleWriterMetrics& metrics) = 0;
 
   /// Bytes the task's output - this one and the composite output it ends
@@ -141,10 +138,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Writes the data file: mergeToDataFile() of this output and the
   /// composite one. Here, not in the writer, because the current window -
   /// written straight from memory - only lives through this call.
-  void finalize(
-      const CellWindowInput& in,
-      bool windowHasData,
-      ShuffleWriterMetrics& metrics) override;
+  void finalize(const CellWindowInput& in, ShuffleWriterMetrics& metrics)
+      override;
 
   int64_t bytesEvicted() const override {
     return spilledBytes();
@@ -181,7 +176,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 
   /// Logs the resident window and the task's seal and run totals: two INFO
   /// lines, the runs listed at most 16.
-  void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
+  void logWindowDiagnostics(const CellWindowInput& in);
 
   /// The non-empty segments of `pid` across runs [from, end), oldest first.
   static std::vector<SpillSegment> partitionSegments(
@@ -237,13 +232,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   uint64_t numSealedPayloads_{0};
   /// The merge: spilled segments copied.
   uint64_t copiedSegments_{0};
-  /// Borrowed finalize() state for writePartitionShare(). `resident` is null
-  /// when no unsealed window data remains to merge.
-  struct MergeInput {
-    const CellWindowInput* resident{nullptr};
-    std::span<const uint8_t> encodingTags;
-  };
-  std::optional<MergeInput> mergeInput_;
+  /// Borrowed finalize() input for writePartitionShare().
+  const CellWindowInput* mergeInput_{nullptr};
 
   /// Pre-compression bytes merged so far.
   uint64_t rawBytesWritten_{0};
@@ -279,10 +269,8 @@ class RssCellOutput final : public CellOutput {
 
   void spillRun(const CellWindowInput& in) override;
   void sealWindow(const CellWindowInput& in) override;
-  void finalize(
-      const CellWindowInput& in,
-      bool windowHasData,
-      ShuffleWriterMetrics& metrics) override;
+  void finalize(const CellWindowInput& in, ShuffleWriterMetrics& metrics)
+      override;
 
   int64_t bytesEvicted() const override {
     return blocks_.bytesEvicted();

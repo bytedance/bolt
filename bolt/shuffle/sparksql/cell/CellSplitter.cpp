@@ -773,8 +773,7 @@ void CellSplitter::finish(
     ShuffleWriterMetrics& metrics,
     ColumnPositionCounts positions) {
   BOLT_CHECK(!writingOutput_, "cannot finish during output");
-  const bool windowHasData = hasWindowRows();
-  if (windowHasData) {
+  if (hasWindowRows()) {
     flushCaches();
   }
   if (streamCheck_ != nullptr) {
@@ -799,7 +798,7 @@ void CellSplitter::finish(
   };
   // Preserve direct output of the resident window, even if earlier Runs
   // exist. Finalization does not force an extra spill or sealed window.
-  output_.finalize(windowInput(positions), windowHasData, metrics);
+  output_.finalize(windowInput(positions), metrics);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (!isDictEnabled(col)) {
       continue;
