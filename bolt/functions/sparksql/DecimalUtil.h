@@ -173,6 +173,7 @@ class DecimalUtil {
       overflow = true;
       return R(-1);
     }
+    overflow = false;
     if (a == 0) {
       r = 0;
       return R(0);

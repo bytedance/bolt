@@ -99,6 +99,26 @@ TEST_F(DecimalUtilTest, divideWithRoundUp) {
           overflowResult, 10, 1, 76, overflow);
   EXPECT_TRUE(overflow);
   EXPECT_EQ(overflowRet, -1);
+
+  // Zero-dividend and non-overflow fallback calls must always reset overflow.
+  int128_t zeroResult = 1;
+  bool dirtyOverflow = true;
+  auto zeroRet = DecimalUtil::divideWithRoundUp<int128_t, int128_t, int128_t>(
+      zeroResult, 0, 10, 0, dirtyOverflow);
+  EXPECT_FALSE(dirtyOverflow);
+  EXPECT_EQ(zeroResult, 0);
+  EXPECT_EQ(zeroRet, 0);
+
+  int128_t largeRescaleResult = 0;
+  dirtyOverflow = true;
+  DecimalUtil::divideWithRoundUp<int128_t, int64_t, int128_t>(
+      largeRescaleResult,
+      1,
+      5 * bolt::DecimalUtil::kPowersOfTen[35],
+      42,
+      dirtyOverflow);
+  EXPECT_FALSE(dirtyOverflow);
+  EXPECT_EQ(largeRescaleResult, 2000000);
 }
 
 TEST_F(DecimalUtilTest, minLeadingZeros) {
