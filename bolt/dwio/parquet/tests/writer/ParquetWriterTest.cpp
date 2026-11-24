@@ -1574,3 +1574,15 @@ TEST_F(ParquetWriterTest, encoderTestSinkResize0) {
       getArrowMemoryPool());
   encoder->testSinkResize0();
 };
+
+TEST_F(ParquetWriterTest, levelRunOptimizationOption) {
+  vp::WriterOptions options;
+  EXPECT_TRUE(options.enableLevelRunOptimization);
+  EXPECT_TRUE(options.getArrowWriterPropertiesBuilder()
+                  ->build()
+                  ->enable_level_run_optimization());
+  options.enableLevelRunOptimization = false;
+  EXPECT_FALSE(options.getArrowWriterPropertiesBuilder()
+                   ->build()
+                   ->enable_level_run_optimization());
+}

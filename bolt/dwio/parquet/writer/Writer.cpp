@@ -286,6 +286,8 @@ std::string WriterOptionsToString(const WriterOptions& options) {
       << (options.storeDecimalAsInteger ? "true" : "false") << std::endl;
   oss << "  writeBatchBytes: " << options.writeBatchBytes << std::endl;
   oss << "  minBatchSize: " << options.minBatchSize << std::endl;
+  oss << " enable level runs: " << options.enableLevelRunOptimization
+      << std::endl;
   oss << " write thread count: " << options.threadPoolSize << std::endl;
 
   return oss.str();
@@ -393,6 +395,7 @@ WriterOptions::getWriterPropertiesBuilder(arrow::MemoryPool* arrowPool) const {
 std::shared_ptr<ArrowWriterProperties::Builder>
 WriterOptions::getArrowWriterPropertiesBuilder() const {
   auto builderPtr = std::make_shared<ArrowWriterProperties::Builder>();
+  builderPtr->set_enable_level_run_optimization(enableLevelRunOptimization);
   auto& builder = *builderPtr;
   if (writeInt96AsTimestamp) {
     builder.enable_deprecated_int96_timestamps();
