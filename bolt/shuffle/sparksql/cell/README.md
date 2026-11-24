@@ -445,11 +445,12 @@ field of a constant struct is a constant; any other field, including one
 shorter than its structs, takes the structs' indices and nulls through a
 dictionary.
 
-**Assembly.** `CellNestedAssembler` reads each payload with one decoder and
-opens a decoder per column group at the group's positions, counted from the
-length streams before any value is read. A batch takes the rows' next
-positions, then as many positions of each container's group as the lengths
-call for, and comes out as ARRAY, MAP and ROW vectors.
+**Assembly.** When opening a payload, `CellNestedAssembler` reads each group's
+ARRAY and MAP lengths together as ordinary INTEGER columns. It sums each length
+vector to open the corresponding element group. A batch from one payload
+shares a slice of that vector as its array or map sizes.
+A batch spanning payloads combines the slices into contiguous sizes. An
+all-null length column uses a null constant until the batch needs its sizes.
 
 **Adapter fallback.** `CellShuffleTypeAdapter` packs a row's complex columns
 into one trailing VARBINARY column of CompactRows, and the reader unpacks

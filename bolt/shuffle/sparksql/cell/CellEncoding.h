@@ -649,12 +649,14 @@ class StreamCursor {
     if (FOLLY_UNLIKELY(n == 0)) {
       return true;
     }
-    const uint32_t fromStaged =
-        std::min<uint64_t>(n, stagedCount_ - stagedPos_);
-    ::memcpy(dst, staged_ + stagedPos_, fromStaged * sizeof(T));
-    stagedPos_ += fromStaged;
-    dst += fromStaged;
-    n -= fromStaged;
+    if (stagedPos_ < stagedCount_) {
+      const uint32_t fromStaged =
+          std::min<uint64_t>(n, stagedCount_ - stagedPos_);
+      ::memcpy(dst, staged_ + stagedPos_, fromStaged * sizeof(T));
+      stagedPos_ += fromStaged;
+      dst += fromStaged;
+      n -= fromStaged;
+    }
     while (n > 0) {
       if (valuesLeft_ == 0) {
         return false;

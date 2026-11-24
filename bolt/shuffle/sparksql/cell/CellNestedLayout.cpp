@@ -72,7 +72,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       supports(logicalType_),
       "no nested Cell layout for {}",
       logicalType_->toString());
-  groups_.push_back(ColumnGroup{0, {}, {}, nullptr});
+  groups_.push_back(ColumnGroup{0, {}, {}, {}, {}});
   for (const auto& child : logicalType_->children()) {
     topNodes_.push_back(addNode(child, 0));
   }
@@ -91,8 +91,13 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
     node.layoutColumn = layoutCol;
     nodeOfColumn_.push_back(n);
     auto& group = groups_[node.group];
-    node.groupColumn = static_cast<uint32_t>(group.columns.size());
     group.columns.push_back(layoutCol);
+    if (node.kind == Kind::kLeaf || node.kind == Kind::kRow) {
+      node.valueColumn = group.valueColumns.size();
+      group.valueColumns.push_back(layoutCol);
+    } else {
+      group.lengthColumns.push_back(layoutCol);
+    }
     names.push_back(fmt::format("n{}", n));
     // A leaf's column has its own type, a container's its lengths, a
     // ROW's its presence.
@@ -103,17 +108,6 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
     } else {
       types.push_back(INTEGER());
     }
-  }
-  for (auto& group : groups_) {
-    std::vector<std::string> groupNames;
-    std::vector<TypePtr> groupTypes;
-    groupNames.reserve(group.columns.size());
-    groupTypes.reserve(group.columns.size());
-    for (const auto col : group.columns) {
-      groupNames.push_back(names[col]);
-      groupTypes.push_back(types[col]);
-    }
-    group.rowType = ROW(std::move(groupNames), std::move(groupTypes));
   }
   layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
 }
@@ -130,7 +124,7 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t group) {
     groups_[group].expansions.push_back({id, childGroup});
     const uint32_t depth = groups_[group].depth + 1;
     maxDepth_ = std::max(maxDepth_, depth);
-    groups_.push_back(ColumnGroup{depth, {}, {}, nullptr});
+    groups_.push_back(ColumnGroup{depth, {}, {}, {}, {}});
   }
   nodes_.push_back(std::move(node));
   for (uint32_t i = 0; i < type->size(); ++i) {

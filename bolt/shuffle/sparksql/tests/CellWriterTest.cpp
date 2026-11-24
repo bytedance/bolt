@@ -1411,6 +1411,31 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
   }
 }
 
+TEST_F(CellWriterTest, oneFlatBatchSpansDecodeChunks) {
+  constexpr vector_size_t kRows = (64 << 10) + 11;
+  std::mt19937 rng(47);
+  const auto input = test::roundRobin(
+      {makeRowVector(
+          {makeFlatVector<Timestamp>(
+               kRows,
+               [](auto row) { return Timestamp(row, row * 1000); },
+               nullEvery(3)),
+           makeNullableStrings(kRows, rng)})},
+      1);
+  auto options = writerOptions(1, false, arrow::Compression::UNCOMPRESSED);
+  options.cellOptions.enableStringDictionary = false;
+  const auto written = test::writeShuffle(options, input, pool());
+  const auto batches = test::readPartition(
+      written.partitions[0],
+      asRowType(input.data[0]->type()),
+      nullptr,
+      pool(),
+      kRows,
+      0);
+  ASSERT_EQ(batches.size(), 1);
+  test::expectPartitionRows(input.rowsOf(1)[0], batches, 0, kRows);
+}
+
 TEST_F(CellWriterTest, readerStringBlockBoundaries) {
   // Length blocks hold eight non-null values. Reader batches split these
   // blocks, cross payloads, and cross the dictionary prefix into fallback.

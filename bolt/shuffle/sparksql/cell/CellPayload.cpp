@@ -16,7 +16,6 @@
 
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
-#include <folly/ScopeGuard.h>
 #include <folly/lang/Assume.h>
 #include <algorithm>
 #include <string_view>
@@ -33,6 +32,23 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
+
+constexpr uint32_t kMaxDecodeChunkRows = 64 << 10;
+static_assert(kMaxDecodeChunkRows % 64 == 0);
+
+CellLayout projectedLayout(
+    const RowType& sourceType,
+    std::span<const uint32_t> sourceColumns) {
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  names.reserve(sourceColumns.size());
+  types.reserve(sourceColumns.size());
+  for (const auto col : sourceColumns) {
+    names.push_back(sourceType.nameOf(col));
+    types.push_back(sourceType.childAt(col));
+  }
+  return CellLayout::create(ROW(std::move(names), std::move(types)));
+}
 
 std::string_view bufferBytes(const BufferPtr& buffer) {
   return buffer == nullptr
@@ -208,6 +224,18 @@ class BitAppender {
   uint32_t used_{0};
 };
 
+/// parseNullBody() has already checked the record count against the input.
+uint32_t expandColumnNullRecords(
+    const uint8_t* records,
+    uint32_t positions,
+    uint8_t* bitmap) {
+  const uint8_t* end = records + sizeof(uint32_t) +
+      uint64_t{memory::loadUnaligned<uint32_t>(records)} * kNullRecordBytes;
+  uint32_t nonNullCount;
+  expandNullRecords(records, end, positions, bitmap, nonNullCount);
+  return nonNullCount;
+}
+
 /// Values-buffer bytes per row, a Boolean counted as one byte (an upper
 /// bound); for a raw stream, also the wire width of one value.
 uint32_t decodedRowBytes(TypeKind kind) {
@@ -352,6 +380,25 @@ CellPayloadDecoder::CellPayloadDecoder(
   }
 }
 
+CellPayloadDecoder::CellPayloadDecoder(
+    CellPayloadDecoder& source,
+    std::span<const uint32_t> sourceColumns)
+    : CellPayloadDecoder(
+          projectedLayout(*source.layout_.rowType(), sourceColumns),
+          nullptr,
+          source.pool_) {
+  BOLT_CHECK_NULL(source.source_, "a projection requires a stream reader");
+  source_ = &source;
+  sourceColumns_.assign(sourceColumns.begin(), sourceColumns.end());
+  sourceStreams_.reserve(layout_.numStreams());
+  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
+    const auto col = layout_.stream(s).column;
+    const auto streamInColumn = s - layout_.firstStream(col);
+    sourceStreams_.push_back(
+        source.layout_.firstStream(sourceColumns[col]) + streamInColumn);
+  }
+}
+
 [[noreturn]] FOLLY_NOINLINE void failMalformedPayload(const char* what) {
   BOLT_FAIL("malformed cell shuffle payload: {}", what);
 }
@@ -487,40 +534,27 @@ void CellPayloadDecoder::parseNullBody(
 
 void CellPayloadDecoder::expandNulls(uint32_t rowCount) {
   uint32_t rawNullColumns = 0;
-  for (const auto tag : nullTags_) {
-    rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
+  for (uint32_t col = 0; col < nullTags_.size(); ++col) {
+    if (nullTags_[col] == NullTag::kRawNull) {
+      ++rawNullColumns;
+    } else {
+      nonNullCount_[col] = nullTags_[col] == NullTag::kNoNull ? rowCount : 0;
+      bitmaps_[col] = nullptr;
+    }
+  }
+  if (rawNullColumns == 0) {
+    return;
   }
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
-  uint8_t* bitmap = nullptr;
-  if (rawNullColumns > 0) {
-    const uint64_t expandedBytes =
-        static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
-    // Room for the last bitmap's whole last word.
-    bitmap = reinterpret_cast<uint8_t*>(
-        resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
-  }
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    switch (nullTags_[col]) {
-      case NullTag::kAllNull:
-        nonNullCount_[col] = 0;
-        bitmaps_[col] = nullptr;
-        break;
-      case NullTag::kNoNull:
-        nonNullCount_[col] = rowCount;
-        bitmaps_[col] = nullptr;
-        break;
-      case NullTag::kRawNull: {
-        const uint8_t* cursor = records_[col];
-        const uint8_t* const end = cursor + sizeof(uint32_t) +
-            uint64_t{memory::loadUnaligned<uint32_t>(cursor)} *
-                kNullRecordBytes;
-        expandNullRecords(cursor, end, rowCount, bitmap, nonNullCount_[col]);
-        bitmaps_[col] = bitmap;
-        bitmap += bitmapBytes;
-        break;
-      }
-      case NullTag::kReserved:
-        break;
+  // The last record can write a whole word past the bitmap's last byte.
+  auto* bitmap = reinterpret_cast<uint8_t*>(resetBuffer(
+      expandedNulls_, rawNullColumns * bitmapBytes + sizeof(uint64_t), pool_));
+  for (uint32_t col = 0; col < nullTags_.size(); ++col) {
+    if (nullTags_[col] == NullTag::kRawNull) {
+      nonNullCount_[col] =
+          expandColumnNullRecords(records_[col], rowCount, bitmap);
+      bitmaps_[col] = bitmap;
+      bitmap += bitmapBytes;
     }
   }
 }
@@ -684,7 +718,8 @@ void CellPayloadDecoder::parseRun(
   failMalformedPayload("unreachable run layout");
 }
 
-void CellPayloadDecoder::beginPayload(ShuffleByteSource& in) {
+void CellPayloadDecoder::openPayload(ShuffleByteSource& in) {
+  BOLT_CHECK_NULL(source_, "a projection must open its source's columns");
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
@@ -692,45 +727,29 @@ void CellPayloadDecoder::beginPayload(ShuffleByteSource& in) {
   openColumns(rowCount);
 }
 
-uint32_t CellPayloadDecoder::readPayload(ShuffleByteSource& in) {
+uint32_t CellPayloadDecoder::readPayloadStreams(ShuffleByteSource& in) {
+  BOLT_CHECK_NULL(source_, "a projection must open its source's columns");
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "a payload of this decoder is open");
   return parsePayload(in);
 }
 
-void CellPayloadDecoder::openPayload(
-    const CellPayloadDecoder& source,
-    std::span<const uint32_t> sourceColumns,
-    uint32_t positions) {
-  BOLT_CHECK(&source != this, "a decoder cannot open the payload it read");
-  BOLT_CHECK_EQ(sourceColumns.size(), layout_.numColumns());
+void CellPayloadDecoder::openProjectedColumns(uint32_t rowCount) {
+  BOLT_CHECK_NOT_NULL(source_);
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
-  if (positions > kMaxPayloadRows) {
-    failMalformedPayload("positions beyond the configured limit");
+  if (rowCount > kMaxPayloadRows) {
+    failMalformedPayload("projected row count beyond the configured limit");
   }
-  // The source's null tags, records, encoding tags and streams of each
-  // column.
-  encodingTags_.assign((layout_.numColumns() + 7) / 8, 0);
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    const uint32_t from = sourceColumns[col];
-    BOLT_CHECK_EQ(
-        layout_.rowType()->childAt(col)->kind(),
-        source.layout_.rowType()->childAt(from)->kind());
-    nullTags_[col] = source.nullTags_[from];
-    records_[col] = source.records_[from];
-    if (layout_.isStringColumn(col)) {
-      encodingTags_[col / 8] |= static_cast<uint8_t>(
-          ((source.encodingTags_[from / 8] >> (from % 8)) & 1) << (col % 8));
-    }
+  for (uint32_t col = 0; col < sourceColumns_.size(); ++col) {
+    const auto from = sourceColumns_[col];
+    nullTags_[col] = source_->nullTags_[from];
+    records_[col] = source_->records_[from];
   }
-  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
-    const uint32_t col = layout_.stream(s).column;
-    const uint32_t from = source.layout_.firstStream(sourceColumns[col]) + s -
-        layout_.firstStream(col);
-    streamViews_[s] = source.streamViews_[from];
+  for (uint32_t s = 0; s < sourceStreams_.size(); ++s) {
+    streamViews_[s] = source_->streamViews_[sourceStreams_[s]];
   }
-  openColumns(positions);
+  openColumns(rowCount);
 }
 
 uint32_t CellPayloadDecoder::parsePayload(ShuffleByteSource& in) {
@@ -816,6 +835,11 @@ void CellPayloadDecoder::openColumn(uint32_t col) {
   std::visit(
       util::overloaded{
           [&]<typename T>(StreamCursor<T>& cursor) {
+            // Every encoded block needs a tag and at least one data byte.
+            constexpr uint32_t kValuesPerBlock = kCacheLineBytes / sizeof(T);
+            if (bits::divRoundUp(nonNull, kValuesPerBlock) > bytes.size() / 2) {
+              failMalformedPayload("malformed value stream");
+            }
             cursor.reset(data, bytes.size(), nonNull);
           },
           [&](TimestampCursor& cursor) {
@@ -840,7 +864,9 @@ void CellPayloadDecoder::openStringColumn(uint32_t col, StringCursor& cursor) {
   const auto lengthBytes = streamViews_[layout_.firstStream(col)];
   const auto dataBytes = streamViews_[layout_.firstStream(col) + 1];
   const uint32_t nonNull = nonNullCount_[col];
-  cursor.isDictionary = (encodingTags_[col / 8] >> (col % 8)) & 1;
+  const auto tagCol = source_ ? sourceColumns_[col] : col;
+  const auto& tags = source_ ? source_->encodingTags_ : encodingTags_;
+  cursor.isDictionary = (tags[tagCol / 8] >> (tagCol % 8)) & 1;
   cursor.data = dataBytes;
   cursor.dataOffset = 0;
   cursor.entries.clear();
@@ -1041,53 +1067,71 @@ void CellPayloadDecoder::dropBatch() {
   batchStringBytes_ = 0;
 }
 
-void CellPayloadDecoder::appendRows(uint32_t numRows, vector_size_t capacity) {
+void CellPayloadDecoder::reserveRows(uint64_t minCapacity) {
+  if (minCapacity <= static_cast<uint64_t>(batchCapacity_)) {
+    return;
+  }
+  BOLT_CHECK_LE(
+      minCapacity,
+      std::numeric_limits<vector_size_t>::max(),
+      "batch beyond one vector");
+  if (batchOpen_) {
+    growBatch(minCapacity);
+  } else {
+    openBatch(static_cast<vector_size_t>(minCapacity));
+  }
+}
+
+void CellPayloadDecoder::appendRows(uint32_t numRows) {
   BOLT_CHECK_LE(numRows, payloadRowsLeft());
-  if (!batchOpen_) {
-    openBatch(
-        std::max<vector_size_t>(capacity, static_cast<vector_size_t>(numRows)));
+  reserveRows(
+      std::max<uint64_t>(1, static_cast<uint64_t>(batchRows_) + numRows));
+  if (numRows == 0) {
+    return;
   }
-  auto rollback = folly::makeGuard([&] {
-    rowCount_ = 0;
-    rowsRead_ = 0;
-    dropBatch();
-  });
-  const uint64_t rows = static_cast<uint64_t>(batchRows_) + numRows;
-  if (rows > static_cast<uint64_t>(batchCapacity_)) {
-    growBatch(rows);
+  // Bound temporary dense values independently of the output vector size.
+  while (numRows > 0) {
+    const uint32_t chunk = std::min(numRows, kMaxDecodeChunkRows);
+    for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+      appendColumnChunk(
+          col, chunk, appendNulls(col, chunk), *batch_[col].values);
+    }
+    batchRows_ += chunk;
+    rowsRead_ += chunk;
+    numRows -= chunk;
   }
-  for (uint32_t col = 0; col < layout_.numColumns() && numRows > 0; ++col) {
-    const uint32_t dense = appendNulls(col, numRows);
-    std::visit(
-        util::overloaded{
-            [&]<typename T>(StreamCursor<T>& cursor) {
-              appendEncoded(col, numRows, dense, cursor);
-            },
-            [&]<typename T>(RawCursor<T>& cursor) {
-              appendRaw(col, numRows, dense, cursor);
-            },
-            [&](RawCursor<bool>& cursor) {
-              appendBoolean(col, numRows, dense, cursor);
-            },
-            [&](TimestampCursor& cursor) {
-              appendTimestamp(col, numRows, dense, cursor);
-            },
-            [&](StringCursor& cursor) {
-              appendString(col, numRows, dense, cursor);
-            }},
-        cursors_[col]);
-  }
-  batchRows_ += numRows;
-  rowsRead_ += numRows;
-  if (numRows > 0 && rowsRead_ == rowCount_) {
+  if (rowsRead_ == rowCount_) {
     finishPayload();
   }
-  rollback.dismiss();
+}
+
+void CellPayloadDecoder::appendColumnChunk(
+    uint32_t col,
+    uint32_t numRows,
+    uint32_t nonNull,
+    Buffer& values) {
+  std::visit(
+      util::overloaded{
+          [&]<typename T>(StreamCursor<T>& cursor) {
+            appendEncoded(col, numRows, nonNull, values, cursor);
+          },
+          [&]<typename T>(RawCursor<T>& cursor) {
+            appendRaw(col, numRows, nonNull, values, cursor);
+          },
+          [&](RawCursor<bool>& cursor) {
+            appendBoolean(col, numRows, nonNull, values, cursor);
+          },
+          [&](TimestampCursor& cursor) {
+            appendTimestamp(col, numRows, nonNull, values, cursor);
+          },
+          [&](StringCursor& cursor) {
+            appendString(col, numRows, nonNull, values, cursor);
+          }},
+      cursors_[col]);
 }
 
 void CellPayloadDecoder::growBatch(uint64_t rows) {
   constexpr uint64_t kMaxRows = std::numeric_limits<vector_size_t>::max();
-  BOLT_CHECK_LE(rows, kMaxRows, "batch beyond one vector");
   // Doubling stops 7 rows short of one vector, where a null buffer's int32
   // bit count no longer rounds up to whole bytes.
   const uint64_t capacity =
@@ -1128,14 +1172,15 @@ uint32_t CellPayloadDecoder::appendNulls(uint32_t col, uint32_t numRows) {
       // set bit for a value: whole words copy across. A batch's nulls start
       // all set, so only words holding a null need writing.
       uint64_t* batchNulls = nullptr;
-      uint32_t dense = 0;
+      uint32_t numNonNullValues = 0;
       forEachBitWord(
           bitmaps_[col],
           payloadBitmapBytes(),
           rowsRead_,
           numRows,
           [&](uint32_t base, uint32_t n, uint64_t word) {
-            dense += static_cast<uint32_t>(__builtin_popcountll(word));
+            numNonNullValues +=
+                static_cast<uint32_t>(__builtin_popcountll(word));
             if (word != lowBits(n)) {
               if (batchNulls == nullptr) {
                 batchNulls = nulls();
@@ -1143,7 +1188,7 @@ uint32_t CellPayloadDecoder::appendNulls(uint32_t col, uint32_t numRows) {
               storeBitWord(batchNulls, batchRows_ + base, word, n);
             }
           });
-      return dense;
+      return numNonNullValues;
     }
     default:
       return numRows;
@@ -1154,17 +1199,19 @@ template <typename T, typename Read>
 bool CellPayloadDecoder::placeValues(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
     T* out,
     const Read& read) {
-  if (dense == numRows) {
-    return read(dense, out);
+  if (numNonNullValues == numRows) {
+    return read(numNonNullValues, out);
   }
   T* values = nullptr;
-  if (dense > 0) {
+  if (numNonNullValues > 0) {
     values = reinterpret_cast<T*>(resetBuffer(
-        denseScratch_, static_cast<size_t>(dense) * sizeof(T), pool_));
-    if (!read(dense, values)) {
+        denseScratch_,
+        static_cast<size_t>(numNonNullValues) * sizeof(T),
+        pool_));
+    if (!read(numNonNullValues, values)) {
       return false;
     }
   }
@@ -1201,12 +1248,14 @@ template <typename T>
 void CellPayloadDecoder::appendEncoded(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
+    Buffer& values,
     StreamCursor<T>& cursor) {
-  T* out = batch_[col].values->template asMutable<T>() + batchRows_;
-  if (!placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
-        return cursor.next(count, dst);
-      })) {
+  T* out = values.asMutable<T>() + batchRows_;
+  if (!placeValues<T>(
+          col, numRows, numNonNullValues, out, [&](uint32_t count, T* dst) {
+            return cursor.next(count, dst);
+          })) {
     failMalformedPayload("malformed value stream");
   }
 }
@@ -1215,40 +1264,39 @@ template <typename T>
 void CellPayloadDecoder::appendRaw(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
+    Buffer& values,
     RawCursor<T>& cursor) {
-  // openColumn() checked that the stream holds exactly the column's
-  // non-null values, and no more than those are read: these `dense` are in
-  // bounds.
+  // openColumn() validated the stream size for all non-null values.
   const auto bytes = streamViews_[layout_.firstStream(col)];
   const char* src = bytes.data() + cursor.valuesRead * sizeof(T);
-  T* out = batch_[col].values->template asMutable<T>() + batchRows_;
-  placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
-    ::memcpy(dst, src, static_cast<size_t>(count) * sizeof(T));
-    return true;
-  });
-  cursor.valuesRead += dense;
+  T* out = values.asMutable<T>() + batchRows_;
+  placeValues<T>(
+      col, numRows, numNonNullValues, out, [&](uint32_t count, T* dst) {
+        ::memcpy(dst, src, static_cast<size_t>(count) * sizeof(T));
+        return true;
+      });
+  cursor.valuesRead += numNonNullValues;
 }
 
 void CellPayloadDecoder::appendBoolean(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
+    Buffer& values,
     RawCursor<bool>& cursor) {
-  // openColumn() checked that the stream holds exactly the column's
-  // non-null values, and no more than those are read: these `dense` are in
-  // bounds.
+  // openColumn() validated the stream size for all non-null values.
   const auto bytes = streamViews_[layout_.firstStream(col)];
   const auto* src =
       reinterpret_cast<const uint8_t*>(bytes.data()) + cursor.valuesRead;
-  auto* out = batch_[col].values->asMutable<uint64_t>();
-  for (uint32_t i = 0; i < dense; ++i) {
+  auto* out = values.asMutable<uint64_t>();
+  for (uint32_t i = 0; i < numNonNullValues; ++i) {
     if (src[i] > 1) {
       failMalformedPayload("invalid boolean byte");
     }
   }
-  cursor.valuesRead += dense;
-  if (dense == numRows) {
+  cursor.valuesRead += numNonNullValues;
+  if (numNonNullValues == numRows) {
     for (uint32_t i = 0; i < numRows; ++i) {
       bits::setBit(out, batchRows_ + i, src[i] != 0);
     }
@@ -1276,18 +1324,21 @@ void CellPayloadDecoder::appendBoolean(
 void CellPayloadDecoder::appendTimestamp(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
+    Buffer& values,
     TimestampCursor& cursor) {
   auto* scratch = reinterpret_cast<int64_t*>(resetBuffer(
-      denseScratch_, 2 * sizeof(int64_t) * static_cast<size_t>(dense), pool_));
+      denseScratch_,
+      2 * sizeof(int64_t) * static_cast<size_t>(numNonNullValues),
+      pool_));
   int64_t* seconds = scratch;
-  int64_t* nanos = scratch + dense;
-  if (dense > 0 &&
-      (!cursor.seconds.next(dense, seconds) ||
-       !cursor.nanos.next(dense, nanos))) {
+  int64_t* nanos = scratch + numNonNullValues;
+  if (numNonNullValues > 0 &&
+      (!cursor.seconds.next(numNonNullValues, seconds) ||
+       !cursor.nanos.next(numNonNullValues, nanos))) {
     failMalformedPayload("malformed timestamp stream");
   }
-  for (uint32_t i = 0; i < dense; ++i) {
+  for (uint32_t i = 0; i < numNonNullValues; ++i) {
     // Untrusted values must not reach the Timestamp constructor's range
     // checks, which abort in debug builds.
     if (seconds[i] < Timestamp::kMinSeconds ||
@@ -1296,8 +1347,8 @@ void CellPayloadDecoder::appendTimestamp(
       failMalformedPayload("timestamp out of range");
     }
   }
-  auto* out = batch_[col].values->asMutable<Timestamp>() + batchRows_;
-  if (dense == numRows) {
+  auto* out = values.asMutable<Timestamp>() + batchRows_;
+  if (numNonNullValues == numRows) {
     for (uint32_t i = 0; i < numRows; ++i) {
       out[i] = Timestamp(seconds[i], nanos[i]);
     }
@@ -1326,23 +1377,24 @@ void CellPayloadDecoder::appendTimestamp(
 void CellPayloadDecoder::appendString(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense,
+    uint32_t numNonNullValues,
+    Buffer& values,
     StringCursor& cursor) {
-  auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
-  if (dense == 0) {
+  auto* out = values.asMutable<StringView>() + batchRows_;
+  if (numNonNullValues == 0) {
     std::fill_n(out, numRows, StringView());
     return;
   }
   StringRows rows(
       out,
-      dense == numRows ? nullptr : bitmaps_[col],
+      numNonNullValues == numRows ? nullptr : bitmaps_[col],
       payloadBitmapBytes(),
       rowsRead_,
       numRows);
   if (cursor.isDictionary) {
-    appendStringDictionary(col, dense, rows, cursor);
+    appendStringDictionary(col, numNonNullValues, rows, cursor);
   } else {
-    appendStringFlat(col, dense, rows, cursor);
+    appendStringFlat(col, numNonNullValues, rows, cursor);
   }
   rows.finish();
 }
@@ -1351,7 +1403,7 @@ void CellPayloadDecoder::appendString(
 // reporting and length decoding keep explicit noinline boundaries.
 [[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringFlat(
     uint32_t col,
-    uint32_t dense,
+    uint32_t numNonNullValues,
     StringRows& rows,
     StringCursor& cursor) {
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
@@ -1432,7 +1484,7 @@ void CellPayloadDecoder::appendString(
     cursor.dataOffset += dataBytes;
   };
 
-  uint32_t remaining = dense;
+  uint32_t remaining = numNonNullValues;
   while (remaining > 0) {
     const int64_t* lengths = nullptr;
     const uint32_t count = cursor.lengths.nextBlock(remaining, lengths);
@@ -1452,19 +1504,19 @@ void CellPayloadDecoder::appendString(
 
 [[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringDictionary(
     uint32_t col,
-    uint32_t dense,
+    uint32_t numNonNullValues,
     StringRows& rows,
     StringCursor& cursor) {
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
   static_assert(kLengthsPerBlock == 8);
   using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
 
-  uint32_t remaining = dense;
+  uint32_t remaining = numNonNullValues;
   // Matched rows precede the fallback rows; matched rows resolve against
   // their dictionary. They have no encoded lengths, but use the same small
   // groups and output row cursor as the fallback blocks.
-  auto hits = static_cast<uint32_t>(
-      std::min<uint64_t>(dense, cursor.matchedRows - cursor.matchedRead));
+  auto hits = static_cast<uint32_t>(std::min<uint64_t>(
+      numNonNullValues, cursor.matchedRows - cursor.matchedRead));
   remaining -= hits;
   const auto takeMatched = [&](auto count, const Dictionary& dictionary) {
     const auto* indexes = cursor.indexes + cursor.matchedRead;
@@ -1558,7 +1610,101 @@ VectorPtr CellPayloadDecoder::makeFlat(uint32_t col, const TypePtr& type) {
       std::move(column.strings));
 }
 
-RowVectorPtr CellPayloadDecoder::finishBatch() {
+RowVectorPtr CellPayloadDecoder::finishBatch(bool appendRemainingRows) {
+  if (appendRemainingRows && !batchOpen_ && rowsRead_ == 0) {
+    const auto& type = layout_.rowType();
+    const auto rows = rowCount_;
+    const auto& types = type->children();
+    if (projectionBatch_.use_count() == 1 && projectionBatch_->type() == type &&
+        !projectionBatch_->containsLazyNotLoaded() &&
+        projectionBatch_->children().size() == types.size()) {
+      // Each child is resized or replaced below, including shared slices.
+      projectionBatch_->resetNulls();
+      projectionBatch_->BaseVector::prepareForReuse();
+      projectionBatch_->unsafeResize(rows);
+    } else {
+      projectionBatch_ = std::make_shared<RowVector>(
+          pool_,
+          type,
+          nullptr,
+          rows,
+          std::vector<VectorPtr>(layout_.numColumns()));
+    }
+    auto& columns = projectionBatch_->children();
+    for (uint32_t col = 0; col < columns.size(); ++col) {
+      auto& output = columns[col];
+      const uint32_t nonNull = nonNullCount_[col];
+      const bool reusable = output.use_count() == 1 &&
+          output->type() == types[col] && output->pool() == pool_;
+      if (nonNull == 0) {
+        if (reusable && output->isConstantEncoding() &&
+            output->mayHaveNulls()) {
+          output->resize(rows);
+          output->setNullCount(rows);
+        } else {
+          output = BaseVector::createNullConstant(types[col], rows, pool_);
+        }
+        continue;
+      }
+      BufferPtr nulls;
+      Buffer* values = nullptr;
+      if (reusable && output->isFlatEncoding()) {
+        if (output->nulls()) {
+          if (nonNull < rows && output->nulls()->isMutable()) {
+            nulls = output->nulls();
+          }
+          output->resetNulls();
+        }
+        output->prepareForReuse();
+        // prepareForReuse discards shared values, including a retained slice.
+        if (output->values()) {
+          output->resize(rows);
+          values = output->values().get();
+        }
+      }
+      if (!values) {
+        output = BaseVector::create(types[col], rows, pool_);
+        values = output->values().get();
+      }
+      if (nonNull < rows) {
+        const auto bytes = bits::nwords(rows) * sizeof(uint64_t);
+        auto* bitmap = resetBuffer(nulls, bytes, pool_);
+        std::memset(bitmap + bytes - sizeof(uint64_t), 0, sizeof(uint64_t));
+        std::memcpy(bitmap, bitmaps_[col], payloadBitmapBytes());
+        output->setNulls(nulls);
+        output->setNullCount(rows - nonNull);
+      }
+      // The whole column shares one bitmap and writes directly into its vector.
+      for (uint32_t offset = 0; offset < rows;) {
+        const uint32_t count = std::min(rows - offset, kMaxDecodeChunkRows);
+        uint32_t chunkNonNull = nonNull;
+        if (count < rows) {
+          chunkNonNull = nonNull == rows
+              ? count
+              : bits::countBits(output->rawNulls() + offset / 64, 0, count);
+        }
+        rowsRead_ = offset;
+        batchRows_ = offset;
+        appendColumnChunk(col, count, chunkNonNull, *values);
+        offset += count;
+      }
+      if (std::holds_alternative<StringCursor>(cursors_[col])) {
+        auto& column = batch_[col];
+        output->asUnchecked<FlatVector<StringView>>()->setStringBuffers(
+            std::move(column.strings));
+        column.charsFree = nullptr;
+        column.charsLeft = 0;
+      }
+    }
+    finishPayload();
+    rowsRead_ = rows;
+    batchRows_ = 0;
+    batchStringBytes_ = 0;
+    return projectionBatch_;
+  }
+  if (appendRemainingRows) {
+    appendRows(payloadRowsLeft());
+  }
   if (!batchOpen_) {
     return nullptr;
   }

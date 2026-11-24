@@ -44,9 +44,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// the caller's size into a batch that may span payloads. Memory is the
 /// payload's decoded streams, a bitmap per kRawNull column, and one batch,
 /// whatever the payload's row count. Reusable across payloads; scratch buffers
-/// are retained. A payload whose columns have different position counts is read
-/// by one decoder (readPayload()), and the columns at the same positions are
-/// decoded by a decoder of their own (openPayload()).
+/// are retained. For a nested payload, one decoder reads the physical streams.
+/// Each group decoder opens the columns that share its position count.
 class CellPayloadDecoder {
  public:
   /// `decompressor` may be null when payloads are known to be uncompressed;
@@ -56,46 +55,41 @@ class CellPayloadDecoder {
       ShuffleDecompressor* decompressor,
       memory::MemoryPool* pool);
 
+  /// Projects these physical columns in order from a stream-reading decoder.
+  /// The source must outlive this projection. The column mapping is copied.
+  CellPayloadDecoder(
+      CellPayloadDecoder& source,
+      std::span<const uint32_t> sourceColumns);
+
   CellPayloadDecoder(const CellPayloadDecoder&) = delete;
   CellPayloadDecoder& operator=(const CellPayloadDecoder&) = delete;
-  CellPayloadDecoder(CellPayloadDecoder&&) = default;
 
-  /// Reads one payload from `in`: header, null body and every run. Its
-  /// rows then come out through appendRows(). The previous payload must be
-  /// fully appended. Throws on malformed input, having consumed an unspecified
-  /// prefix of `in`.
-  void beginPayload(ShuffleByteSource& in);
+  /// Reads a payload and opens all its columns for appendRows(). Fully append
+  /// the previous payload first. On malformed input, throws after consuming
+  /// an unspecified prefix of `in`.
+  void openPayload(ShuffleByteSource& in);
 
-  /// Reads one payload as beginPayload() does, but opens no column: the
-  /// decoders of its columns open it with openPayload(). Returns the header's
-  /// rowCount. What it read stays valid until the next readPayload() or
-  /// beginPayload() of this decoder. Throws on malformed input.
-  uint32_t readPayload(ShuffleByteSource& in);
+  /// Reads the header, null metadata and streams for use by projected
+  /// decoders. Returns the top-level row count. The source owns the streams
+  /// until it reads another payload. Throws on malformed input.
+  uint32_t readPayloadStreams(ShuffleByteSource& in);
 
-  /// Opens the payload another decoder, `source`, read for this decoder's
-  /// columns, column c being source's sourceColumns[c] - one entry per
-  /// column of this decoder - of the same type, at
-  /// `positions` positions each: they come out through appendRows() as this
-  /// decoder's rows, and `source` reads no other payload until they are all
-  /// appended. The previous payload must be fully appended. Throws on
-  /// malformed input.
-  void openPayload(
-      const CellPayloadDecoder& source,
-      std::span<const uint32_t> sourceColumns,
-      uint32_t positions);
+  /// Opens this projection at its group's row count after the source reads
+  /// the payload. Consume these rows before the source reads another payload.
+  void openProjectedColumns(uint32_t rowCount);
 
   /// Rows of the current payload not appended yet.
   uint32_t payloadRowsLeft() const {
     return rowCount_ - rowsRead_;
   }
 
-  /// Appends the next `numRows` rows of the current payload to the batch
-  /// under construction, opening one of `capacity` rows when none is open
-  /// and growing it when they do not fit: in a layout whose columns have
-  /// different position counts, a batch's position count varies with the
-  /// payload. The checks that need a whole stream run with the payload's last
-  /// rows. On malformed input drops the payload and the batch and throws.
-  void appendRows(uint32_t numRows, vector_size_t capacity);
+  /// Reserves room for at least `minCapacity` total rows in the output batch.
+  void reserveRows(uint64_t minCapacity);
+
+  /// Appends the next `numRows` payload rows, growing the batch as needed.
+  /// A zero-row append opens an empty batch if necessary. The last rows
+  /// trigger whole-stream checks. If decoding throws, discard the reader.
+  void appendRows(uint32_t numRows);
 
   vector_size_t batchRows() const {
     return batchRows_;
@@ -106,13 +100,11 @@ class CellPayloadDecoder {
     return static_cast<uint64_t>(batchRows_) * rowBytes_ + batchStringBytes_;
   }
 
-  /// The batch built so far, closing it; nullptr when none is open.
-  RowVectorPtr finishBatch();
-
-  /// Non-null rows of a column in the payload opened last.
-  uint32_t nonNullCount(uint32_t col) const {
-    return nonNullCount_[col];
-  }
+  /// Closes the output batch. With appendRemainingRows, first includes every
+  /// remaining row of the current payload. When reading a whole payload this
+  /// way, all-null columns use constant vectors. The default returns nullptr
+  /// if no batch is open.
+  RowVectorPtr finishBatch(bool appendRemainingRows = false);
 
   /// A stream's bytes in the payload read or opened last.
   std::string_view streamBytes(uint32_t stream) const {
@@ -122,16 +114,6 @@ class CellPayloadDecoder {
   /// Fixed bytes of one decoded row.
   uint32_t rowBytes() const {
     return rowBytes_;
-  }
-
-  /// A column's values in the open batch, T{} at its null rows;
-  /// appendRows() may move them.
-  const BufferPtr& batchValues(uint32_t col) const {
-    return batch_[col].values;
-  }
-
-  const CellLayout& layout() const {
-    return layout_;
   }
 
  private:
@@ -233,17 +215,24 @@ class CellPayloadDecoder {
 
   void dropBatch();
 
+  /// Decodes a chunk from rowsRead_ into values starting at batchRows_.
+  void appendColumnChunk(
+      uint32_t col,
+      uint32_t numRows,
+      uint32_t nonNull,
+      Buffer& values);
+
   /// Marks the nulls of the next numRows payload rows in the batch; returns
   /// how many of those rows are non-null.
   BOLT_CELL_KERNEL uint32_t appendNulls(uint32_t col, uint32_t numRows);
 
-  /// Writes numRows values at out: `dense` non-null ones from read(count,
-  /// dst), scattered by the payload bitmap, T{} at the null rows.
+  /// Reads numNonNullValues into their positions in the numRows output slots,
+  /// filling null positions with T{}.
   template <typename T, typename Read>
   BOLT_CELL_KERNEL bool placeValues(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
       T* out,
       const Read& read);
 
@@ -251,32 +240,37 @@ class CellPayloadDecoder {
   void appendEncoded(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
+      Buffer& values,
       StreamCursor<T>& cursor);
 
   template <typename T>
   void appendRaw(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
+      Buffer& values,
       RawCursor<T>& cursor);
 
   void appendBoolean(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
+      Buffer& values,
       RawCursor<bool>& cursor);
 
   void appendTimestamp(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
+      Buffer& values,
       TimestampCursor& cursor);
 
   BOLT_CELL_KERNEL void appendString(
       uint32_t col,
       uint32_t numRows,
-      uint32_t dense,
+      uint32_t numNonNullValues,
+      Buffer& values,
       StringCursor& cursor);
 
   class StringRows;
@@ -285,13 +279,13 @@ class CellPayloadDecoder {
   /// Keep their block loop separate from dictionary index resolution.
   BOLT_CELL_KERNEL FOLLY_NOINLINE void appendStringFlat(
       uint32_t col,
-      uint32_t dense,
+      uint32_t numNonNullValues,
       StringRows& rows,
       StringCursor& cursor);
 
   BOLT_CELL_KERNEL FOLLY_NOINLINE void appendStringDictionary(
       uint32_t col,
-      uint32_t dense,
+      uint32_t numNonNullValues,
       StringRows& rows,
       StringCursor& cursor);
 
@@ -308,6 +302,9 @@ class CellPayloadDecoder {
   const CellLayout layout_;
   ShuffleDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
+  const CellPayloadDecoder* source_{nullptr};
+  std::vector<uint32_t> sourceColumns_;
+  std::vector<uint32_t> sourceStreams_;
   /// Fixed bytes of one decoded row, the batch byte estimate's base.
   uint32_t rowBytes_{0};
 
@@ -336,10 +333,12 @@ class CellPayloadDecoder {
   BufferPtr compressedScratch_;
   BufferPtr combinedDecoded_;
 
-  // Per-append scratch, at most one batch of dense values (or dense seconds
+  // Per-chunk scratch, at most one chunk of dense values (or dense seconds
   // followed by dense nanos for TIMESTAMP).
   BufferPtr denseScratch_;
 
+  // Reuse the projected row and its children while they are exclusively owned.
+  RowVectorPtr projectionBatch_;
   std::vector<ColumnBatch> batch_;
   bool batchOpen_{false};
   vector_size_t batchCapacity_{0};

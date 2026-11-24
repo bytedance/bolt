@@ -945,6 +945,63 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
     }
   }
   EXPECT_EQ(batchSizes(4096, 1), std::vector<vector_size_t>(3000, 1));
+
+  // Reserving the BIGINT id column at the row limit would need 32 MiB.
+  // The three payloads together have only 3,000 rows.
+  constexpr int32_t kMaxBatchRows = 4 << 20;
+  auto readerRoot =
+      memory::memoryManager()->addRootPool("nestedBatchRowLimit", 8 << 20);
+  auto readerPool = readerRoot->addLeafChild("reader");
+  const auto combined = test::readPartition(
+      bytes, type, nullptr, readerPool.get(), kMaxBatchRows, 1 << 20);
+  ASSERT_EQ(combined.size(), 1);
+  test::expectPartitionRows(expected, combined, 0, kMaxBatchRows);
+}
+
+TEST_F(CellNestedTest, containerLengthsAcrossPayloadAndBatchBoundaries) {
+  const std::vector<RowVectorPtr> input{
+      makeRowVector({makeNestedArrayVectorFromJson<int32_t>(
+          {"[[1, 2], null]",
+           "null",
+           "[]",
+           "[[], [3]]",
+           "[[4]]",
+           "null",
+           "[[9]]"})}),
+      makeRowVector(
+          {BaseVector::createNullConstant(ARRAY(ARRAY(INTEGER())), 4, pool())}),
+      makeRowVector({makeNestedArrayVectorFromJson<int32_t>(
+          {"[null]", "[[5, 6, 7]]", "null", "[[], [8], null]", "[]"})})};
+  std::string bytes;
+  for (const auto& payload : input) {
+    bytes += test::writeShuffle(
+                 writerOptions(1), test::roundRobin({payload}, 1), pool())
+                 .partitions[0];
+  }
+  // Keep every batch through the end of input and destruction of the reader.
+  const auto batches = test::readPartition(
+      bytes, asRowType(input[0]->type()), nullptr, pool(), 3, 1 << 20);
+  ASSERT_EQ(batches.size(), 6);
+  test::expectPartitionRows(test::rowsIn(input), batches, 0, 3);
+
+  // Adjacent batches within one payload share the decoded sizes at both
+  // nesting levels, including the null positions.
+  const auto* first = batches[0]->childAt(0)->as<ArrayVector>();
+  const auto* second = batches[1]->childAt(0)->as<ArrayVector>();
+  ASSERT_EQ(first->size(), 3);
+  EXPECT_EQ(first->rawSizes() + first->size(), second->rawSizes());
+  const auto* firstInner = first->elements()->as<ArrayVector>();
+  const auto* secondInner = second->elements()->as<ArrayVector>();
+  EXPECT_EQ(
+      firstInner->rawSizes() + firstInner->size(), secondInner->rawSizes());
+
+  // These two batches straddle the beginning and end of the all-null payload.
+  const auto* intoNulls = batches[2]->childAt(0)->as<ArrayVector>();
+  const auto* outOfNulls = batches[3]->childAt(0)->as<ArrayVector>();
+  EXPECT_EQ(intoNulls->sizeAt(1), 0);
+  EXPECT_EQ(intoNulls->sizeAt(2), 0);
+  EXPECT_EQ(outOfNulls->sizeAt(0), 0);
+  EXPECT_EQ(outOfNulls->sizeAt(1), 0);
 }
 
 TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {

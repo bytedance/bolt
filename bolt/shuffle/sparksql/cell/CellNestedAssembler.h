@@ -25,61 +25,61 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// The reader side of a nested layout: batches of its payloads in the
-/// logical row type. One decoder reads each payload; a decoder per column group
-/// opens the group's columns at the group's positions, which the lengths of
-/// its owner's entries add up to, counted from their stream before any
-/// value is read. A batch takes the rows' next positions, then of each
-/// container's group as many as the lengths just appended call for, and so
-/// down, and comes out as ARRAY, MAP and ROW vectors over the groups'
-/// batches, a ROW null where its presence is.
+/// Assembles physical column groups into batches of the logical row type.
+/// Opening a payload decodes each container's length vector. Its sum gives
+/// the element group size. Each batch uses a slice of the lengths and the
+/// corresponding elements, recursively.
 ///
 /// Every check of a flat payload holds per column group; besides, a length must
 /// not be negative, a length stream must hold exactly its entries' lengths,
 /// and a column group at most CellNestedLayout::kMaxPositions positions. A
-/// batch closes before a new payload's positions would take some group's batch
-/// past that. As for a flat payload, the rows' batch opens at the caller's
-/// capacity.
+/// batch closes before a new payload would take any group past that limit.
 class CellNestedAssembler {
  public:
-  /// Positions one append covers at most, so that a decoder's
-  /// per-append scratch stays what a flat batch's takes.
-  static constexpr uint32_t kAppendPositions = 64 << 10;
-
   /// `type` must take a nested layout.
   CellNestedAssembler(
       RowTypePtr type,
       ShuffleDecompressor* decompressor,
       memory::MemoryPool* pool);
 
-  /// Reads one payload, its kind byte consumed. Throws on malformed input.
-  void beginPayload(ShuffleByteSource& in);
+  /// Reads a payload after its kind byte and opens its column groups for
+  /// nextBatch(). Throws on malformed input.
+  void openPayload(ShuffleByteSource& in);
 
-  /// The next batch: at most `capacity` rows of about `byteBudget` bytes,
-  /// one append when that is <= 0. `nextPayload` begins the next payload,
-  /// false at the end or before a CompositeRows block. nullptr: no row.
+  /// Returns up to maxBatchRows root rows, aiming for byteBudget bytes.
+  /// A nonpositive budget allows one append. nextPayload returns false at
+  /// EOF or a CompositeRows block. Returns nullptr if no rows were appended.
   RowVectorPtr nextBatch(
-      vector_size_t capacity,
+      vector_size_t maxBatchRows,
       int64_t byteBudget,
       const std::function<bool()>& nextPayload);
 
  private:
-  /// Sum of the container's non-null lengths in the current payload.
-  uint64_t countElements(uint32_t container) const;
+  struct ContainerColumn {
+    BufferPtr offsets;
 
-  /// Whether the batch takes the payload just begun as well: every column
-  /// group's positions.
-  bool takesPayload() const;
+    /// A batch borrows one contiguous slice until it spans a second payload.
+    VectorPtr firstPayload;
+    vector_size_t firstOffset{0};
+    BufferPtr mergedSizes;
+    BufferPtr mergedNulls;
 
-  /// Bytes the batch's values take, every column group's together.
-  uint64_t batchBytes() const;
+    void appendLengths(
+        const VectorPtr& payloadLengths,
+        vector_size_t from,
+        vector_size_t at,
+        vector_size_t count);
+    /// The output sizes and nulls, including zero sizes for null containers.
+    std::pair<BufferPtr, BufferPtr> finishLengths(
+        vector_size_t count,
+        memory::MemoryPool* pool);
+  };
 
-  /// Appends the next `positions` positions of column group g, then the
-  /// elements their containers' entries hold.
-  void appendGroup(uint32_t g, uint64_t positions, vector_size_t capacity);
+  /// Appends rows and their nested elements. Returns the decoded bytes added.
+  uint64_t appendGroup(uint32_t groupId, uint32_t numRows);
 
-  /// The offsets of container x's entries in the batch, room for `entries`.
-  vector_size_t* offsets(uint32_t x, uint64_t entries);
+  /// The offsets of a container's entries in the batch, room for `entries`.
+  vector_size_t* offsets(BufferPtr& buffer, uint64_t entries);
 
   /// The batch so far in the logical row type, closing it.
   RowVectorPtr assemble();
@@ -88,10 +88,17 @@ class CellNestedAssembler {
   memory::MemoryPool* const pool_;
   CellPayloadDecoder payloadDecoder_;
   std::vector<std::unique_ptr<CellPayloadDecoder>> decoders_;
-  /// Per column group, the payload's positions.
-  std::vector<uint64_t> payloadPositions_;
-  /// Per container node, its batch entries' offsets.
-  std::vector<BufferPtr> offsets_;
+  /// One whole-payload length projection for each group that owns containers.
+  std::vector<std::unique_ptr<CellPayloadDecoder>> lengthDecoders_;
+  /// Decoded length columns in each group's expansion order.
+  std::vector<RowVectorPtr> payloadLengths_;
+  std::vector<uint32_t> stringDataStreams_;
+  /// Root rows for group 0, or the parent container's element count.
+  std::vector<uint32_t> payloadGroupRowCounts_;
+  /// Set when opening a payload, before adding its rows to the current batch.
+  bool payloadFitsBatch_{true};
+  /// Indexed by the container's element group. Group zero has no container.
+  std::vector<ContainerColumn> containers_;
   /// A payload row's decoded bytes, every column group's together: what the
   /// byte budget counts by.
   uint64_t payloadRowBytes_{1};

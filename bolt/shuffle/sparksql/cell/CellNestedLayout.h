@@ -84,8 +84,8 @@ class CellNestedLayout {
     uint32_t group;
     /// The node's column index in layout(), or kNone for UNKNOWN leaves.
     uint32_t layoutColumn{kNone};
-    /// The column's index among its group's columns, or kNone for UNKNOWN.
-    uint32_t groupColumn{kNone};
+    /// The column's index in the group's value projection (leaves and ROWs).
+    uint32_t valueColumn{kNone};
     /// An ARRAY's element; a MAP's key, then its value; a ROW's fields.
     std::vector<uint32_t> children;
   };
@@ -96,8 +96,7 @@ class CellNestedLayout {
     uint32_t elementGroup;
   };
 
-  /// Columns sharing one row/element position count and decoded by one
-  /// CellPayloadDecoder on read.
+  /// Physical columns sharing one row/element position count.
   struct ColumnGroup {
     /// Containers between this column group and the top-level rows.
     uint32_t depth;
@@ -106,8 +105,10 @@ class CellNestedLayout {
     std::vector<uint32_t> columns;
     /// Expansions from this group to its element groups, in node order.
     std::vector<ContainerExpansion> expansions;
-    /// The row type of `columns`, a decoder's for this group.
-    RowTypePtr rowType;
+    /// Leaves and ROW presence columns that the reader appends batch by batch.
+    std::vector<uint32_t> valueColumns;
+    /// ARRAY/MAP lengths in the same order as expansions.
+    std::vector<uint32_t> lengthColumns;
   };
 
   /// Whether `rowType` takes a nested layout: it has ARRAY, MAP or ROW

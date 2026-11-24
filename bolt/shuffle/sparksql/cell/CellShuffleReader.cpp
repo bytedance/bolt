@@ -64,9 +64,9 @@ bool CellShuffleReader::nextPayload() {
         ShuffleBlockKind::kCellPayload,
         "unknown cell shuffle block kind");
     if (nestedAssembler_ != nullptr) {
-      nestedAssembler_->beginPayload(source);
+      nestedAssembler_->openPayload(source);
     } else {
-      decoder_->beginPayload(source);
+      decoder_->openPayload(source);
     }
     incrementPayloadsRead();
   });
@@ -105,7 +105,10 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
     }
     const auto rows = static_cast<uint32_t>(
         std::min<int64_t>(left, capacity - decoder_->batchRows()));
-    decoder_->appendRows(rows, capacity);
+    if (decoder_->batchRows() == 0) {
+      decoder_->reserveRows(capacity);
+    }
+    decoder_->appendRows(rows);
   }
   return decoder_->finishBatch();
 }

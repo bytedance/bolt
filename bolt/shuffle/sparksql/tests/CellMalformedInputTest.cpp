@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <arrow/io/memory.h>
 #include <unistd.h>
 #include <algorithm>
 #include <array>
@@ -27,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockReader.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
@@ -708,6 +711,73 @@ class CellMalformedInputTest : public testing::Test,
   std::string dir_;
 };
 
+TEST_F(CellMalformedInputTest, completeProjectionPreservesRetainedVectors) {
+  constexpr vector_size_t kChunkRows = 64 << 10;
+  const auto makeInput = [&](int32_t version) {
+    const auto rows = kChunkRows + (version == 3 ? 7 : 133);
+    const auto isNull = [=](auto row) {
+      return (version == 2 && row < kChunkRows) || (row + version) % 5 == 0;
+    };
+    return makeRowVector(
+        {BaseVector::createNullConstant(BIGINT(), rows, pool()),
+         makeFlatVector<int32_t>(
+             rows, [=](auto row) { return 1000 * version + row; }, isNull),
+         makeFlatVector<std::string>(
+             rows,
+             [=](auto row) {
+               return std::string(32 + row % 11, 'a' + version);
+             },
+             isNull),
+         makeFlatVector<Timestamp>(
+             rows,
+             [=](auto row) { return Timestamp(1000 * version + row, row); },
+             isNull),
+         makeFlatVector<bool>(
+             rows,
+             [=](auto row) { return (row + version) % 2 == 0; },
+             isNull)});
+  };
+  const auto first = makeInput(0);
+  const auto type = asRowType(first->type());
+  CellPayloadDecoder source(CellLayout::create(type), nullptr, pool());
+  const std::array<uint32_t, 5> columns{0, 1, 2, 3, 4};
+  CellPayloadDecoder projection(source, columns);
+  const auto decode = [&](const RowVectorPtr& input) {
+    // readPayloadStreams starts immediately after the block kind byte.
+    StreamByteSource in(std::make_shared<arrow::io::BufferReader>(
+        arrow::Buffer::FromString(written(input).substr(1))));
+    const auto rows = source.readPayloadStreams(in);
+    projection.openProjectedColumns(rows);
+    auto result = projection.finishBatch(/*appendRemainingRows=*/true);
+    EXPECT_TRUE(result->childAt(0)->isConstantEncoding());
+    EXPECT_EQ(result->childAt(0)->getNullCount(), input->size());
+    bolt::test::assertEqualVectors(input, result);
+    return result;
+  };
+
+  const auto retained = decode(first);
+  const auto second = makeInput(1);
+  // A word-aligned slice shares the source null bitmap as well as its values.
+  const auto retainedSlice = decode(second)->slice(kChunkRows - 64, 65);
+  {
+    const auto batch = decode(makeInput(2));
+    const auto rows = batch->size();
+    batch->childAt(0) = makeConstant<int64_t>(17, rows);
+    batch->childAt(1) = std::make_shared<FlatVector<int32_t>>(
+        pool(),
+        INTEGER(),
+        allocateNulls(rows, pool(), bits::kNull),
+        rows,
+        nullptr,
+        std::vector<BufferPtr>{});
+  }
+  // Reuse the released batch after the caller replaced two children.
+  decode(makeInput(3));
+  bolt::test::assertEqualVectors(first, retained);
+  bolt::test::assertEqualVectors(
+      second->slice(kChunkRows - 64, 65), retainedSlice);
+}
+
 TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
   const auto bigint = ROW({"a"}, {BIGINT()});
   const auto integer = ROW({"a"}, {INTEGER()});
@@ -1082,7 +1152,7 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
       {"a length stream past its lengths",
        lengthsOnly,
        plain(3, {encoded<int32_t>({1, 2, 3}) + encoded<int32_t>({4})}),
-       "malformed container length stream"},
+       "malformed value stream"},
       {"empty containers whose elements have values",
        arrays,
        payload(
@@ -1115,6 +1185,22 @@ TEST_F(CellMalformedInputTest, malformedPayloadsAreRejected) {
       }
     }
   }
+}
+
+TEST_F(CellMalformedInputTest, shortContainerLengthStreamWithManyRows) {
+  const auto bytes = payload(
+      4 << 20,
+      nullBody({NullTag::kNoNull}),
+      std::string(1, '\0'),
+      {storedRun({encoded<int32_t>({0})})});
+  // The declared rows would require a 16 MiB length vector. The reader can
+  // detect the short stream within this pool's 8 MiB limit.
+  auto root =
+      memory::memoryManager()->addRootPool("shortContainerLengths", 8 << 20);
+  auto leaf = root->addLeafChild("reader");
+  const auto reader = test::makeReader(
+      bytes, ROW({"a"}, {ARRAY(UNKNOWN())}), nullptr, leaf.get(), 7, 1 << 20);
+  BOLT_ASSERT_THROW(reader->next(), "malformed value stream");
 }
 
 TEST_F(CellMalformedInputTest, malformedBlocksKeepBasicErrors) {
