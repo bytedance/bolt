@@ -90,12 +90,17 @@ struct SplitBatch {
   /// adds the partition's position base to locate the null bit. May be
   /// empty when no column of this batch requires per-row null checks.
   std::span<const uint32_t> rowIndexInPid;
-  /// The layout columns this batch covers; nullopt: every column.
+  /// The layout columns this batch covers; nullopt means every column.
   std::optional<std::span<const uint32_t>> columns;
-  /// Per partition, how many positions the columns hold in the window
-  /// before this batch. nullptr: the window's rows, which split() then
-  /// advances by partition2RowCount; otherwise the caller advances its own.
-  const uint32_t* positionBase = nullptr;
+  /// Per-partition row/entry counts already in the current window before this
+  /// batch, used as the base offset for null positions.
+  /// - nullptr (flat batches and nested root rows): split() uses its own
+  ///   windowRowCounts_ and advances it by partition2RowCount.
+  /// - non-null (nested child spaces shredded by CellNestedShredder, whose
+  ///   element counts differ from top-level row counts): the caller supplies
+  ///   and advances its own per-partition counts without touching
+  ///   windowRowCounts_.
+  const uint32_t* windowRowCounts = nullptr;
 
   uint32_t numRows() const {
     return static_cast<uint32_t>(row2Partition.size());
@@ -237,9 +242,9 @@ class CellSplitter {
 
   CellWindowInput windowInput(ColumnPositionCounts positions) const;
 
-  const uint32_t* positionBase(const SplitBatch& batch) const {
-    return batch.positionBase != nullptr ? batch.positionBase
-                                         : windowRowCounts_.data();
+  const uint32_t* windowRowCounts(const SplitBatch& batch) const {
+    return batch.windowRowCounts != nullptr ? batch.windowRowCounts
+                                            : windowRowCounts_.data();
   }
 
   /// Boolean values as 0/1 bytes of a Raw Data stream.
@@ -264,9 +269,11 @@ class CellSplitter {
     return cursors_ + static_cast<size_t>(stream) * numPartitions_;
   }
 
-  /// Encodes the full or partial cache line of an encoded stream into
-  /// the cells; `line` is the stream's staged line of partition `pid`, as
-  /// cacheLine() gives it. Out of the hot loop by design.
+  /// Encodes the full or partial cache line of an encoded stream into the
+  /// cells; `line` is the stream's staged line of partition `pid`, as
+  /// cacheLine() gives it. Forced inline so the hot split loops (which flush
+  /// every 8-32 rows on a full line) constant-fold `cur[pid] ==
+  /// kCacheLineBytes` and avoid per-block call overhead.
   template <typename T>
   FOLLY_ALWAYS_INLINE void
   flushEncoded(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);

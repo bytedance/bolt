@@ -457,7 +457,7 @@ class NullCells {
 
   /// Joins `batchClass`, one batch's class in column col, into the column's
   /// class for the window, and returns whether the batch's nulls must be
-  /// recorded through setNull()/setNullRun(): only once the column's class
+  /// recorded through setNull()/setNulls(): only once the column's class
   /// is kSomeNulls. `windowRows` gives each partition's rows before this
   /// batch: a column turning kSomeNulls after all-null rows records those
   /// as a null run per partition, once.
@@ -498,10 +498,9 @@ class NullCells {
     appendNulls(column, pid, rowInWindow, 1);
   }
 
-  /// Bulk form for a run of consecutive rows that are all null in this
-  /// column. Only for a mixed column, as setNull().
-  void
-  setNullRun(uint32_t pid, uint32_t col, uint32_t startRow, uint32_t count) {
+  /// Bulk form for consecutive rows that are all null in this column. Only
+  /// for a mixed column, as setNull().
+  void setNulls(uint32_t pid, uint32_t col, uint32_t startRow, uint32_t count) {
     appendNulls(columnFor(col), pid, startRow, count);
   }
 

@@ -714,7 +714,7 @@ void CellNestedShredder::splitElementBatch(
     batch.rowIndexInPid = {rowIndexInPid, elements.size};
   }
   batch.columns = space.columns;
-  batch.positionBase = counts;
+  batch.windowRowCounts = counts;
   wireColumns(batch);
   // Committed before the space's next element batch splits, which starts
   // past them.

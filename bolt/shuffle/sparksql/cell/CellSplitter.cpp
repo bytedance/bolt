@@ -115,7 +115,7 @@ void CellSplitter::setStreamCheck(CellShuffleCheck* check) {
 }
 
 template <typename T>
-void CellSplitter::flushEncoded(
+FOLLY_ALWAYS_INLINE void CellSplitter::flushEncoded(
     uint32_t stream,
     uint32_t pid,
     const char* line,
@@ -233,7 +233,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
       ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call - which the compiler declines to inline here - for identity and
@@ -296,7 +296,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
       ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call - which the compiler declines to inline here - for identity and
@@ -358,7 +358,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   uint8_t* __restrict dataCur = cursors(dataStream);
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
   const vector_size_t* __restrict indices = nullptr;
   if constexpr (kMapping == InputMapping::kDictionary) {
@@ -436,7 +436,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   uint8_t* __restrict cur = cursors(stream);
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
   const uint32_t numRows = batch.numRows(); // stores may alias the batch
@@ -470,7 +470,7 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
       ((static_cast<size_t>(nanosStream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
   const vector_size_t* __restrict indices = nullptr;
   if constexpr (kMapping == InputMapping::kDictionary) {
@@ -512,7 +512,7 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
 
 void CellSplitter::split(const SplitBatch& batch) {
   const auto& rowType = layout_.rowType();
-  const uint32_t* positions = positionBase(batch);
+  const uint32_t* positions = windowRowCounts(batch);
   const uint32_t numColumns = batch.columns.has_value()
       ? static_cast<uint32_t>(batch.columns->size())
       : layout_.numColumns();
@@ -530,7 +530,7 @@ void CellSplitter::split(const SplitBatch& batch) {
         for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
           const uint32_t count = batch.partition2RowCount[pid];
           if (count > 0) {
-            nulls_.setNullRun(pid, col, positions[pid], count);
+            nulls_.setNulls(pid, col, positions[pid], count);
           }
         }
       }
@@ -600,8 +600,8 @@ void CellSplitter::split(const SplitBatch& batch) {
     }
   }
 
-  if (batch.positionBase != nullptr) {
-    return; // the caller's counts, not the window's rows
+  if (batch.windowRowCounts != nullptr) {
+    return; // the caller owns this space's counts, not windowRowCounts_
   }
   // Commit row counts only after every column has been appended. A Run spill
   // during the split reads cell bytes without closing this partial batch.
@@ -1245,7 +1245,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   DictState* __restrict states = dictStates_[col].data();
   const uint32_t* __restrict row2pid = batch.row2Partition.data();
   const uint32_t* rowIndexInPid = batch.rowIndexInPid.data();
-  const uint32_t* __restrict positions = positionBase(batch);
+  const uint32_t* __restrict positions = windowRowCounts(batch);
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call for identity and dictionary inputs alike.
