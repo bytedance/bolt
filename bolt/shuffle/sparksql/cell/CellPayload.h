@@ -142,6 +142,7 @@ class CellPayloadDecoder {
     bool allInline;
   };
 
+  template <typename T>
   struct RawCursor {
     /// Non-null values consumed: the raw-stream offset in values.
     uint64_t valuesRead{0};
@@ -172,7 +173,11 @@ class CellPayloadDecoder {
 
   /// Read position of one column in the current payload.
   using ColumnCursor = std::variant<
-      RawCursor,
+      RawCursor<bool>,
+      RawCursor<int8_t>,
+      RawCursor<float>,
+      RawCursor<double>,
+      RawCursor<int128_t>,
       StreamCursor<int16_t>,
       StreamCursor<int32_t>,
       StreamCursor<int64_t>,
@@ -214,7 +219,7 @@ class CellPayloadDecoder {
   /// what can be checked before any value is read.
   void openColumn(uint32_t col);
 
-  void openStringColumn(uint32_t col);
+  void openStringColumn(uint32_t col, StringCursor& cursor);
 
   /// The whole-stream checks, once the last row was appended: the blocks
   /// and string bytes consumed their streams exactly.
@@ -250,24 +255,45 @@ class CellPayloadDecoder {
       StreamCursor<T>& cursor);
 
   template <typename T>
-  void appendRaw(uint32_t col, uint32_t numRows, uint32_t dense);
+  void appendRaw(
+      uint32_t col,
+      uint32_t numRows,
+      uint32_t dense,
+      RawCursor<T>& cursor);
 
-  void appendBoolean(uint32_t col, uint32_t numRows, uint32_t dense);
+  void appendBoolean(
+      uint32_t col,
+      uint32_t numRows,
+      uint32_t dense,
+      RawCursor<bool>& cursor);
 
-  void appendTimestamp(uint32_t col, uint32_t numRows, uint32_t dense);
+  void appendTimestamp(
+      uint32_t col,
+      uint32_t numRows,
+      uint32_t dense,
+      TimestampCursor& cursor);
 
-  BOLT_CELL_KERNEL void
-  appendString(uint32_t col, uint32_t numRows, uint32_t dense);
+  BOLT_CELL_KERNEL void appendString(
+      uint32_t col,
+      uint32_t numRows,
+      uint32_t dense,
+      StringCursor& cursor);
 
   class StringRows;
 
   /// Ordinary strings and dictionary fallback share the length/data streams.
   /// Keep their block loop separate from dictionary index resolution.
-  BOLT_CELL_KERNEL FOLLY_NOINLINE void
-  appendStringFlat(uint32_t col, uint32_t dense, StringRows& rows);
+  BOLT_CELL_KERNEL FOLLY_NOINLINE void appendStringFlat(
+      uint32_t col,
+      uint32_t dense,
+      StringRows& rows,
+      StringCursor& cursor);
 
-  BOLT_CELL_KERNEL FOLLY_NOINLINE void
-  appendStringDictionary(uint32_t col, uint32_t dense, StringRows& rows);
+  BOLT_CELL_KERNEL FOLLY_NOINLINE void appendStringDictionary(
+      uint32_t col,
+      uint32_t dense,
+      StringRows& rows,
+      StringCursor& cursor);
 
   /// `bytes` of string space in the column's batch buffers.
   FOLLY_NOINLINE char* stringSpace(uint32_t col, uint64_t bytes);

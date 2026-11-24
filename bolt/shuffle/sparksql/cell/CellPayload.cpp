@@ -23,6 +23,7 @@
 #include <type_traits>
 
 #include "bolt/common/base/MemoryCopy.h"
+#include "bolt/core/Metaprogramming.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
@@ -327,11 +328,19 @@ CellPayloadDecoder::CellPayloadDecoder(
         cursors_.emplace_back(std::in_place_type<TimestampCursor>);
         break;
       case TypeKind::BOOLEAN:
+        cursors_.emplace_back(std::in_place_type<RawCursor<bool>>);
+        break;
       case TypeKind::TINYINT:
+        cursors_.emplace_back(std::in_place_type<RawCursor<int8_t>>);
+        break;
       case TypeKind::REAL:
+        cursors_.emplace_back(std::in_place_type<RawCursor<float>>);
+        break;
       case TypeKind::DOUBLE:
+        cursors_.emplace_back(std::in_place_type<RawCursor<double>>);
+        break;
       case TypeKind::HUGEINT:
-        cursors_.emplace_back(std::in_place_type<RawCursor>);
+        cursors_.emplace_back(std::in_place_type<RawCursor<int128_t>>);
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
@@ -800,58 +809,34 @@ void CellPayloadDecoder::openColumns(uint32_t rowCount) {
 }
 
 void CellPayloadDecoder::openColumn(uint32_t col) {
-  auto& cursor = cursors_[col];
-  const auto kind = layout_.rowType()->childAt(col)->kind();
   const uint32_t stream = layout_.firstStream(col);
   const auto bytes = streamViews_[stream];
   const auto* data = reinterpret_cast<const uint8_t*>(bytes.data());
   const uint32_t nonNull = nonNullCount_[col];
-  switch (kind) {
-    case TypeKind::SMALLINT:
-      std::get<StreamCursor<int16_t>>(cursor).reset(
-          data, bytes.size(), nonNull);
-      return;
-    case TypeKind::INTEGER:
-      std::get<StreamCursor<int32_t>>(cursor).reset(
-          data, bytes.size(), nonNull);
-      return;
-    case TypeKind::BIGINT:
-      std::get<StreamCursor<int64_t>>(cursor).reset(
-          data, bytes.size(), nonNull);
-      return;
-    case TypeKind::TIMESTAMP: {
-      const auto nanos = streamViews_[stream + 1];
-      auto& ts = std::get<TimestampCursor>(cursor);
-      ts.seconds.reset(data, bytes.size(), nonNull);
-      ts.nanos.reset(
-          reinterpret_cast<const uint8_t*>(nanos.data()),
-          nanos.size(),
-          nonNull);
-      return;
-    }
-    case TypeKind::BOOLEAN:
-    case TypeKind::TINYINT:
-    case TypeKind::REAL:
-    case TypeKind::DOUBLE:
-    case TypeKind::HUGEINT:
-      std::get<RawCursor>(cursor).valuesRead = 0;
-      // Raw streams: exactly one fixed-width value per non-null row.
-      if (bytes.size() !=
-          static_cast<uint64_t>(nonNull) * decodedRowBytes(kind)) {
-        failMalformedPayload("raw stream length mismatch");
-      }
-      return;
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
-      openStringColumn(col);
-      return;
-    default:
-      failMalformedPayload("unsupported column type");
-  }
+  std::visit(
+      util::overloaded{
+          [&]<typename T>(StreamCursor<T>& cursor) {
+            cursor.reset(data, bytes.size(), nonNull);
+          },
+          [&](TimestampCursor& cursor) {
+            const auto nanos = streamViews_[stream + 1];
+            cursor.seconds.reset(data, bytes.size(), nonNull);
+            cursor.nanos.reset(
+                reinterpret_cast<const uint8_t*>(nanos.data()),
+                nanos.size(),
+                nonNull);
+          },
+          [&]<typename T>(RawCursor<T>& cursor) {
+            cursor.valuesRead = 0;
+            if (bytes.size() != static_cast<uint64_t>(nonNull) * sizeof(T)) {
+              failMalformedPayload("raw stream length mismatch");
+            }
+          },
+          [&](StringCursor& cursor) { openStringColumn(col, cursor); }},
+      cursors_[col]);
 }
 
-void CellPayloadDecoder::openStringColumn(uint32_t col) {
-  auto& cursor = std::get<StringCursor>(cursors_[col]);
+void CellPayloadDecoder::openStringColumn(uint32_t col, StringCursor& cursor) {
   const auto lengthBytes = streamViews_[layout_.firstStream(col)];
   const auto dataBytes = streamViews_[layout_.firstStream(col) + 1];
   const uint32_t nonNull = nonNullCount_[col];
@@ -966,36 +951,33 @@ void CellPayloadDecoder::openStringColumn(uint32_t col) {
 }
 
 void CellPayloadDecoder::finishPayload() {
-  for (const auto& variant : cursors_) {
-    if (const auto* c16 = std::get_if<StreamCursor<int16_t>>(&variant)) {
-      if (!c16->finished()) {
-        failMalformedPayload("malformed value stream");
-      }
-    } else if (const auto* c32 = std::get_if<StreamCursor<int32_t>>(&variant)) {
-      if (!c32->finished()) {
-        failMalformedPayload("malformed value stream");
-      }
-    } else if (const auto* c64 = std::get_if<StreamCursor<int64_t>>(&variant)) {
-      if (!c64->finished()) {
-        failMalformedPayload("malformed value stream");
-      }
-    } else if (const auto* ts = std::get_if<TimestampCursor>(&variant)) {
-      if (!ts->seconds.finished() || !ts->nanos.finished()) {
-        failMalformedPayload("malformed timestamp stream");
-      }
-    } else if (const auto* str = std::get_if<StringCursor>(&variant)) {
-      if (!str->lengths.finished()) {
-        failMalformedPayload(
-            str->isDictionary ? "malformed fallback length stream"
-                              : "malformed string length stream");
-      }
-      // The data stream must end exactly at the last value.
-      if (str->dataOffset != str->data.size()) {
-        failMalformedPayload(
-            str->isDictionary ? "fallback data length mismatch"
-                              : "string data length mismatch");
-      }
-    }
+  const auto finish = util::overloaded{
+      []<typename T>(const StreamCursor<T>& cursor) {
+        if (!cursor.finished()) {
+          failMalformedPayload("malformed value stream");
+        }
+      },
+      [](const TimestampCursor& cursor) {
+        if (!cursor.seconds.finished() || !cursor.nanos.finished()) {
+          failMalformedPayload("malformed timestamp stream");
+        }
+      },
+      [](const StringCursor& cursor) {
+        if (!cursor.lengths.finished()) {
+          failMalformedPayload(
+              cursor.isDictionary ? "malformed fallback length stream"
+                                  : "malformed string length stream");
+        }
+        if (cursor.dataOffset != cursor.data.size()) {
+          failMalformedPayload(
+              cursor.isDictionary ? "fallback data length mismatch"
+                                  : "string data length mismatch");
+        }
+      },
+      // openColumn() checked the entire raw stream's length.
+      []<typename T>(const RawCursor<T>&) {}};
+  for (const auto& cursor : cursors_) {
+    std::visit(finish, cursor);
   }
 }
 
@@ -1075,47 +1057,25 @@ void CellPayloadDecoder::appendRows(uint32_t numRows, vector_size_t capacity) {
     growBatch(rows);
   }
   for (uint32_t col = 0; col < layout_.numColumns() && numRows > 0; ++col) {
-    const auto kind = layout_.rowType()->childAt(col)->kind();
-    auto& cursor = cursors_[col];
     const uint32_t dense = appendNulls(col, numRows);
-    switch (kind) {
-      case TypeKind::SMALLINT:
-        appendEncoded(
-            col, numRows, dense, std::get<StreamCursor<int16_t>>(cursor));
-        break;
-      case TypeKind::INTEGER:
-        appendEncoded(
-            col, numRows, dense, std::get<StreamCursor<int32_t>>(cursor));
-        break;
-      case TypeKind::BIGINT:
-        appendEncoded(
-            col, numRows, dense, std::get<StreamCursor<int64_t>>(cursor));
-        break;
-      case TypeKind::BOOLEAN:
-        appendBoolean(col, numRows, dense);
-        break;
-      case TypeKind::TIMESTAMP:
-        appendTimestamp(col, numRows, dense);
-        break;
-      case TypeKind::TINYINT:
-        appendRaw<int8_t>(col, numRows, dense);
-        break;
-      case TypeKind::REAL:
-        appendRaw<float>(col, numRows, dense);
-        break;
-      case TypeKind::DOUBLE:
-        appendRaw<double>(col, numRows, dense);
-        break;
-      case TypeKind::HUGEINT:
-        appendRaw<int128_t>(col, numRows, dense);
-        break;
-      case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY:
-        appendString(col, numRows, dense);
-        break;
-      default:
-        failMalformedPayload("unsupported column type");
-    }
+    std::visit(
+        util::overloaded{
+            [&]<typename T>(StreamCursor<T>& cursor) {
+              appendEncoded(col, numRows, dense, cursor);
+            },
+            [&]<typename T>(RawCursor<T>& cursor) {
+              appendRaw(col, numRows, dense, cursor);
+            },
+            [&](RawCursor<bool>& cursor) {
+              appendBoolean(col, numRows, dense, cursor);
+            },
+            [&](TimestampCursor& cursor) {
+              appendTimestamp(col, numRows, dense, cursor);
+            },
+            [&](StringCursor& cursor) {
+              appendString(col, numRows, dense, cursor);
+            }},
+        cursors_[col]);
   }
   batchRows_ += numRows;
   rowsRead_ += numRows;
@@ -1255,11 +1215,11 @@ template <typename T>
 void CellPayloadDecoder::appendRaw(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense) {
+    uint32_t dense,
+    RawCursor<T>& cursor) {
   // openColumn() checked that the stream holds exactly the column's
   // non-null values, and no more than those are read: these `dense` are in
   // bounds.
-  auto& cursor = std::get<RawCursor>(cursors_[col]);
   const auto bytes = streamViews_[layout_.firstStream(col)];
   const char* src = bytes.data() + cursor.valuesRead * sizeof(T);
   T* out = batch_[col].values->template asMutable<T>() + batchRows_;
@@ -1273,11 +1233,11 @@ void CellPayloadDecoder::appendRaw(
 void CellPayloadDecoder::appendBoolean(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense) {
+    uint32_t dense,
+    RawCursor<bool>& cursor) {
   // openColumn() checked that the stream holds exactly the column's
   // non-null values, and no more than those are read: these `dense` are in
   // bounds.
-  auto& cursor = std::get<RawCursor>(cursors_[col]);
   const auto bytes = streamViews_[layout_.firstStream(col)];
   const auto* src =
       reinterpret_cast<const uint8_t*>(bytes.data()) + cursor.valuesRead;
@@ -1316,8 +1276,8 @@ void CellPayloadDecoder::appendBoolean(
 void CellPayloadDecoder::appendTimestamp(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense) {
-  auto& cursor = std::get<TimestampCursor>(cursors_[col]);
+    uint32_t dense,
+    TimestampCursor& cursor) {
   auto* scratch = reinterpret_cast<int64_t*>(resetBuffer(
       denseScratch_, 2 * sizeof(int64_t) * static_cast<size_t>(dense), pool_));
   int64_t* seconds = scratch;
@@ -1366,8 +1326,8 @@ void CellPayloadDecoder::appendTimestamp(
 void CellPayloadDecoder::appendString(
     uint32_t col,
     uint32_t numRows,
-    uint32_t dense) {
-  auto& cursor = std::get<StringCursor>(cursors_[col]);
+    uint32_t dense,
+    StringCursor& cursor) {
   auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
   if (dense == 0) {
     std::fill_n(out, numRows, StringView());
@@ -1380,9 +1340,9 @@ void CellPayloadDecoder::appendString(
       rowsRead_,
       numRows);
   if (cursor.isDictionary) {
-    appendStringDictionary(col, dense, rows);
+    appendStringDictionary(col, dense, rows, cursor);
   } else {
-    appendStringFlat(col, dense, rows);
+    appendStringFlat(col, dense, rows, cursor);
   }
   rows.finish();
 }
@@ -1392,8 +1352,8 @@ void CellPayloadDecoder::appendString(
 [[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringFlat(
     uint32_t col,
     uint32_t dense,
-    StringRows& rows) {
-  auto& cursor = std::get<StringCursor>(cursors_[col]);
+    StringRows& rows,
+    StringCursor& cursor) {
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
   static_assert(kLengthsPerBlock == 8);
   using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
@@ -1493,8 +1453,8 @@ void CellPayloadDecoder::appendString(
 [[gnu::flatten]] FOLLY_NOINLINE void CellPayloadDecoder::appendStringDictionary(
     uint32_t col,
     uint32_t dense,
-    StringRows& rows) {
-  auto& cursor = std::get<StringCursor>(cursors_[col]);
+    StringRows& rows,
+    StringCursor& cursor) {
   constexpr uint32_t kLengthsPerBlock = kCacheLineBytes / sizeof(int64_t);
   static_assert(kLengthsPerBlock == 8);
   using FullBlock = std::integral_constant<uint32_t, kLengthsPerBlock>;
@@ -1562,7 +1522,7 @@ void CellPayloadDecoder::appendString(
     hits -= count;
   }
   if (remaining > 0) {
-    appendStringFlat(col, remaining, rows);
+    appendStringFlat(col, remaining, rows, cursor);
   }
 }
 
