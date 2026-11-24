@@ -202,6 +202,28 @@ TEST_F(ByteStreamTest, newRangeAllocation) {
   }
 }
 
+TEST_F(ByteStreamTest, appendStringViewEmptyAndNullData) {
+  auto arena = newArena();
+  ByteOutputStream stream(arena.get());
+  stream.startWrite(0);
+
+  // A legal empty string_view may have a null data pointer. It must be
+  // accepted as a no-op and must not dereference the pointer.
+  EXPECT_NO_THROW(stream.appendStringView(std::string_view(nullptr, 0)));
+  EXPECT_EQ(0, stream.size());
+
+  // A default-constructed StringView is empty, so appending it must be a no-op
+  // as well.
+  EXPECT_NO_THROW(stream.appendStringView(StringView()));
+  EXPECT_EQ(0, stream.size());
+
+  // A null data pointer with non-zero length is an invalid invariant: it must
+  // fail with a clear runtime error instead of dereferencing null.
+  BOLT_ASSERT_RUNTIME_THROW(
+      stream.appendStringView(std::string_view(nullptr, 64)),
+      "null data pointer with non-zero length 64");
+}
+
 TEST_F(ByteStreamTest, randomRangeAllocationFromMultiStreamsTest) {
   auto arena = newArena();
   const int numByteStreams = 10;

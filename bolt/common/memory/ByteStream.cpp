@@ -261,6 +261,16 @@ void ByteOutputStream::appendStringView(StringView value) {
 
 void ByteOutputStream::appendStringView(std::string_view value) {
   const int32_t bytes = value.size();
+  if (bytes == 0) {
+    // An empty view is a legal input and may carry a null data pointer
+    // (std::string_view allows data() == nullptr when size() == 0). There is
+    // nothing to copy.
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(
+      value.data(),
+      "appendStringView: null data pointer with non-zero length {}",
+      bytes);
   int32_t offset = 0;
   for (;;) {
     const int32_t bytesFit =
