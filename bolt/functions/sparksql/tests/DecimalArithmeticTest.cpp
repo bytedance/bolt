@@ -554,6 +554,27 @@ TEST_F(DecimalArithmeticTest, decimalDivTest) {
       "c0 / 0.01",
       {makeConstant<int128_t>(
           DecimalUtil::kLongDecimalMax, 1, DECIMAL(38, 0))});
+
+  // Large aRescale (> 38) division where scaled dividend fits in int256_t.
+  testDecimalExpr<TypeKind::HUGEINT>(
+      makeFlatVector<int128_t>({2000000, -2000000, 0}, DECIMAL(38, 6)),
+      "c0 / c1",
+      {makeFlatVector<int64_t>({1, -1, 0}, DECIMAL(2, 0)),
+       makeFlatVector<int128_t>(
+           std::vector<int128_t>(3, 5 * DecimalUtil::kPowersOfTen[35]),
+           DECIMAL(36, 36))});
+
+  // Fast-path division where 2 * remainder exceeds signed INT128_MAX.
+  testDecimalExpr<TypeKind::HUGEINT>(
+      makeFlatVector<int128_t>({1, -1}, DECIMAL(38, 6)),
+      "c0 / c1",
+      {makeFlatVector<int128_t>(
+           {9 * DecimalUtil::kPowersOfTen[31],
+            -9 * DecimalUtil::kPowersOfTen[31]},
+           DECIMAL(38, 38)),
+       makeFlatVector<int128_t>(
+           std::vector<int128_t>(2, DecimalUtil::kLongDecimalMax),
+           DECIMAL(38, 38))});
 }
 
 TEST_F(DecimalArithmeticTest, denyPrecisionLoss) {

@@ -55,6 +55,50 @@ TEST_F(DecimalUtilTest, divideWithRoundUp) {
   testDivideWithRoundUp<int64_t, int64_t, int64_t>(60, 30, 3, 2000, false);
   testDivideWithRoundUp<int64_t, int64_t, int64_t>(
       6, bolt::DecimalUtil::kPowersOfTen[17], 20, 6000, false);
+
+  // Fast-path rounding when remainder * 2 overflows signed int128_t.
+  testDivideWithRoundUp<int128_t, int128_t, int128_t>(
+      9 * bolt::DecimalUtil::kPowersOfTen[31],
+      bolt::DecimalUtil::kLongDecimalMax,
+      6,
+      1,
+      false);
+  testDivideWithRoundUp<int128_t, int128_t, int128_t>(
+      -9 * bolt::DecimalUtil::kPowersOfTen[31],
+      bolt::DecimalUtil::kLongDecimalMax,
+      6,
+      -1,
+      false);
+
+  // Rescaling by more than 38 decimal digits (aRescale = 42 and 75/76).
+  testDivideWithRoundUp<int128_t, int64_t, int128_t>(
+      1, 5 * bolt::DecimalUtil::kPowersOfTen[35], 42, 2000000, false);
+  testDivideWithRoundUp<int128_t, int64_t, int128_t>(
+      -1, 5 * bolt::DecimalUtil::kPowersOfTen[35], 42, -2000000, false);
+  testDivideWithRoundUp<int128_t, int64_t, int128_t>(
+      0, 5 * bolt::DecimalUtil::kPowersOfTen[35], 42, 0, false);
+  testDivideWithRoundUp<int128_t, int128_t, int128_t>(
+      1,
+      bolt::DecimalUtil::kLongDecimalMax,
+      75,
+      bolt::DecimalUtil::kPowersOfTen[37],
+      false);
+  testDivideWithRoundUp<int128_t, int128_t, int128_t>(
+      -1,
+      bolt::DecimalUtil::kLongDecimalMax,
+      75,
+      -bolt::DecimalUtil::kPowersOfTen[37],
+      false);
+  testDivideWithRoundUp<int128_t, int128_t, int128_t>(
+      0, bolt::DecimalUtil::kLongDecimalMax, 76, 0, false);
+
+  int128_t overflowResult = 0;
+  bool overflow = false;
+  auto overflowRet =
+      DecimalUtil::divideWithRoundUp<int128_t, int128_t, int128_t>(
+          overflowResult, 10, 1, 76, overflow);
+  EXPECT_TRUE(overflow);
+  EXPECT_EQ(overflowRet, -1);
 }
 
 TEST_F(DecimalUtilTest, minLeadingZeros) {

@@ -214,6 +214,10 @@ class DecimalRoundFunction : public exec::VectorFunction {
           a, aPrecision, aScale, rPrecision, rScale, r);
       BOLT_DCHECK(status.ok());
     } else {
+      if (a == 0) {
+        r = 0;
+        return;
+      }
       auto reScaleFactor = DecimalUtil::getPowersOfTen(aScale - scale);
       DecimalUtil::divideWithRoundUp<R, A, int128_t>(
           r, a, reScaleFactor, false, 0, 0);

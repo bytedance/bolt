@@ -173,6 +173,10 @@ class DecimalUtil {
       overflow = true;
       return R(-1);
     }
+    if (a == 0) {
+      r = 0;
+      return R(0);
+    }
     int resultSign = 1;
     R unsignedDividendRescaled(a);
     int aSign = 1;
@@ -198,7 +202,7 @@ class DecimalUtil {
       BOLT_DCHECK(!overflow);
       R quotient = unsignedDividendRescaled / unsignedDivisor;
       R remainder = unsignedDividendRescaled % unsignedDivisor;
-      if (remainder * 2 >= unsignedDivisor) {
+      if (remainder >= unsignedDivisor - remainder) {
         ++quotient;
       }
       r = quotient * resultSign;
@@ -209,11 +213,18 @@ class DecimalUtil {
         return R(-1);
       }
       int256_t aLarge = a;
-      int256_t aLargeScaledUp =
-          aLarge * bolt::DecimalUtil::getPowersOfTen(aRescale);
+      uint8_t remainingRescale = aRescale;
+      while (remainingRescale > LongDecimalType::kMaxPrecision) {
+        aLarge *=
+            bolt::DecimalUtil::getPowersOfTen(LongDecimalType::kMaxPrecision);
+        remainingRescale -= LongDecimalType::kMaxPrecision;
+      }
+      if (remainingRescale > 0) {
+        aLarge *= bolt::DecimalUtil::getPowersOfTen(remainingRescale);
+      }
       int256_t bLarge = b;
-      int256_t resultLarge = aLargeScaledUp / bLarge;
-      int256_t remainderLarge = aLargeScaledUp % bLarge;
+      int256_t resultLarge = aLarge / bLarge;
+      int256_t remainderLarge = aLarge % bLarge;
       /// Since we are scaling up and then, scaling down, round-up the result
       /// (+1 for +ve, -1 for -ve), if the remainder is >= 2 * divisor.
       if (abs(2 * remainderLarge) >= abs(bLarge)) {
