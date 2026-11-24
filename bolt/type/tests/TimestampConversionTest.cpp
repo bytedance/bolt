@@ -35,6 +35,7 @@
 #include <date/tz.h>
 #include <gmock/gmock.h>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,6 +46,50 @@
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::util {
 namespace {
+
+TEST(DateTimeUtilTest, dateToString) {
+  const DateToStringOptions proleptic = {
+      .leadingPositiveSign = true,
+      .zeroPaddingYear = true,
+  };
+  const DateToStringOptions yearOfEra = {
+      .zeroPaddingYear = true,
+      .yearOfEra = true,
+  };
+  struct TestCase {
+    int32_t day;
+    const char* original;
+    const char* proleptic;
+    const char* yearOfEra;
+  };
+  const std::vector<TestCase> cases = {
+      {0, "1970-01-01", "1970-01-01", "1970-01-01"},
+      {-719162, "1-01-01", "0001-01-01", "0001-01-01"},
+      {-719528, "-01-01", "0000-01-01", "0001-01-01"},
+      {-719893, "-1-01-01", "-0001-01-01", "0002-01-01"},
+      {2932897, "10000-01-01", "+10000-01-01", "10000-01-01"},
+      // Proleptic boundary strings agree with Java LocalDate.ofEpochDay.
+      {std::numeric_limits<int32_t>::min(),
+       "-5877641-06-23",
+       "-5877641-06-23",
+       "5877642-06-23"},
+      {std::numeric_limits<int32_t>::max(),
+       "5881580-07-11",
+       "+5881580-07-11",
+       "5881580-07-11"},
+  };
+  for (const auto& sample : cases) {
+    SCOPED_TRACE(sample.day);
+    EXPECT_EQ(dateToString(sample.day, DateToStringOptions{}), sample.original);
+    EXPECT_EQ(dateToString(sample.day, proleptic), sample.proleptic);
+    EXPECT_EQ(dateToString(sample.day, yearOfEra), sample.yearOfEra);
+  }
+  // Each presentation option can also be used independently.
+  EXPECT_EQ(dateToString(-719893, {.yearOfEra = true}), "2-01-01");
+  EXPECT_EQ(dateToString(-719893, {.zeroPaddingYear = true}), "-0001-01-01");
+  EXPECT_EQ(
+      dateToString(2932897, {.leadingPositiveSign = true}), "+10000-01-01");
+}
 
 TEST(DateTimeUtilTest, fromDate) {
   EXPECT_EQ(0, daysSinceEpochFromDate(1970, 1, 1));

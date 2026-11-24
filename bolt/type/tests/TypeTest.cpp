@@ -319,6 +319,15 @@ TEST(TypeTest, dateToString) {
   // However, they are consistent with presto java so keeping the same
   // implementation.
   EXPECT_EQ(DATE()->toString(-1855961014), "-5079479-05-03");
+
+  EXPECT_EQ(DATE()->toString(-719162), "1-01-01");
+  EXPECT_EQ(DATE()->toString(-719528), "-01-01");
+  EXPECT_EQ(DATE()->toString(-719893), "-1-01-01");
+  EXPECT_EQ(DATE()->toString(2932897), "10000-01-01");
+  EXPECT_EQ(
+      DATE()->toString(std::numeric_limits<int32_t>::min()), "-5877641-06-23");
+  EXPECT_EQ(
+      DATE()->toString(std::numeric_limits<int32_t>::max()), "5881580-07-11");
 }
 
 TEST(TypeTest, parseStringToDate) {

@@ -32,6 +32,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include "bolt/type/Timestamp.h"
 namespace bytedance::bolt::util {
 
@@ -75,6 +76,23 @@ int32_t getMaxDayOfMonth(int32_t year, int32_t month);
 int64_t lastDayOfMonthSinceEpochFromDate(const std::tm& dateTime);
 
 /// Date conversions.
+
+/// Controls year presentation when formatting a DATE value as a string.
+struct DateToStringOptions {
+  /// Add '+' to positive years greater than 9999.
+  bool leadingPositiveSign = false;
+
+  /// Pad the year magnitude to at least four digits.
+  bool zeroPaddingYear = false;
+
+  /// Display proleptic years <= 0 as 1 - year (year of era).
+  /// This changes year presentation only, without calendar rebasing.
+  bool yearOfEra = false;
+};
+
+/// Formats days since the Unix epoch as a date string with the specified year
+/// presentation. Options do not change the calendar or apply a time zone.
+std::string dateToString(int32_t days, const DateToStringOptions& options);
 
 /// Returns the number of days before the first day of the month this year
 int64_t daysBeforeMonthFirstDay(int32_t year, int32_t month);

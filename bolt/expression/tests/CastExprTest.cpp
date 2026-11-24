@@ -1095,6 +1095,23 @@ TEST_F(CastExprTest, date) {
   testCast<std::string, int32_t>("date", input, expected, VARCHAR(), DATE());
 }
 
+TEST_F(CastExprTest, dateYearFormatPrestoUnchanged) {
+  if constexpr (kSparkCompatible) {
+    GTEST_SKIP() << "Verify the unchanged non-Spark DATE formatting path";
+  }
+  testCast<int32_t, std::string>(
+      "varchar",
+      {-719893, -719528, -719162, -527382, 2932897, std::nullopt},
+      {"-1-01-01",
+       "-01-01",
+       "1-01-01",
+       "526-01-29",
+       "10000-01-01",
+       std::nullopt},
+      DATE(),
+      VARCHAR());
+}
+
 TEST_F(CastExprTest, invalidDate) {
   testUnsupportedCast<int8_t>(
       "date", {12}, "Cast from TINYINT to DATE is not supported", TINYINT());
