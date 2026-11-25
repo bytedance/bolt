@@ -144,7 +144,7 @@ struct CellShuffleOptions {
   // Seal a partition's payload at a batch boundary once it exceeds this
   // size; other partitions stay open.
   int64_t partitionSealBytes = 40LL << 20;
-  // Seal the window once the moved null cells exceed this. A reclaim
+  // Seal the window once the flushed null cells exceed this. A reclaim
   // requests a seal above a quarter of it.
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
@@ -176,7 +176,10 @@ struct CellShuffleOptions {
   // into one binary column: a fallback for wide nested schemas at high
   // partition counts, whose per-stream
   // state the adapter's single column avoids. The reader must be set alike
-  // (ShuffleReaderOptions::cellNativeNestedTypes).
+  // (ShuffleReaderOptions::cellNativeNestedTypes). Note that the adapter uses
+  // CompactRow, which encodes nested TIMESTAMP values at microsecond precision
+  // and rejects timestamps outside the int64 microsecond range; native nested
+  // layouts preserve full nanosecond precision.
   bool nativeNestedTypes = true;
 
   /// Returns all options in a human readable form.

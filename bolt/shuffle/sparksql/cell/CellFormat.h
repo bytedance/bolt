@@ -236,7 +236,7 @@ enum class StreamKind : uint8_t {
 
 /// One physical stream of the layout.
 struct CellStream {
-  uint16_t column; // logical column (rowType child), not wire column
+  uint16_t column; // wire column index (CellLayout::rowType() child)
   StreamKind kind;
 };
 

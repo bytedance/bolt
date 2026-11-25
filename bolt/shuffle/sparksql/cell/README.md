@@ -55,9 +55,10 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | `cellSpillBytesPerStream` | `512 KiB` | Local only: per-(partition, stream) cell-data budget for batch-boundary spills, subject to `cellSpillMinBytes`. See [Cell threshold](#cell-threshold-local). |
 | `cellSpillMinBytes` | `64 MiB` | Local only: the least threshold `cellSpillBytesPerStream` sets, so that a shuffle of a few partitions does not spill its cells in runs of a few MiB. A negative value is an error. |
 | `partitionSealBytes` | `40 MiB` | At a batch boundary, seal the payload of any partition whose bytes since it opened exceed this; other partitions stay open. |
-| `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the moved null cells exceed this. A reclaim requests a seal above a quarter of it. |
+| `nullMemLimitBytes` | `16 MiB` | Seal the whole window once the flushed null cells exceed this. A reclaim requests a seal above a quarter of it. |
 | `enableStringDictionary` | `true` | Probe the first batch to enable dictionary form per string column. |
 | `stringDictionaryProbeRowCount` | `64` | Minimum first-batch row count for the dictionary probe. `0` enables every eligible string column without probing, including all-null columns; runtime fallback still applies. Ignored when `enableStringDictionary` is off. |
+| `enableNonTemporalStores` | `false` | Enable explicit non-temporal stores on supported aligned paths (AVX2); paths without non-temporal writes retain ordinary stores. |
 | `streamCompression` | `true` | Compress runs through the codec's stream form, from the cells through fixed buffers. Off, each frame is gathered into a spill-pool workspace and compressed at once. Codecs without a stream form are always one-shot. |
 | `adaptiveCompression` | `true` | After a frame that did not shrink, store the next frames of its kind without a codec call and retry one in ten. |
 | `nativeNestedTypes` | `true` | Shred ARRAY, MAP and ROW columns into a nested layout. Off, the type adapter packs them into one binary column. |
@@ -307,7 +308,7 @@ is met:
 7. Only then, spill every partition (a full run).
 
 It then releases the pool reservation and requests a window seal if the
-moved null cells exceed a quarter of `nullMemLimitBytes`. On Celeborn, a
+flushed null cells exceed a quarter of `nullMemLimitBytes`. On Celeborn, a
 reclaim pushes the whole window instead of steps 2 to 7. All of this is
 counted in the `CellShuffleWriter pressure` log line.
 
@@ -332,7 +333,7 @@ All-null columns also append no value bytes. Only mixed columns allocate
 null cells; long runs are encoded compactly.
 
 Mixed-column null storage has its own allocator. `nullMemLimitBytes`
-triggers a window seal to release moved null cells, independently of data
+triggers a window seal to release flushed null cells, independently of data
 spills.
 
 ### Compression workspaces
@@ -463,7 +464,10 @@ them. Which path is used:
 | complex, more than 65535 shredded columns | adapter | adapter |
 
 Writer and reader decide alike from the same logical type, which is why
-`nativeNestedTypes` and `cellNativeNestedTypes` must match.
+`nativeNestedTypes` and `cellNativeNestedTypes` must match. Note that the
+adapter path packs complex columns with `CompactRow`, which encodes nested
+`TIMESTAMP` values at microsecond precision and rejects values outside the
+64-bit microsecond range; native nested layouts preserve nanosecond precision.
 
 ## 7. Limits and failure modes
 

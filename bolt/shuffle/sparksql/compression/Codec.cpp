@@ -52,15 +52,21 @@ CodecType fromArrowCodecType(arrow::Compression::type type) {
 std::string CodecOptions::toString() const {
   if (isDefaultCompressionLevel(compressionLevel)) {
     return fmt::format(
-        "CodecOptions{{backend={}, level=default, checksum={}}}",
+        "CodecOptions{{backend={}, level=default, checksum={}, "
+        "useIndependentBlocks={}, blockSize={}}}",
         getCodecBackendName(backend),
-        checksumEnabled);
+        checksumEnabled,
+        useIndependentBlocks,
+        blockSize);
   }
   return fmt::format(
-      "CodecOptions{{backend={}, level={}, checksum={}}}",
+      "CodecOptions{{backend={}, level={}, checksum={}, "
+      "useIndependentBlocks={}, blockSize={}}}",
       getCodecBackendName(backend),
       compressionLevel,
-      checksumEnabled);
+      checksumEnabled,
+      useIndependentBlocks,
+      blockSize);
 }
 
 class UncompressionCodec : public Codec {

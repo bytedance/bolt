@@ -418,7 +418,9 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
               << "positions: maxWindowRows=" << splitter_->maxWindowRows()
               << ", batchRows=" << numRows;
     sealWindow(SealReason::kPositionLimit);
-    BOLT_CHECK(nestedSplitter_->fitsWindow());
+    BOLT_CHECK(
+        nestedSplitter_->fitsWindow(),
+        "nested batch does not fit an empty Cell shuffle window");
   }
 
   {

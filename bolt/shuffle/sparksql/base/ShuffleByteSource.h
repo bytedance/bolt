@@ -43,8 +43,10 @@ class ShuffleDecompressor {
  public:
   virtual ~ShuffleDecompressor() = default;
 
-  /// Decompresses `in` into exactly out.size() bytes at `out`; false when
-  /// the input cannot be decoded or produces a different length.
+  /// Decompresses `in` into exactly out.size() bytes at `out`. Returns false
+  /// when decompression produces a different length (or a non-throwing
+  /// implementation fails to decode); codec-backed implementations may also
+  /// throw BoltRuntimeError on corrupt frames or checksum mismatches.
   virtual bool decompress(
       std::span<const uint8_t> in,
       std::span<uint8_t> out) = 0;

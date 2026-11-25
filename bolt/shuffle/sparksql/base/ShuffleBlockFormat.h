@@ -67,7 +67,9 @@ inline constexpr std::string_view shuffleBlockKindName(ShuffleBlockKind kind) {
 
 /// A run's or block's compression layout: all streams/body compressed as one
 /// buffer, each stream compressed on its own, or all bytes stored uncompressed.
-/// A writer falls back to the stored form when compression does not pay.
+/// A writer falls back to the stored form when compression does not pay, except
+/// streaming compression of a large frame that has already flushed compressed
+/// output to its sink (the reader accepts compressed frames of any size).
 enum class RunLayout : uint8_t {
   kCombined = 0x00,
   kSeparate = 0x01,

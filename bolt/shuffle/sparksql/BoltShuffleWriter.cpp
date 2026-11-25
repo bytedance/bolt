@@ -407,7 +407,7 @@ std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::createForType(
       // A reader configured for Cell cannot read V1 bytes, so a silent V1
       // downgrade here would fail only later and far away.
       BOLT_FAIL(
-          "forceShuffleWriterType=Cell requires "
+          "Cell shuffle writer requires "
           "BoltShuffleWriter::createShuffleWriter()");
     default:
       BOLT_CHECK(

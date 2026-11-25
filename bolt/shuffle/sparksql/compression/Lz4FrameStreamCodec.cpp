@@ -152,7 +152,7 @@ StreamCompressResult Lz4FrameStreamCompressor::compress(
   size_t bound = LZ4F_compressBound(static_cast<size_t>(inputLen), &prefs_);
   BOLT_CHECK(
       bound <= dstCapacity,
-      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
+      "Bolt shuffle codec: LZ4F_compressUpdate failed, output too small for compression.");
 
   size_t ret = LZ4F_compressUpdate(
       cctx_,
@@ -186,7 +186,7 @@ StreamFlushResult Lz4FrameStreamCompressor::flush(
   size_t bound = LZ4F_compressBound(0, &prefs_);
   BOLT_CHECK(
       bound <= dstCapacity,
-      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
+      "Bolt shuffle codec: LZ4F_flush failed, output too small for flush.");
 
   size_t ret = LZ4F_flush(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CHECK(!LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_flush failed.");
@@ -213,7 +213,7 @@ StreamEndResult Lz4FrameStreamCompressor::end(
   size_t bound = LZ4F_compressBound(0, &prefs_);
   BOLT_CODEC_CHECK(
       bound <= dstCapacity,
-      "LZ4F_compressBegin failed, output too small for compression.");
+      "LZ4F_compressEnd failed, output too small for end.");
 
   size_t ret = LZ4F_compressEnd(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_compressEnd failed.");

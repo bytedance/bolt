@@ -528,7 +528,7 @@ void clearBitRange(uint8_t* bytes, uint64_t begin, uint64_t end) {
   bytes[last] &= static_cast<uint8_t>(~lastMask);
 }
 
-/// Chunks of the moved null cells: 2048 cells each.
+/// Chunks of the flushed null cells: 2048 cells each.
 constexpr uint32_t kNullChunkBytes = 64 << 10;
 
 } // namespace

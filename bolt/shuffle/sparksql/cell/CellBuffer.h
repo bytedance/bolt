@@ -202,14 +202,21 @@ class ChunkAllocator {
 ///
 /// A chain's cells are all full except the last. Chain order is append
 /// order, which is the byte order of the stream. Each chain keeps its tail's
-/// write position as a pointer: a linked cell's chunk is never freed or
-/// moved, so the hot appends reach the cell without the cell id arithmetic.
+/// write position as a pointer: chunks are never relocated in place, and
+/// compact() updates info.tail whenever it moves a linked cell out of a chunk
+/// being emptied before shrink() frees that chunk. Hot appends never allocate
+/// and slow paths re-read info after any allocation or reclaim, so hot appends
+/// reach the cell without cell id arithmetic.
 ///
-/// NT writes and all reads, moves, and cell recycling stay on the owning
-/// thread over ordinary WB memory, so they need no local fence. Chunk release
-/// goes through MemoryPoolImpl::freeContiguous(), whose atomic free counter
-/// supplies LOCK ordering on x86 before the allocator can reuse the pages.
-/// Revisit this dependency if the pool's release path or ownership changes.
+/// Normal writes run on the owning thread over ordinary WB memory. Memory
+/// arbitration reclaims (drain, compact, and chunk release) may execute on
+/// another thread while the owning driver thread is paused. Cross-thread
+/// visibility of non-temporal stores (enableNonTemporalStores, off by default)
+/// currently relies on the owning thread's LOCK-prefixed mutex synchronization
+/// when entering task pause (Task::mutex_) and MemoryPoolImpl::freeContiguous()
+/// updating its atomic free counter on x86 before pages can be reused. Revisit
+/// this dependency (or emit writer-side memory::nonTemporalStoreFence()) if
+/// pause/reclaim synchronization or ownership changes.
 class DataCells {
  public:
   DataCells(
@@ -417,9 +424,9 @@ enum class NullClass : uint8_t {
   kAllNull = 2, // every row null: one counted run per partition
 };
 
-/// The null state of every partition's open payload, per non-UNKNOWN wire
-/// column and partition, in the null body's bit order: bit 1 = non-null,
-/// bit 0 = null. All null information lives here.
+/// The null state of every partition's open payload, per wire column and
+/// partition, in the null body's bit order: bit 1 = non-null, bit 0 = null.
+/// All null information lives here.
 ///
 /// A column first has a state of its own, kept for the whole window: while
 /// every row so far is non-null, or every row so far null, the state says
@@ -435,11 +442,11 @@ enum class NullClass : uint8_t {
 /// or the bitmap as it passes them, and the rows after the last recorded
 /// null are non-null. The cell in the column's array is the partition's
 /// current one, whose head is the rows recorded: recording a null touches
-/// that cell alone. Once full it moves to a cell of a chunk allocator,
-/// whose head links the cell moved before it, and the partition's progress
-/// - the last cell moved, the nulls and the count of the cells moved - is
+/// that cell alone. Once full it flushes to a cell of a chunk allocator,
+/// whose head links the cell flushed before it, and the partition's progress
+/// - the last cell flushed, the nulls and the count of flushed cells - is
 /// updated then only. A partition's rows are the chain read from its last
-/// moved cell back, then the current cell. A released partition's cells go
+/// flushed cell back, then the current cell. A released partition's cells go
 /// back to the allocator for reuse, and everything returns to the pool when
 /// the window closes.
 class NullCells {
