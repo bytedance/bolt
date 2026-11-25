@@ -47,6 +47,7 @@ TEST_F(QueryConfigTest, emptyConfig) {
   const QueryConfig& config = queryCtx->queryConfig();
 
   ASSERT_FALSE(config.isLegacyCast());
+  ASSERT_TRUE(config.orderByRadixSortEnabled());
 }
 
 TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
