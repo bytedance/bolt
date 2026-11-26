@@ -223,7 +223,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   uint64_t convertWallNs_{0};
   uint64_t splitWallNs_{0};
   uint64_t convertSpillNs_{0};
-  uint64_t shredSpillNs_{0};
+  uint64_t flattenSpillNs_{0};
   uint64_t splitSpillNs_{0};
   uint64_t otherSpillNs_{0};
   uint64_t* activeSpillNs_{&otherSpillNs_};

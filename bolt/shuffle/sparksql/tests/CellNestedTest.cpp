@@ -2035,6 +2035,38 @@ TEST_F(CellNestedTest, nestedShuffleMetrics) {
   }
 }
 
+TEST_F(CellNestedTest, smallArraysUseOnlySmallElementScratch) {
+  const auto empty = makeArrayVector<int32_t>({{}});
+  const auto contiguous = makeArrayVector<int32_t>({{10}, {20, 30}});
+  const auto reordered = makeArrayVector<int32_t>({{10}, {20, 30}});
+  reordered->setOffsetAndSize(0, 1, 2);
+  reordered->setOffsetAndSize(1, 0, 1);
+  const auto input = test::roundRobin(
+      {makeRowVector({empty}),
+       makeRowVector({contiguous}),
+       makeRowVector({reordered})},
+      1);
+  const auto options = writerOptions(1);
+  CellShuffleWriter writer(
+      options, writerPool_.get(), arrow::default_memory_pool());
+  std::vector<int64_t> scratchBytes;
+  const auto written =
+      test::writeShuffle(writer, options, input, pool(), nullptr, [&](size_t) {
+        // All batches fit in the split caches, so reclaim returns only scratch.
+        int64_t freed = 0;
+        ASSERT_TRUE(writer.reclaimFixedSize(1, &freed).ok());
+        scratchBytes.push_back(freed);
+      });
+  ASSERT_EQ(scratchBytes.size(), 3);
+  EXPECT_EQ(scratchBytes[0], 0);
+  EXPECT_GT(scratchBytes[1], 0);
+  // Only the reordered ranges need an additional source index buffer.
+  EXPECT_GT(scratchBytes[2], scratchBytes[1]);
+  EXPECT_LT(scratchBytes[2], 4 << 10);
+  test::expectReadsBack(
+      input, written, arrow::Compression::UNCOMPRESSED, pool());
+}
+
 TEST_F(CellNestedTest, writerReturnsScratchAfterEachBatch) {
   // Structs below a container have an entry per element, far more than a
   // batch has rows. After a batch of 2^22 such structs the writer holds

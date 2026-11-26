@@ -37,6 +37,19 @@ namespace {
 /// gives the reader batch-sized pieces.
 constexpr uint64_t kCompositeBlockBytes = 4 << 20;
 
+/// The partition count of `options`, checked before any per-partition state
+/// is sized from it.
+int32_t checkedNumPartitions(const ShuffleWriterOptions& options) {
+  const int32_t numPartitions = options.partitionWriterOptions.numPartitions;
+  BOLT_USER_CHECK_GT(
+      numPartitions, 0, "Shuffle writer needs at least one partition");
+  if (options.partitioning == Partitioning::kSingle) {
+    BOLT_USER_CHECK_EQ(
+        numPartitions, 1, "Single partitioning takes exactly one partition");
+  }
+  return numPartitions;
+}
+
 } // namespace
 
 class CompositeShuffleWriter::CompositeRowWriter {
@@ -231,7 +244,7 @@ CompositeShuffleWriter::CompositeShuffleWriter(
     memory::MemoryPool* boltPool,
     arrow::MemoryPool* arrowPool)
     : ShuffleWriter(
-          options.partitionWriterOptions.numPartitions,
+          checkedNumPartitions(options),
           /*partitionWriter=*/nullptr, // output goes through output()
           options, // copied: the count above is read from it
           arrowPool),

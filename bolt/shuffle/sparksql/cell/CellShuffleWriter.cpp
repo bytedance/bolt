@@ -570,8 +570,8 @@ CellShuffleWriter::SealSpillTimer::SealSpillTimer(CellShuffleWriter& writer)
   if (writer_ != nullptr) {
     writer_->timingSealSpill_ = true;
     uint64_t* target = writer_->nestedSplitter_ != nullptr &&
-            writer_->nestedSplitter_->isShredding()
-        ? &writer_->shredSpillNs_
+            writer_->nestedSplitter_->isSplitting()
+        ? &writer_->flattenSpillNs_
         : writer_->activeSpillNs_;
     timer_.emplace(target);
   }
@@ -873,17 +873,18 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   const uint64_t totalSpillNs =
-      convertSpillNs_ + shredSpillNs_ + splitSpillNs_ + otherSpillNs_;
+      convertSpillNs_ + flattenSpillNs_ + splitSpillNs_ + otherSpillNs_;
   const uint64_t convertNs =
       convertWallNs_ > convertSpillNs_ ? convertWallNs_ - convertSpillNs_ : 0;
-  const uint64_t shredWallNs =
-      nestedSplitter_ != nullptr ? nestedSplitter_->shredWallNs() : 0;
-  const uint64_t wireWallNs =
-      nestedSplitter_ != nullptr ? nestedSplitter_->wireWallNs() : 0;
-  const uint64_t flattenExcludedNs = wireWallNs + shredSpillNs_;
-  const uint64_t flattenNs =
-      shredWallNs > flattenExcludedNs ? shredWallNs - flattenExcludedNs : 0;
-  const uint64_t splitExcludedNs = flattenNs + shredSpillNs_ + splitSpillNs_;
+  const uint64_t nestedSplitWallNs =
+      nestedSplitter_ != nullptr ? nestedSplitter_->splitWallNs() : 0;
+  const uint64_t columnSplitWallNs =
+      nestedSplitter_ != nullptr ? nestedSplitter_->columnSplitWallNs() : 0;
+  const uint64_t flattenExcludedNs = columnSplitWallNs + flattenSpillNs_;
+  const uint64_t flattenNs = nestedSplitWallNs > flattenExcludedNs
+      ? nestedSplitWallNs - flattenExcludedNs
+      : 0;
+  const uint64_t splitExcludedNs = flattenNs + flattenSpillNs_ + splitSpillNs_;
   const uint64_t splitNs =
       splitWallNs_ > splitExcludedNs ? splitWallNs_ - splitExcludedNs : 0;
   metrics_.convertTime += static_cast<int64_t>(convertNs);
@@ -920,7 +921,7 @@ void CellShuffleWriter::logPressure() const {
         mb(spillFile_->directBytes()));
   }
   const uint64_t totalSealSpillNs =
-      convertSpillNs_ + shredSpillNs_ + splitSpillNs_ + otherSpillNs_;
+      convertSpillNs_ + flattenSpillNs_ + splitSpillNs_ + otherSpillNs_;
   LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
             << fmt::format(
                    ", nullClassify={:.1f}ms, sealSpill={:.1f}ms",

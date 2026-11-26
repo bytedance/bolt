@@ -30,7 +30,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// share the parent's positions and inherit its nulls.
 class CellNestedSplitter {
  public:
-  /// Elements one split of a container column group covers at most.
+  /// Maximum elements per block when splitting an ARRAY or MAP.
   static constexpr uint32_t kElementBatchPositions = 64 << 10;
 
   /// `layout`, `splitter` and `pool` must outlive this nested splitter.
@@ -78,20 +78,19 @@ class CellNestedSplitter {
 
   /// Total wall time spent in prepare() and split(), including the ordinary
   /// splitter and any nested reclaims.
-  uint64_t shredWallNs() const {
-    return shredWallNs_;
+  uint64_t splitWallNs() const {
+    return splitWallNs_;
   }
 
-  /// Total wall time spent in the ordinary splitter (the splitter portion of
-  /// shredWallNs()).
-  uint64_t wireWallNs() const {
-    return wireWallNs_;
+  /// Time spent in CellSplitter::split() writing the physical columns.
+  uint64_t columnSplitWallNs() const {
+    return columnSplitWallNs_;
   }
 
-  /// True while inside prepare() or split(), excluding ordinary column writes.
-  /// Used so nested reclaims attribute their spill time to the shredding phase.
-  bool isShredding() const {
-    return busy_ && !inWireColumns_;
+  /// True during nested preparation or expansion, excluding ordinary column
+  /// writes, so spills can be attributed to the active phase.
+  bool isSplitting() const {
+    return inPrepareOrSplit_ && !inColumnSplit_;
   }
 
   /// Gives back the scratch kept across batches and returns the bytes the
@@ -119,19 +118,19 @@ class CellNestedSplitter {
   };
 
   /// Selects input positions in output order and assigns each one a partition.
-  /// A null index buffer represents consecutive positions starting at first.
+  /// Consecutive positions use only firstSourceIndex.
   struct ElementSelection {
     std::span<const uint32_t> partitionIds;
-    vector_size_t first{0};
+    vector_size_t firstSourceIndex{0};
     BufferPtr sourceIndices{nullptr};
 
     vector_size_t sourcePosition(uint32_t k) const {
       return sourceIndices ? sourceIndices->as<vector_size_t>()[k]
-                           : first + static_cast<vector_size_t>(k);
+                           : firstSourceIndex + static_cast<vector_size_t>(k);
     }
   };
 
-  /// Child writes borrow a separate pair of buffers at the next depth.
+  /// Parent and child selections use separate buffers while recursing.
   struct ElementBuffers {
     BufferPtr partitionIds;
     BufferPtr sourceIndices;
@@ -139,18 +138,24 @@ class CellNestedSplitter {
 
   /// Builds one selection at a time in the current depth's buffers.
   struct ElementBlock {
-    explicit ElementBlock(ElementBuffers& buffers);
+    ElementBlock(
+        std::span<uint32_t> partitionIds,
+        BufferPtr& sourceIndexBuffer,
+        memory::MemoryPool& pool)
+        : partitionIds_(partitionIds),
+          sourceIndexBuffer_(sourceIndexBuffer),
+          pool_(pool) {}
     void appendRange(vector_size_t offset, uint32_t count, uint32_t pid);
     ElementSelection takeSelection();
 
     uint32_t size{0};
 
    private:
-    uint32_t* const partitionIds_;
-    vector_size_t* const indices_;
-    const BufferPtr& indexBuffer_;
-    bool contiguous_{true};
-    vector_size_t first_{0};
+    std::span<uint32_t> partitionIds_;
+    BufferPtr& sourceIndexBuffer_;
+    memory::MemoryPool& pool_;
+    vector_size_t* sourceIndices_{nullptr};
+    vector_size_t firstSourceIndex_{0};
   };
 
   /// Re-reads the seals: a sealed partition's counts restart at zero.
@@ -182,7 +187,7 @@ class CellNestedSplitter {
       const ContainerExpansion& expansion,
       const ElementSelection& parents);
 
-  BOLT_CELL_KERNEL void writeElementBlock(
+  BOLT_CELL_KERNEL void splitElementBlock(
       uint32_t groupId,
       const ElementSelection& elements);
 
@@ -191,7 +196,7 @@ class CellNestedSplitter {
       uint32_t col,
       const ElementSelection& elements);
 
-  void writeGroupColumns(
+  void splitGroupColumns(
       uint32_t groupId,
       std::span<const uint32_t> partitionIds,
       std::span<const uint32_t> positionsPerPartition);
@@ -220,45 +225,42 @@ class CellNestedSplitter {
   /// decoded.
   std::vector<DecodedVector> decoded_;
   std::vector<NullClass> nullClass_;
-  std::vector<VectorPtr> views_;
+  std::vector<VectorPtr> columnViews_;
   /// A dictionary view's indices and nulls, per layout column.
   std::vector<BufferPtr> viewIndices_;
   std::vector<BufferPtr> viewNulls_;
   vector_size_t numRows_{0};
 
-  /// Per column group: committed positions per partition (none for the rows),
-  /// the largest, this batch's exact total and what was committed of it.
-  BufferPtr countsBuffer_;
-  std::vector<uint32_t*> counts_;
-  /// Output view of counts_: nullptr entries use the splitter's row counts.
+  /// Per element group, the window's counts by partition and their maximum.
+  BufferPtr windowElementCountsBuffer_;
+  std::vector<uint32_t*> windowElementsPerPartition_;
+  std::vector<uint32_t> maxWindowElementsPerPartition_;
+  /// One entry per physical column. Root columns use the splitter's row counts.
   std::vector<const uint32_t*> columnPositionCounts_;
-  std::vector<uint32_t> maxCount_;
-  std::vector<uint64_t> totals_;
-  std::vector<uint64_t> committed_;
+  /// Elements counted in prepare() and committed in split(), per group.
+  std::vector<uint64_t> batchElementCounts_;
+  std::vector<uint64_t> committedElementCounts_;
   /// The splitter's sealCount() as last followed: a new seal zeroes the
   /// counts of the partitions it emptied.
-  uint64_t seals_{0};
+  uint64_t lastSealCount_{0};
 
-  /// One element batch per depth: a batch stays open while the batches of
-  /// the column groups below it split. Per partition, the current batch's
-  /// positions and an element's running index; `touched_` lists the partitions
-  /// the batch holds.
-  std::vector<ElementBuffers> buffersByDepth_;
-  BufferPtr elementCounts_;
-  BufferPtr runningIndex_;
-  std::vector<uint32_t> touched_;
+  /// A parent's element block stays live while splitting its children.
+  std::vector<ElementBuffers> elementBuffersByDepth_;
+  BufferPtr blockElementsPerPartition_;
+  BufferPtr nextIndexInPartition_;
+  std::vector<uint32_t> distinctBlockPartitionIds_;
   /// Shared by root rows and element blocks during synchronous column writes.
-  BufferPtr rowIndex_;
+  BufferPtr indicesInPartitionBuffer_;
   /// The presence columns' values, and the identity indices.
-  BufferPtr ones_;
-  BufferPtr identity_;
+  BufferPtr rowPresenceValues_;
+  BufferPtr identityIndices_;
   /// Inside prepare() or split().
-  bool busy_{false};
+  bool inPrepareOrSplit_{false};
   /// Inside the ordinary splitter, nested within split().
-  bool inWireColumns_{false};
+  bool inColumnSplit_{false};
 
-  uint64_t shredWallNs_{0};
-  uint64_t wireWallNs_{0};
+  uint64_t splitWallNs_{0};
+  uint64_t columnSplitWallNs_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

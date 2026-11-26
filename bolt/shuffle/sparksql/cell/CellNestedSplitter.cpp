@@ -161,34 +161,40 @@ CellNestedSplitter::CellNestedSplitter(
       preparedNodes_(layout.numNodes()),
       decoded_(layout.layout().numColumns()),
       nullClass_(layout.layout().numColumns(), NullClass::kAllNull),
-      views_(layout.layout().numColumns()),
+      columnViews_(layout.layout().numColumns()),
       viewIndices_(layout.layout().numColumns()),
       viewNulls_(layout.layout().numColumns()),
-      counts_(layout.numGroups(), nullptr),
-      maxCount_(layout.numGroups(), 0),
-      totals_(layout.numGroups(), 0),
-      committed_(layout.numGroups(), 0),
-      seals_(splitter.sealCount()),
-      buffersByDepth_(layout.maxDepth() + 1) {
+      windowElementsPerPartition_(layout.numGroups(), nullptr),
+      maxWindowElementsPerPartition_(layout.numGroups(), 0),
+      batchElementCounts_(layout.numGroups(), 0),
+      committedElementCounts_(layout.numGroups(), 0),
+      lastSealCount_(splitter.sealCount()),
+      elementBuffersByDepth_(layout.maxDepth() + 1) {
   const size_t numCounts =
       static_cast<size_t>(layout.numGroups() - 1) * numPartitions_;
-  auto* counts = scratch<uint32_t>(countsBuffer_, numCounts);
+  auto* counts = scratch<uint32_t>(windowElementCountsBuffer_, numCounts);
   std::fill_n(counts, numCounts, 0);
   for (uint32_t g = 1; g < layout.numGroups(); ++g) {
-    counts_[g] = counts + static_cast<size_t>(g - 1) * numPartitions_;
+    windowElementsPerPartition_[g] =
+        counts + static_cast<size_t>(g - 1) * numPartitions_;
   }
   std::fill_n(
-      scratch<uint32_t>(elementCounts_, numPartitions_), numPartitions_, 0);
+      scratch<uint32_t>(blockElementsPerPartition_, numPartitions_),
+      numPartitions_,
+      0);
   std::fill_n(
-      scratch<uint32_t>(runningIndex_, numPartitions_), numPartitions_, 0);
-  touched_.reserve(numPartitions_);
+      scratch<uint32_t>(nextIndexInPartition_, numPartitions_),
+      numPartitions_,
+      0);
+  distinctBlockPartitionIds_.reserve(numPartitions_);
   // Output calls borrow this table while constructing null bodies. Columns
   // of a column group share its counts; row-group entries use the splitter's
   // rows.
   const auto& cellLayout = layout.layout();
   columnPositionCounts_.reserve(cellLayout.numColumns());
   for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
-    columnPositionCounts_.push_back(counts_[layout.nodeOfColumn(col).group]);
+    columnPositionCounts_.push_back(
+        windowElementsPerPartition_[layout.nodeOfColumn(col).group]);
   }
 }
 
@@ -206,34 +212,34 @@ CellNestedSplitter::copyToScratch(BufferPtr& buffer, const T* data, size_t n) {
 }
 
 void CellNestedSplitter::followSeals() {
-  if (splitter_.sealCount() == seals_) {
+  if (splitter_.sealCount() == lastSealCount_) {
     return;
   }
   // Partitions with positions below the rows hold rows: a partition the
   // seal left without rows had its payload closed.
-  seals_ = splitter_.sealCount();
-  const auto rows = splitter_.windowRowCounts();
-  for (uint32_t g = 1; g < layout_.numGroups(); ++g) {
-    uint32_t* counts = counts_[g];
-    uint32_t most = 0;
+  lastSealCount_ = splitter_.sealCount();
+  const auto windowRowCounts = splitter_.windowRowCounts();
+  for (uint32_t groupId = 1; groupId < layout_.numGroups(); ++groupId) {
+    auto* partitionCounts = windowElementsPerPartition_[groupId];
+    uint32_t maxPartitionCount = 0;
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      if (rows[pid] == 0) {
-        counts[pid] = 0;
+      if (windowRowCounts[pid] == 0) {
+        partitionCounts[pid] = 0;
       }
-      most = std::max(most, counts[pid]);
+      maxPartitionCount = std::max(maxPartitionCount, partitionCounts[pid]);
     }
-    maxCount_[g] = most;
+    maxWindowElementsPerPartition_[groupId] = maxPartitionCount;
   }
 }
 
 void CellNestedSplitter::prepare(const RowVector& rv, uint32_t columnOffset) {
-  NanosecondTimer timer(&shredWallNs_);
-  busy_ = true;
+  NanosecondTimer timer(&splitWallNs_);
+  inPrepareOrSplit_ = true;
   SCOPE_EXIT {
-    busy_ = false;
+    inPrepareOrSplit_ = false;
   };
   numRows_ = rv.size();
-  std::fill(totals_.begin(), totals_.end(), 0);
+  std::fill(batchElementCounts_.begin(), batchElementCounts_.end(), 0);
   const auto& topNodes = layout_.topNodes();
   BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + columnOffset);
   for (uint32_t i = 0; i < topNodes.size(); ++i) {
@@ -270,7 +276,7 @@ void CellNestedSplitter::prepare(const RowVector& rv, uint32_t columnOffset) {
 NullClass CellNestedSplitter::viewRows(uint32_t col) {
   auto& input = preparedNodes_[layout_.nodeIndexOfColumn(col)];
   auto& decoded = input.sourceMapping;
-  auto& view = views_[col];
+  auto& view = columnViews_[col];
   view.reset();
   if (decoded.isIdentityMapping()) {
     view = input.physicalValueBase;
@@ -388,12 +394,19 @@ void CellNestedSplitter::decodeRow(uint32_t n, const VectorPtr& vector) {
         &pool_, size, false, SMALLINT(), int16_t{1});
   } else {
     // `size` values of 1, in a buffer that grows as a batch needs.
-    if (ones_ == nullptr ||
-        ones_->size() < static_cast<size_t>(size) * sizeof(int16_t)) {
-      ones_ = AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
+    if (rowPresenceValues_ == nullptr ||
+        rowPresenceValues_->size() <
+            static_cast<size_t>(size) * sizeof(int16_t)) {
+      rowPresenceValues_ =
+          AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
     }
     presence = std::make_shared<FlatVector<int16_t>>(
-        &pool_, SMALLINT(), nulls, size, ones_, std::vector<BufferPtr>{});
+        &pool_,
+        SMALLINT(),
+        nulls,
+        size,
+        rowPresenceValues_,
+        std::vector<BufferPtr>{});
   }
   for (uint32_t i = 0; i < node.children.size(); ++i) {
     decodeNode(node.children[i], foldStructNulls(n, i, nulls));
@@ -432,13 +445,14 @@ VectorPtr CellNestedSplitter::foldStructNulls(
   // they are.
   if (!isFlatEncoded(*loaded) || loaded->size() < size) {
     // Indices 0 to `size` - 1, in a buffer that grows as a batch needs.
-    if (identity_ == nullptr ||
-        identity_->size() < static_cast<size_t>(size) * sizeof(vector_size_t)) {
-      identity_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
-      auto* indices = identity_->asMutable<vector_size_t>();
+    if (identityIndices_ == nullptr ||
+        identityIndices_->size() <
+            static_cast<size_t>(size) * sizeof(vector_size_t)) {
+      identityIndices_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
+      auto* indices = identityIndices_->asMutable<vector_size_t>();
       std::iota(indices, indices + size, 0);
     }
-    return BaseVector::wrapInDictionary(nulls, identity_, size, loaded);
+    return BaseVector::wrapInDictionary(nulls, identityIndices_, size, loaded);
   }
   // A flat field keeps its values under its nulls and the structs'.
   BufferPtr combined = nulls;
@@ -474,7 +488,7 @@ void CellNestedSplitter::countRange(
     return;
   }
   const auto& children = layout_.group(expansion.elementGroup).expansions;
-  uint64_t& total = totals_[expansion.elementGroup];
+  auto& batchElementCount = batchElementCounts_[expansion.elementGroup];
   const auto& decoded = input.sourceMapping;
   for (vector_size_t j = begin; j < end; ++j) {
     if (decoded.isNullAt(j)) {
@@ -482,9 +496,8 @@ void CellNestedSplitter::countRange(
     }
     const vector_size_t i = decoded.index(j);
     const vector_size_t size = input.sizes[i];
-    total += static_cast<uint64_t>(size);
-    // No window carries the batch: the count stops here.
-    if (total > CellNestedLayout::kMaxPositions) {
+    batchElementCount += static_cast<uint64_t>(size);
+    if (batchElementCount > CellNestedLayout::kMaxPositions) {
       BOLT_USER_FAIL(
           "a batch holds more than {} elements in one ARRAY or MAP column, "
           "its rows together, more than a Cell shuffle payload carries",
@@ -500,7 +513,8 @@ void CellNestedSplitter::countRange(
 bool CellNestedSplitter::fitsWindow() {
   followSeals();
   for (uint32_t g = 1; g < layout_.numGroups(); ++g) {
-    if (totals_[g] + maxCount_[g] > CellNestedLayout::kMaxPositions) {
+    if (batchElementCounts_[g] + maxWindowElementsPerPartition_[g] >
+        CellNestedLayout::kMaxPositions) {
       return false;
     }
   }
@@ -512,25 +526,25 @@ void CellNestedSplitter::split(
     std::span<const uint32_t> partition2RowCount) {
   BOLT_CHECK_EQ(row2Partition.size(), static_cast<size_t>(numRows_));
   BOLT_CHECK_EQ(partition2RowCount.size(), numPartitions_);
-  NanosecondTimer timer(&shredWallNs_);
-  busy_ = true;
+  NanosecondTimer timer(&splitWallNs_);
+  inPrepareOrSplit_ = true;
   SCOPE_EXIT {
-    busy_ = false;
+    inPrepareOrSplit_ = false;
   };
   // A seal since prepare() - a remote push before the split began - empties
   // its partitions here. None comes before the batch ends.
   followSeals();
-  std::fill(committed_.begin(), committed_.end(), 0);
+  std::fill(committedElementCounts_.begin(), committedElementCounts_.end(), 0);
 
-  writeGroupColumns(0, row2Partition, partition2RowCount);
+  splitGroupColumns(0, row2Partition, partition2RowCount);
   const ElementSelection rootRows{row2Partition};
   for (const auto& expansion : layout_.group(0).expansions) {
     expandContainer(expansion, rootRows);
   }
   for (uint32_t g = 1; g < layout_.numGroups(); ++g) {
     BOLT_CHECK_EQ(
-        committed_[g],
-        totals_[g],
+        committedElementCounts_[g],
+        batchElementCounts_[g],
         "positions committed in column group {} differ from those counted",
         g);
   }
@@ -545,23 +559,23 @@ void CellNestedSplitter::split(
     releaseOver(input.structNulls, keepNulls);
     releaseOver(input.structIndices, keep * sizeof(vector_size_t));
   }
-  for (auto& view : views_) {
+  for (auto& view : columnViews_) {
     view.reset();
   }
-  releaseOver(ones_, keep * sizeof(int16_t));
-  releaseOver(identity_, keep * sizeof(vector_size_t));
+  releaseOver(rowPresenceValues_, keep * sizeof(int16_t));
+  releaseOver(identityIndices_, keep * sizeof(vector_size_t));
 }
 
 int64_t CellNestedSplitter::releaseScratch() {
-  if (busy_) {
+  if (inPrepareOrSplit_) {
     return 0;
   }
   // A prepared batch's vectors hold what they use of it.
   const int64_t held = pool_.usedBytes();
-  rowIndex_.reset();
-  ones_.reset();
-  identity_.reset();
-  for (auto& buffer : buffersByDepth_) {
+  indicesInPartitionBuffer_.reset();
+  rowPresenceValues_.reset();
+  identityIndices_.reset();
+  for (auto& buffer : elementBuffersByDepth_) {
     buffer.partitionIds.reset();
     buffer.sourceIndices.reset();
   }
@@ -577,25 +591,25 @@ int64_t CellNestedSplitter::releaseScratch() {
   return held - pool_.usedBytes();
 }
 
-CellNestedSplitter::ElementBlock::ElementBlock(ElementBuffers& buffers)
-    : partitionIds_(buffers.partitionIds->asMutable<uint32_t>()),
-      indices_(buffers.sourceIndices->asMutable<vector_size_t>()),
-      indexBuffer_(buffers.sourceIndices) {}
-
 void CellNestedSplitter::ElementBlock::appendRange(
     vector_size_t offset,
     uint32_t count,
     uint32_t pid) {
-  std::fill_n(partitionIds_ + size, count, pid);
+  std::fill_n(partitionIds_.data() + size, count, pid);
   if (size == 0) {
-    first_ = offset;
+    firstSourceIndex_ = offset;
   } else if (
-      contiguous_ && offset != first_ + static_cast<vector_size_t>(size)) {
-    std::iota(indices_, indices_ + size, first_);
-    contiguous_ = false;
+      !sourceIndices_ &&
+      offset != firstSourceIndex_ + static_cast<vector_size_t>(size)) {
+    const auto indexBytes = partitionIds_.size() * sizeof(vector_size_t);
+    if (!sourceIndexBuffer_ || sourceIndexBuffer_->size() < indexBytes) {
+      resetBuffer(sourceIndexBuffer_, indexBytes, &pool_);
+    }
+    sourceIndices_ = sourceIndexBuffer_->asMutable<vector_size_t>();
+    std::iota(sourceIndices_, sourceIndices_ + size, firstSourceIndex_);
   }
-  if (!contiguous_) {
-    std::iota(indices_ + size, indices_ + size + count, offset);
+  if (sourceIndices_) {
+    std::iota(sourceIndices_ + size, sourceIndices_ + size + count, offset);
   }
   size += count;
 }
@@ -603,9 +617,11 @@ void CellNestedSplitter::ElementBlock::appendRange(
 CellNestedSplitter::ElementSelection
 CellNestedSplitter::ElementBlock::takeSelection() {
   ElementSelection selection{
-      {partitionIds_, size}, first_, contiguous_ ? nullptr : indexBuffer_};
+      partitionIds_.first(size),
+      firstSourceIndex_,
+      sourceIndices_ ? sourceIndexBuffer_ : nullptr};
   size = 0;
-  contiguous_ = true;
+  sourceIndices_ = nullptr;
   return selection;
 }
 
@@ -613,35 +629,39 @@ void CellNestedSplitter::expandContainer(
     const ContainerExpansion& expansion,
     const ElementSelection& parents) {
   const auto& input = preparedNodes_[expansion.container];
-  if (input.allNull) {
+  const auto groupId = expansion.elementGroup;
+  const auto remainingElements =
+      batchElementCounts_[groupId] - committedElementCounts_[groupId];
+  if (remainingElements == 0) {
     return;
   }
-  const auto groupId = expansion.elementGroup;
   const auto& group = layout_.group(groupId);
   const auto& mapping = input.sourceMapping;
   if (group.columns.empty()) {
     // ARRAY/MAP of UNKNOWN needs only its per-partition position counts.
-    auto* counts = counts_[groupId];
+    auto* counts = windowElementsPerPartition_[groupId];
     for (uint32_t k = 0; k < parents.partitionIds.size(); ++k) {
       const auto j = parents.sourcePosition(k);
       if (!mapping.isNullAt(j)) {
         const auto count = static_cast<uint32_t>(input.sizes[mapping.index(j)]);
         const auto pid = parents.partitionIds[k];
         counts[pid] += count;
-        maxCount_[groupId] = std::max(maxCount_[groupId], counts[pid]);
-        committed_[groupId] += count;
+        maxWindowElementsPerPartition_[groupId] =
+            std::max(maxWindowElementsPerPartition_[groupId], counts[pid]);
+        committedElementCounts_[groupId] += count;
       }
     }
     return;
   }
 
-  auto& buffer = buffersByDepth_[group.depth];
-  if (buffer.partitionIds == nullptr) {
-    scratch<uint32_t>(buffer.partitionIds, kElementBatchPositions);
-    scratch<vector_size_t>(buffer.sourceIndices, kElementBatchPositions);
-  }
-  ElementBlock block(buffer);
-  auto* blockCounts = elementCounts_->asMutable<uint32_t>();
+  auto& buffer = elementBuffersByDepth_[group.depth];
+  const auto blockCapacity = static_cast<uint32_t>(
+      std::min<uint64_t>(remainingElements, kElementBatchPositions));
+  ElementBlock block(
+      {scratch<uint32_t>(buffer.partitionIds, blockCapacity), blockCapacity},
+      buffer.sourceIndices,
+      pool_);
+  auto* blockCounts = blockElementsPerPartition_->asMutable<uint32_t>();
   for (uint32_t k = 0; k < parents.partitionIds.size(); ++k) {
     const auto j = parents.sourcePosition(k);
     if (mapping.isNullAt(j)) {
@@ -652,36 +672,35 @@ void CellNestedSplitter::expandContainer(
     auto remaining = static_cast<uint32_t>(input.sizes[i]);
     const auto pid = parents.partitionIds[k];
     while (remaining > 0) {
-      const auto count =
-          std::min(remaining, kElementBatchPositions - block.size);
+      const auto count = std::min(remaining, blockCapacity - block.size);
       block.appendRange(offset, count, pid);
       if (blockCounts[pid] == 0) {
-        touched_.push_back(pid);
+        distinctBlockPartitionIds_.push_back(pid);
       }
       blockCounts[pid] += count;
       offset += count;
       remaining -= count;
-      if (block.size == kElementBatchPositions) {
-        writeElementBlock(groupId, block.takeSelection());
+      if (block.size == blockCapacity) {
+        splitElementBlock(groupId, block.takeSelection());
       }
     }
   }
   if (block.size > 0) {
-    writeElementBlock(groupId, block.takeSelection());
+    splitElementBlock(groupId, block.takeSelection());
   }
 }
 
-void CellNestedSplitter::writeElementBlock(
+void CellNestedSplitter::splitElementBlock(
     uint32_t groupId,
     const ElementSelection& elements) {
   const auto& group = layout_.group(groupId);
   for (const auto col : group.columns) {
     nullClass_[col] = prepareElementColumn(col, elements);
   }
-  writeGroupColumns(
+  splitGroupColumns(
       groupId,
       elements.partitionIds,
-      {elementCounts_->as<uint32_t>(), numPartitions_});
+      {blockElementsPerPartition_->as<uint32_t>(), numPartitions_});
   // Children reuse the per-partition block counts. They still need this
   // selection.
   commitElementCounts(groupId);
@@ -691,33 +710,35 @@ void CellNestedSplitter::writeElementBlock(
 }
 
 void CellNestedSplitter::commitElementCounts(uint32_t groupId) {
-  auto* windowCounts = counts_[groupId];
-  auto* blockCounts = elementCounts_->asMutable<uint32_t>();
-  for (const uint32_t pid : touched_) {
+  auto* windowCounts = windowElementsPerPartition_[groupId];
+  auto* blockCounts = blockElementsPerPartition_->asMutable<uint32_t>();
+  for (const uint32_t pid : distinctBlockPartitionIds_) {
     const auto count = blockCounts[pid];
     windowCounts[pid] += count;
-    maxCount_[groupId] = std::max(maxCount_[groupId], windowCounts[pid]);
-    committed_[groupId] += count;
+    maxWindowElementsPerPartition_[groupId] =
+        std::max(maxWindowElementsPerPartition_[groupId], windowCounts[pid]);
+    committedElementCounts_[groupId] += count;
     blockCounts[pid] = 0;
   }
-  touched_.clear();
+  distinctBlockPartitionIds_.clear();
 }
 
 std::span<const uint32_t> CellNestedSplitter::indicesInPartition(
     std::span<const uint32_t> partitionIds,
     bool rootGroup) {
-  auto* indices = scratch<uint32_t>(rowIndex_, partitionIds.size());
-  if (!rootGroup && touched_.size() == 1) {
+  auto* indices =
+      scratch<uint32_t>(indicesInPartitionBuffer_, partitionIds.size());
+  if (!rootGroup && distinctBlockPartitionIds_.size() == 1) {
     std::iota(indices, indices + partitionIds.size(), 0u);
   } else {
-    auto* next = runningIndex_->asMutable<uint32_t>();
+    auto* next = nextIndexInPartition_->asMutable<uint32_t>();
     for (size_t k = 0; k < partitionIds.size(); ++k) {
       indices[k] = next[partitionIds[k]]++;
     }
     if (rootGroup) {
       std::fill_n(next, numPartitions_, 0);
     } else {
-      for (const auto pid : touched_) {
+      for (const auto pid : distinctBlockPartitionIds_) {
         next[pid] = 0;
       }
     }
@@ -734,13 +755,13 @@ NullClass CellNestedSplitter::prepareElementColumn(
   }
   auto& decoded = input.sourceMapping;
   const auto n = static_cast<vector_size_t>(elements.partitionIds.size());
-  auto& view = views_[col];
+  auto& view = columnViews_[col];
   // The previous element batch's view lets go of the scratch it shares.
   view.reset();
   if (decoded.isIdentityMapping()) {
-    // Elements in a row stay a flat vector; others index it.
+    // Contiguous elements stay a flat vector; others index it.
     view = elements.sourceIndices == nullptr
-        ? input.physicalValueBase->slice(elements.first, n)
+        ? input.physicalValueBase->slice(elements.firstSourceIndex, n)
         : BaseVector::wrapInDictionary(
               BufferPtr(nullptr),
               elements.sourceIndices,
@@ -773,7 +794,7 @@ NullClass CellNestedSplitter::prepareElementColumn(
   return classifyNulls(decoded_[col], n);
 }
 
-void CellNestedSplitter::writeGroupColumns(
+void CellNestedSplitter::splitGroupColumns(
     uint32_t groupId,
     std::span<const uint32_t> partitionIds,
     std::span<const uint32_t> positionsPerPartition) {
@@ -784,17 +805,17 @@ void CellNestedSplitter::writeGroupColumns(
   batch.partition2RowCount = positionsPerPartition;
   batch.nullClass = nullClass_;
   batch.columns = columns;
-  batch.windowRowCounts = counts_[groupId];
+  batch.windowRowCounts = windowElementsPerPartition_[groupId];
   if (std::any_of(columns.begin(), columns.end(), [&](uint32_t col) {
         return nullClass_[col] == NullClass::kSomeNulls;
       })) {
     batch.rowIndexInPid = indicesInPartition(partitionIds, groupId == 0);
   }
 
-  NanosecondTimer timer(&wireWallNs_);
-  inWireColumns_ = true;
+  NanosecondTimer timer(&columnSplitWallNs_);
+  inColumnSplit_ = true;
   SCOPE_EXIT {
-    inWireColumns_ = false;
+    inColumnSplit_ = false;
   };
   splitter_.split(batch);
 }
