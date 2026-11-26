@@ -498,32 +498,19 @@ class HashProbe : public Operator {
   class LeftSemiFilterJoinTracker {
    public:
     // Called for each row that the filter passes. Expects that probe
-    // side rows with multiple matches are next to each other. Calls onLastMatch
-    // just once for each probe side row with at least one match.
-    template <typename TOnLastMatch>
-    void advance(vector_size_t row, TOnLastMatch onLastMatch) {
+    // side rows with multiple matches are next to each other. Calls
+    // onFirstMatch just once for each probe side row with at least one match.
+    template <typename TOnFirstMatch>
+    void advance(vector_size_t row, TOnFirstMatch onFirstMatch) {
       if (currentRow != row) {
-        if (currentRow != -1) {
-          onLastMatch(currentRow);
-        }
+        onFirstMatch(row);
         currentRow = row;
       }
     }
 
-    // Called when all rows from the current input batch were processed. Calls
-    // onLastMatch for the last probe row with at least one match.
-    template <typename TOnLastMatch>
-    void finish(TOnLastMatch onLastMatch) {
-      if (currentRow != -1) {
-        onLastMatch(currentRow);
-      }
-
+    // Resets state when starting a new probe input batch.
+    void reset() {
       currentRow = -1;
-    }
-
-    // Returns true if there is a matched probe row waiting to be emitted.
-    bool hasPendingRow() const {
-      return currentRow != -1;
     }
 
    private:
@@ -568,11 +555,6 @@ class HashProbe : public Operator {
 
       currentRow = -1;
       currentRowPassed = std::nullopt;
-    }
-
-    // Returns true if there is a probe row waiting to be emitted.
-    bool hasPendingRow() const {
-      return currentRow != -1;
     }
 
    private:

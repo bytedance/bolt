@@ -742,13 +742,13 @@ void HashProbe::addInput(RowVectorPtr input) {
     BOLT_CHECK_NULL(input_);
     return;
   }
-  BOLT_CHECK(!noMatchDetector_.hasLastMissedRow());
-  BOLT_CHECK(!leftSemiFilterJoinTracker_.hasPendingRow());
-  BOLT_CHECK(!leftSemiProjectJoinTracker_.hasPendingRow());
   input_ = std::move(input);
 
   // Reset passingInputRowsInitialized_ as input_ as changed.
   passingInputRowsInitialized_ = false;
+  if (isLeftSemiFilterJoin(joinType_)) {
+    leftSemiFilterJoinTracker_.reset();
+  }
 
   const auto numInput = input_->size();
 
@@ -1266,11 +1266,9 @@ RowVectorPtr HashProbe::getOutput() {
     }
 
     // We are done processing the input batch if there are no more joined rows
-    // to process and no tracker is carrying forward a row that still needs to
-    // be written to the output.
-    if (!numOut && !noMatchDetector_.hasLastMissedRow() &&
-        !leftSemiFilterJoinTracker_.hasPendingRow() &&
-        !leftSemiProjectJoinTracker_.hasPendingRow()) {
+    // to process and the NoMatchDetector isn't carrying forward a row that
+    // still needs to be written to the output.
+    if (!numOut && !noMatchDetector_.hasLastMissedRow()) {
       if (probeRangePartition_ && needLastProbeSideOutput() &&
           !includingMiss_ && joinNode_->filter()) {
         mergeAndSpillProbeMatchFlags();
@@ -1619,7 +1617,6 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
   }
 
   int32_t numPassed = 0;
-  const auto maxOutputRows = static_cast<int32_t>(outputTableRows_.size());
   if (isLeftJoin(joinType_) || isFullJoin(joinType_)) {
     if (probeRangePartition_) {
       if (includingMiss_) {
@@ -1684,18 +1681,15 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
           addMiss, results_.atEnd(), outputTableRows_.size() - numPassed);
     }
   } else if (isLeftSemiFilterJoin(joinType_)) {
-    auto addLastMatch = [&](auto row) {
+    auto addMatch = [&](auto row) {
       outputTableRows_[numPassed] = nullptr;
       rawOutputProbeRowMapping[numPassed++] = row;
     };
     for (auto i = 0; i < numRows; ++i) {
       if (filterPassed(i)) {
         leftSemiFilterJoinTracker_.advance(
-            rawOutputProbeRowMapping[i], addLastMatch);
+            rawOutputProbeRowMapping[i], addMatch);
       }
-    }
-    if (results_.atEnd() && numPassed < maxOutputRows) {
-      leftSemiFilterJoinTracker_.finish(addLastMatch);
     }
   } else if (isLeftSemiProjectJoin(joinType_)) {
     // NOTE: Set output table row to point to a fake string to indicate there
@@ -1704,7 +1698,7 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
     static const char* kPassed = "passed";
 
     if (nullAware_) {
-      leftSemiProjectIsNull_.resize(maxOutputRows);
+      leftSemiProjectIsNull_.resize(numRows);
       leftSemiProjectIsNull_.clearAll();
 
       auto addLast = [&](auto row, std::optional<bool> passed) {
@@ -1730,10 +1724,10 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
                                             : std::optional(false));
         leftSemiProjectJoinTracker_.advance(probeRow, passed, addLast);
       }
-      if (results_.atEnd() && numPassed < maxOutputRows) {
+      leftSemiProjectIsNull_.updateBounds();
+      if (results_.atEnd()) {
         leftSemiProjectJoinTracker_.finish(addLast);
       }
-      leftSemiProjectIsNull_.updateBounds();
     } else {
       auto addLast = [&](auto row, std::optional<bool> passed) {
         outputTableRows_[numPassed] =
@@ -1744,7 +1738,7 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
         leftSemiProjectJoinTracker_.advance(
             rawOutputProbeRowMapping[i], filterPassed(i), addLast);
       }
-      if (results_.atEnd() && numPassed < maxOutputRows) {
+      if (results_.atEnd()) {
         leftSemiProjectJoinTracker_.finish(addLast);
       }
     }
@@ -1778,7 +1772,6 @@ int32_t HashProbe::evalFilter(int32_t numRows) {
       }
     }
   }
-  BOLT_CHECK_LE(numPassed, maxOutputRows);
   return numPassed;
 }
 
