@@ -657,21 +657,39 @@ TEST_F(CellWriterTest, lazyInputIsSlicedByLoadedBytes) {
       std::vector<BufferPtr>{chars});
   auto lazy = makeRowVector({wrapInLazyDictionary(strings)});
   ASSERT_GT(kRows * int64_t{kValueBytes}, kMaxShuffleWriterBatchBytes);
-  CellShuffleWriter writer(
-      writerOptions(1), pool(), arrow::default_memory_pool());
+  auto options = writerOptions(1);
+  options.cellOptions.partitionSealBytes = 1;
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
   ASSERT_TRUE(
       writer
           .split(test::withPid(std::vector<int32_t>(kRows, 0), lazy, pool()), 0)
           .ok());
-  EXPECT_GE(writer.metrics().totalInputBatches, 2);
   ASSERT_TRUE(writer.stop().ok());
+  EXPECT_EQ(writer.metrics().totalInputBatches, 1);
+  EXPECT_GE(writer.metrics().spillCount, 2);
 }
 
 TEST_F(CellWriterTest, singleAndRoundRobinKeepPartitionsAcrossSlices) {
-  // The first batch exceeds the remote slice limit. Round-robin state must
-  // advance across both those slices and the following input batch.
+  // The first batch exceeds the slice limit. Round-robin state must advance
+  // across both those slices and the following input batch.
   constexpr int32_t kRows = 517;
-  constexpr int32_t kValueBytes = 20'000;
+  constexpr int32_t kDictEntries = 26;
+  constexpr int32_t kStringLen = 64;
+  auto dictBuffer = AlignedBuffer::allocate<char>(11 << 20, pool());
+  auto dictViews = AlignedBuffer::allocate<StringView>(kDictEntries, pool());
+  for (int32_t i = 0; i < kDictEntries; ++i) {
+    char* dst = dictBuffer->asMutable<char>() + i * kStringLen;
+    ::memset(dst, 'a' + i, kStringLen);
+    dictViews->asMutable<StringView>()[i] = StringView(dst, kStringLen);
+  }
+  auto dictValues = std::make_shared<FlatVector<StringView>>(
+      pool(),
+      VARCHAR(),
+      nullptr,
+      kDictEntries,
+      dictViews,
+      std::vector<BufferPtr>{dictBuffer});
+
   for (const auto partitioning :
        {Partitioning::kSingle, Partitioning::kRoundRobin}) {
     SCOPED_TRACE(static_cast<int>(partitioning));
@@ -681,19 +699,27 @@ TEST_F(CellWriterTest, singleAndRoundRobinKeepPartitionsAcrossSlices) {
     ShuffleInput input;
     int32_t totalRows = 0;
     for (const int32_t count : {kRows, 7}) {
+      VectorPtr strings = count == kRows
+          ? BaseVector::wrapInDictionary(
+                nullptr,
+                makeIndices(count, [](auto row) { return row % kDictEntries; }),
+                count,
+                dictValues)
+          : makeFlatVector<std::string>(count, [](auto row) {
+              return std::string(kStringLen, 'a' + row % kDictEntries);
+            });
       input.data.push_back(makeRowVector(
           {"id", "s"},
           {makeFlatVector<int32_t>(
                count, [&](auto row) { return totalRows + row; }),
-           makeFlatVector<std::string>(count, [&](auto row) {
-             return std::string(kValueBytes, 'a' + row % 26);
-           })}));
+           std::move(strings)}));
       auto& pids = input.pids.emplace_back(count);
       for (int32_t row = 0; row < count; ++row) {
         pids[row] = single ? 0 : (start + totalRows + row) % numPartitions;
       }
       totalRows += count;
     }
+    ASSERT_GT(input.data[0]->estimateFlatSize(), kMaxShuffleWriterBatchBytes);
     for (const double checkRatio : {0.0, 1.0}) {
       SCOPED_TRACE(checkRatio);
       auto options = writerOptions(numPartitions, true);
@@ -702,13 +728,16 @@ TEST_F(CellWriterTest, singleAndRoundRobinKeepPartitionsAcrossSlices) {
       options.shuffleCheckRatio = checkRatio;
       options.shuffleCheckMaxColumns = 1;
       options.cellOptions.enableStringDictionary = false;
+      options.cellOptions.partitionSealBytes = 1;
       const auto written =
           test::writeShuffle(options, input, pool(), [&](size_t batch) {
             return input.data[batch];
           });
-      EXPECT_GT(
+      EXPECT_EQ(
           written.metrics.totalInputBatches,
           static_cast<int64_t>(input.data.size()));
+      EXPECT_GT(
+          written.metrics.spillCount, static_cast<int64_t>(input.data.size()));
       test::expectReadsBack(
           input, written, arrow::Compression::LZ4_FRAME, pool());
     }

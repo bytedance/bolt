@@ -126,7 +126,7 @@ CompositeShuffleWriter
   not hold data together.
 - `CellShuffleWriter` partitions rows, chooses the layout, probes
   dictionaries, classifies nulls, and controls spills and seals. Large
-  batches are sliced to 200 MiB locally or 8 MiB on Celeborn.
+  batches are sliced to 200 MiB.
 - Native nested input passes through `CellNestedSplitter`, one column group at
   a time. The adapter instead packs complex columns into one VARBINARY column.
 - `CellSplitter` stages values in 64-byte lines and appends encoded blocks
@@ -240,9 +240,8 @@ fit in spill memory.
 
 Celeborn may reorder a mapper's pushes and interleave other mappers' pushes,
 so every pushed block must be one complete payload. A window is therefore
-only pushed whole, at a batch boundary; there are no runs. Batches are sliced
-to 8 MiB so a boundary comes soon, and a reclaim arriving mid-batch or
-mid-seal is deferred to the next boundary.
+only pushed whole, at a batch boundary; there are no runs. A reclaim arriving
+mid-batch or mid-seal is deferred to the next boundary.
 
 ### Cell threshold (local)
 
@@ -499,10 +498,10 @@ adapter path packs complex columns with `CompactRow`, which encodes nested
   than `kMaxPositions` elements in one ARRAY or MAP column cannot be carried
   by any payload, and fails with a user error (`BOLT_USER_FAIL`).
 - **Sliced batches and short struct fields (known limitation):** batches
-  above the slice bound (200 MiB locally, 8 MiB on Celeborn) are cut with
+  above the 200 MiB slice bound are cut with
   `RowVector::slice`, which slices every child to the same range. A ROW
-  field shorter than its struct is supported by the shredder, but not in a
-  batch that gets sliced.
+  field shorter than its struct can be split directly when the batch fits
+  within the slice bound.
 - **Malformed input** on the read side is reported as an error, never
   crashed on; `kMaxPayloadRows` and `kMaxPayloadRuns` bound the row and run
   counts. Errors name

@@ -39,10 +39,6 @@ constexpr uint32_t kChunkBytes = 4 << 20;
 /// Free enough cells for compaction to return a whole chunk, allowing for
 /// partitions kept together and cells pinned by an append in progress.
 constexpr int64_t kMinReclaimRunBytes = 2 * kChunkBytes;
-/// Slice bound on an RSS shuffle, where a window is released only whole at a
-/// batch boundary: one slice bounds how far memory runs past a failed
-/// reservation before the window can be pushed.
-constexpr int64_t kRssSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinRepeatRatio = 4;
@@ -293,25 +289,29 @@ arrow::Status CellShuffleWriter::splitOrdinary(
       releaseWindow(SealReason::kReserveFailed);
     }
   };
-  const int64_t maxBytes =
-      isRss_ ? kRssSliceBytes : kMaxShuffleWriterBatchBytes;
-  if (flatSize > maxBytes && rv->size() > 1) {
+  constexpr int64_t maxBytes = kMaxShuffleWriterBatchBytes;
+  const vector_size_t numRows = rv->size();
+  if (flatSize > maxBytes && numRows > 1) {
     const int64_t pieces = std::max<int64_t>(
-        1, std::min<int64_t>(rv->size(), (flatSize + maxBytes - 1) / maxBytes));
-    const int32_t rowsPerPiece = (rv->size() + pieces - 1) / pieces;
-    for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
-      const int32_t length =
-          std::min<int32_t>(rowsPerPiece, rv->size() - begin);
+        1, std::min<int64_t>(numRows, (flatSize + maxBytes - 1) / maxBytes));
+    const int32_t rowsPerPiece = (numRows + pieces - 1) / pieces;
+    for (int32_t begin = 0; begin < numRows; begin += rowsPerPiece) {
+      const int32_t length = std::min<int32_t>(rowsPerPiece, numRows - begin);
       auto piece =
           std::dynamic_pointer_cast<RowVector>(rv->slice(begin, length));
       BOLT_CHECK_NOT_NULL(piece);
-      prepareRssSlice(flatSize * length / rv->size());
+      prepareRssSlice(flatSize * length / numRows);
       RETURN_NOT_OK(splitBatch(std::move(piece)));
     }
-    return arrow::Status::OK();
+  } else {
+    prepareRssSlice(flatSize);
+    RETURN_NOT_OK(splitBatch(std::move(rv)));
   }
-  prepareRssSlice(flatSize);
-  return splitBatch(std::move(rv));
+  // One input batch, however many slices it was split in.
+  if (numRows > 0) {
+    metrics_.totalInputBatches += 1;
+  }
+  return arrow::Status::OK();
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
@@ -389,7 +389,6 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     }
     splitter_->split(batch);
     metrics_.totalInputRowNumber += numRows;
-    metrics_.totalInputBatches += 1;
   }
 
   maybeSeal();
@@ -439,7 +438,6 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     nestedSplitter_->split(
         std::span(row2Partition_).first(numRows), partition2RowCount_);
     metrics_.totalInputRowNumber += numRows;
-    metrics_.totalInputBatches += 1;
   }
 
   maybeSeal();
