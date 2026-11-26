@@ -29,11 +29,13 @@
 
 #include <algorithm>
 #include "bolt/functions/InlineFlatten.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/lib/StringUtil.h"
 #include "bolt/functions/lib/string/StringImpl.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/FloatingDecimal.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
 using namespace bytedance::bolt;
@@ -47,6 +49,18 @@ constexpr bool kIsInSpark = ::bytedance::bolt::kSparkCompatible;
 constexpr auto kDecimalStringFormat = kIsInSpark
     ? DecimalUtil::DecimalStringFormat::kSpark
     : DecimalUtil::DecimalStringFormat::kPlain;
+
+util::DateToStringOptions sparkDateToStringOptions(
+    const core::QueryConfig& queryConfig) {
+  const bool legacy =
+      functions::parseTimePolicy(queryConfig.timeParserPolicy()) ==
+      functions::TimePolicy::LEGACY;
+  return {
+      .leadingPositiveSign = !legacy,
+      .zeroPaddingYear = true,
+      .yearOfEra = legacy,
+  };
+}
 
 // Conversion status used by the cast policy to decide whether to keep the
 // produced value, throw, or return null.
@@ -311,6 +325,11 @@ class Converter {
     }
 
     const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+    if constexpr (
+        kIsInSpark && std::is_same_v<FromKind, DateKind> &&
+        std::is_same_v<ToKind, StringKind>) {
+      dateToStringOptions_ = sparkDateToStringOptions(queryConfig);
+    }
     auto sessionTzName = queryConfig.sessionTimezone();
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
       timeZone_ = tz::locateZone(sessionTzName);
@@ -623,8 +642,7 @@ class Converter {
       }
     } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
-        auto output = DATE()->toString(from);
-        to.set(output);
+        to.set(util::dateToString(from, dateToStringOptions_));
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
       }
@@ -839,6 +857,7 @@ class Converter {
   const tz::TimeZone* timeZone_ = nullptr;
   bool isFlinkCompatible_ = false;
   bool trimStringToFloatingPointControlChars_ = false;
+  util::DateToStringOptions dateToStringOptions_;
 
   bool canAsInlinedStr_ = false;
 };

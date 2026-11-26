@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <limits>
 #include "bolt/functions/prestosql/tests/CastBaseTest.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/parse/TypeResolver.h"
@@ -176,6 +177,163 @@ TEST_F(SparkCastExprTest, date) {
       {3789391, 16436, 16495, 16512, 16512, 16512, 16512},
       VARCHAR(),
       DATE());
+}
+
+TEST_F(SparkCastExprTest, dateToStringYearPadding) {
+  // Column inputs exercise CAST rather than constant folding. Only padding is
+  // under test; LEGACY calendar rebasing is a separate compatibility concern.
+  const std::vector<std::string> dates = {
+      "0001-01-01",
+      "0009-12-31",
+      "0010-01-01",
+      "0099-12-31",
+      "0100-01-01",
+      "0526-01-29",
+      "0999-12-31",
+      "1000-01-01",
+      "1970-01-01",
+      "9999-12-31"};
+  std::vector<std::optional<int32_t>> days;
+  std::vector<std::optional<std::string>> expected;
+  for (const auto& date : dates) {
+    days.emplace_back(DATE()->toDays(date));
+    expected.emplace_back(date);
+  }
+  days.emplace_back(std::nullopt);
+  expected.emplace_back(std::nullopt);
+  for (const auto* policy : {"LEGACY", "CORRECTED", "EXCEPTION"}) {
+    SCOPED_TRACE(policy);
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kTimeParserPolicy, policy}});
+    testCast<int32_t, std::string>(
+        "varchar", days, expected, DATE(), VARCHAR());
+  }
+}
+
+struct SparkDateYearCase {
+  const char* policy;
+  int32_t day;
+  const char* expected;
+};
+
+#include "bolt/functions/sparksql/tests/SparkDateYearOracle.inc"
+
+TEST_F(SparkCastExprTest, dateToStringYearFormatJavaOracle) {
+  for (const auto* policy : {"LEGACY", "CORRECTED", "EXCEPTION"}) {
+    SCOPED_TRACE(policy);
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kTimeParserPolicy, policy}});
+    std::vector<std::optional<int32_t>> days;
+    std::vector<std::optional<std::string>> expected;
+    for (const auto& sample : kSparkDateYearCases) {
+      if (std::string_view(sample.policy) == policy) {
+        days.emplace_back(sample.day);
+        expected.emplace_back(sample.expected);
+      }
+    }
+    days.emplace_back(std::nullopt);
+    expected.emplace_back(std::nullopt);
+    // Covers flat, constant and dictionary inputs, plus null-on-failure CAST.
+    testCast(
+        makeNullableFlatVector<int32_t>(days, DATE()),
+        makeNullableFlatVector<std::string>(expected));
+  }
+}
+
+TEST_F(SparkCastExprTest, dateToStringYearFormatBoundaries) {
+  for (const auto* policy : {"LEGACY", "CORRECTED", "EXCEPTION"}) {
+    SCOPED_TRACE(policy);
+    const bool legacy = std::string_view(policy) == "LEGACY";
+    for (const auto* zone : {"UTC", "Asia/Shanghai", "America/Los_Angeles"}) {
+      SCOPED_TRACE(zone);
+      queryCtx_->testingOverrideConfigUnsafe({
+          {core::QueryConfig::kTimeParserPolicy, policy},
+          {core::QueryConfig::kSessionTimezone, zone},
+          {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+      });
+      // Preserve the year-formatting-only contract even at the DATE bounds.
+      // LEGACY calendar rebasing and its overflow errors remain separate work.
+      testCast<int32_t, std::string>(
+          "varchar",
+          {std::numeric_limits<int32_t>::min(),
+           std::numeric_limits<int32_t>::max(),
+           -141428,
+           0,
+           std::nullopt},
+          {legacy ? "5877642-06-23" : "-5877641-06-23",
+           legacy ? "5881580-07-11" : "+5881580-07-11",
+           "1582-10-14",
+           "1970-01-01",
+           std::nullopt},
+          DATE(),
+          VARCHAR());
+    }
+  }
+}
+
+TEST_F(SparkCastExprTest, complexDateToStringYearFormat) {
+  for (const auto* policy : {"legacy", "corrected", "exception"}) {
+    SCOPED_TRACE(policy);
+    queryCtx_->testingOverrideConfigUnsafe({
+        {core::QueryConfig::kTimeParserPolicy, policy},
+        {core::QueryConfig::kSparkLegacyCastComplexTypesToStringEnabled,
+         "false"},
+    });
+    // Expected strings are also present in the Java-generated scalar oracle.
+    const bool legacy = std::string_view(policy) == "legacy";
+    const std::string bce = legacy ? "0002-01-01" : "-0001-01-01";
+    const std::string zero = legacy ? "0001-01-01" : "0000-01-01";
+    const std::string large = legacy ? "10000-01-01" : "+10000-01-01";
+    auto dates = makeNullableFlatVector<int32_t>(
+        {-719893, -719528, 2932897, std::nullopt}, DATE());
+    auto array = makeArrayVector({0, 4}, dates, {1});
+    const auto values = bce + ", " + zero + ", " + large + ", null";
+    testCast(
+        array,
+        makeNullableFlatVector<std::string>(
+            {"[" + values + "]", std::nullopt}));
+    testCast(
+        makeArrayVector({0}, array),
+        makeFlatVector<std::string>({"[[" + values + "], null]"}));
+    auto key = makeFlatVector<std::string>({"x", "x", "x", "x"});
+    testCast(
+        makeMapVector({0, 1, 2, 3}, key, dates),
+        makeFlatVector<std::string>(
+            {"{x -> " + bce + "}",
+             "{x -> " + zero + "}",
+             "{x -> " + large + "}",
+             "{x -> null}"}));
+    auto dateKeys =
+        makeFlatVector<int32_t>({-719893, -719528, 2932897}, DATE());
+    auto mapValues = makeFlatVector<std::string>({"x", "x", "x"});
+    testCast(
+        makeMapVector({0, 1, 2}, dateKeys, mapValues),
+        makeFlatVector<std::string>(
+            {"{" + bce + " -> x}",
+             "{" + zero + " -> x}",
+             "{" + large + " -> x}"}));
+    testCast(
+        makeRowVector({dates}),
+        makeFlatVector<std::string>(
+            {"{" + bce + "}", "{" + zero + "}", "{" + large + "}", "{null}"}));
+  }
+}
+
+TEST_F(SparkCastExprTest, dateToStringInvalidTimeParserPolicy) {
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kTimeParserPolicy, "invalid"}});
+  auto scalarDates = makeRowVector({makeFlatVector<int32_t>({0}, DATE())});
+  BOLT_ASSERT_THROW(
+      evaluate("cast(c0 as varchar)", scalarDates), "Invalid time policy");
+  BOLT_ASSERT_THROW(
+      evaluate("try_cast(c0 as varchar)", scalarDates), "Invalid time policy");
+
+  auto arrayDates = makeRowVector(
+      {makeArrayVector({0}, makeFlatVector<int32_t>({0}, DATE()))});
+  BOLT_ASSERT_THROW(
+      evaluate("cast(c0 as varchar)", arrayDates), "Invalid time policy");
+  BOLT_ASSERT_THROW(
+      evaluate("try_cast(c0 as varchar)", arrayDates), "Invalid time policy");
 }
 
 TEST_F(SparkCastExprTest, decimalToIntegral) {
