@@ -116,7 +116,7 @@ struct ShuffleReaderOptions {
   int32_t forceShuffleWriterType = -1;
 
   // On-wire row format for the row-based shuffle. Must match the writer side.
-  row::RowFormat rowFormat = row::RowFormat::COMPACT;
+  row::RowFormat rowFormat = row::RowFormat::DENSE;
 
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
 
@@ -193,7 +193,7 @@ struct ShuffleWriterOptions {
   int32_t shuffleBatchSize = kDefaultShuffleBatchByteSize;
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
-  row::RowFormat rowFormat = row::RowFormat::COMPACT;
+  row::RowFormat rowFormat = row::RowFormat::DENSE;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
   PartitionWriterOptions partitionWriterOptions{};
 
