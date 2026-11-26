@@ -721,9 +721,9 @@ inline const std::vector<ShuffleOutput> kShuffleOutputs{
 /// Writes `input` once per output of `outputs` and reads every partition
 /// back at every read shape (an RSS partition push by push), expecting the
 /// input's rows in order. Also expects a schema that takes a nested layout
-/// to report flattenTime, which holds the shredding, any other complex
-/// schema to report convertTime, every field null below a null struct, and
-/// an uncompressed output's raw lengths to be its lengths. `tune` adjusts
+/// to report flattenTime for nested preparation and expansion, any other
+/// complex schema to report convertTime, every field null below a null struct,
+/// and an uncompressed output's raw lengths to be its lengths. `tune` adjusts
 /// each writer, `check` sees what it wrote. Returns what each output
 /// wrote.
 inline std::vector<WrittenShuffle> roundTrip(

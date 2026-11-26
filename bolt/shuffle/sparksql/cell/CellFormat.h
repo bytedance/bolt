@@ -61,15 +61,14 @@
 /// are the payload's rows, except in a nested layout.
 ///
 /// Nested layouts. A row type with ARRAY, MAP or ROW columns takes one when
-/// every leaf type is supported and it shreds into at most 65535 columns;
-/// one that shreds into more, or any such row type when writer and reader
-/// are configured to pack nested types (CellShuffleOptions::
-/// nativeNestedTypes off), packs its complex columns into one trailing
-/// binary column. It is shredded in pre-order into plain
-/// columns: a leaf is a column of its type; an ARRAY or MAP an Integer
-/// column holding each non-null entry's length, followed by the columns of
-/// its element, or of its key and then its value; a ROW a SmallInt column
-/// holding 1 at each non-null struct, followed by the columns of its
+/// every leaf type is supported and the type tree has at most 65535 nodes
+/// below the top-level row. Larger schemas and writers configured with
+/// nativeNestedTypes off pack complex columns into one trailing binary
+/// column. In a nested layout the physical columns follow the type tree in
+/// pre-order. Each non-UNKNOWN leaf has a column of its type. An ARRAY or MAP
+/// has an Integer column holding each non-null entry's length, followed by
+/// its element columns or its key and value columns. A ROW has a SmallInt
+/// column holding 1 at each non-null struct, followed by the columns of its
 /// fields. A top-level column's positions are the payload's rows. An
 /// ARRAY's element column and a MAP's key and value columns have one
 /// position per element of the container's non-null entries, entry by
@@ -241,8 +240,8 @@ struct CellStream {
 };
 
 /// Maps a physical shuffle row type (pid and UNKNOWN columns already stripped)
-/// onto wire columns and streams. Complex types reach it shredded (nested
-/// layouts) or packed into binary; create() rejects types it cannot map.
+/// onto wire columns and streams. Nested layouts supply their physical
+/// columns and the type adapter supplies packed binary data.
 class CellLayout {
  public:
   static bool isSupportedType(const TypePtr& type) {

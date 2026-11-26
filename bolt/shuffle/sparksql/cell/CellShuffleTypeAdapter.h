@@ -21,9 +21,8 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// Adapts a logical row type to a Cell physical row type: strips UNKNOWN
-/// columns (restored as null constants on unpack) and, when nested types are
-/// not shredded, packs ARRAY, MAP and ROW columns into one trailing VARBINARY
-/// column of CompactRows.
+/// columns (restored as null constants on unpack) and packs ARRAY, MAP and
+/// ROW columns into one trailing VARBINARY column of CompactRows.
 class CellShuffleTypeAdapter {
  public:
   /// Whether every leaf of `type`, at any depth of ARRAY, MAP and ROW, is a

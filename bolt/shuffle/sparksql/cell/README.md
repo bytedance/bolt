@@ -61,7 +61,7 @@ The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 | `enableNonTemporalStores` | `false` | Enable explicit non-temporal stores on supported aligned paths (AVX2); paths without non-temporal writes retain ordinary stores. |
 | `streamCompression` | `true` | Compress runs through the codec's stream form, from the cells through fixed buffers. Off, each frame is gathered into a spill-pool workspace and compressed at once. Codecs without a stream form are always one-shot. |
 | `adaptiveCompression` | `true` | After a frame that did not shrink, store the next frames of its kind without a codec call and retry one in ten. |
-| `nativeNestedTypes` | `true` | Shred ARRAY, MAP and ROW columns into a nested layout. Off, the type adapter packs them into one binary column. |
+| `nativeNestedTypes` | `true` | Split ARRAY, MAP and ROW columns into physical columns of a nested layout. Off, the type adapter packs them into one binary column. |
 
 The codec, level and backend come from `PartitionWriterOptions`
 (`compressionType`, `compressionLevel`, `codecBackend`), as for the other
@@ -289,7 +289,7 @@ spill-memory peak, flushed bytes and blocks, and direct disk appends.
 `reclaimOrdinary` steps from cheap to expensive and stops when the request
 is met:
 
-1. Return idle chunks (`shrink()`), the shredder's scratch and reservation
+1. Return idle chunks (`shrink()`), nested splitter scratch and reservation
    slack. This is safe even while the output reads cells.
 2. Write the oldest spill memory out, as much as the request still needs.
    This is safe even while the output writes (see above).
@@ -421,20 +421,23 @@ wire layout.
 
 ## 6. Nested types
 
-**Shredding.** With `nativeNestedTypes` on, a row type with ARRAY, MAP or
-ROW columns takes a nested layout (`CellNestedLayout`) when every leaf is
-supported and it shreds into at most 65535 columns. The type tree is
-shredded in pre-order: a leaf is a column of its type; an ARRAY or MAP is an
-Integer column of lengths followed by its element's columns, or its key's and
-value's; a ROW is a SmallInt presence column (1 at each non-null struct)
-followed by its fields.
+**Physical columns.** With `nativeNestedTypes` on, a row type with ARRAY, MAP
+or ROW columns uses `CellNestedLayout` when every leaf is supported and there
+are at most 65535 nodes below the top-level row. Physical columns follow the
+type tree in pre-order:
+
+- A non-UNKNOWN leaf contributes one column of its type.
+- An ARRAY or MAP contributes an Integer length column followed by its
+  element columns or its key and value columns.
+- A ROW contributes a SmallInt presence column (1 at each non-null struct)
+  followed by its fields.
 
 **Column groups.** Group 0 holds the rows. Each ARRAY or MAP owns a column
 group holding the elements of its non-null entries, numbered in pre-order. A
 ROW owns none: its fields stay in the ROW's group. `CellNestedSplitter` splits
 the rows' columns, then each column group in element batches of up to 64K
 positions, and gives the splitter each partition's position counts as the
-null-position base of those columns. The shredder owns these counts and the
+null-position base of those columns. `CellNestedSplitter` owns these counts and the
 wire-column mapping. At seal and finish, the writer passes a read-only view
 of the per-column counts to the splitter for that output call's null bodies;
 the splitter keeps no group metadata or borrowed count mapping between calls.
@@ -460,8 +463,8 @@ them. Which path is used:
 | Schema | `nativeNestedTypes` on | off |
 | --- | --- | --- |
 | no complex columns | flat layout | flat layout |
-| complex, at most 65535 shredded columns | nested layout | adapter |
-| complex, more than 65535 shredded columns | adapter | adapter |
+| complex, at most 65535 nodes below the top-level row | nested layout | adapter |
+| complex, more than 65535 nodes below the top-level row | adapter | adapter |
 
 Writer and reader decide alike from the same logical type, which is why
 `nativeNestedTypes` and `cellNativeNestedTypes` must match. Note that the
@@ -544,7 +547,7 @@ LD_LIBRARY_PATH=<build dir> taskset -c 3 ./bolt_shuffle_benchmark \
   `CellAdapter` variants join the cases they apply to), `input_mb`,
   `verify`, `list`, `dir`, `cell_stream_compression` and
   `cell_adaptive_compression`. See `--helpfull`.
-- Each benchmark reports ns per row, plus user counters (split, shred,
+- Each benchmark reports ns per row, plus user counters (split, flatten,
   seal and spill, compress, write and evict times, bytes written and raw,
   pool peak, and so on) in the `--bm_json_verbose` output. `spill_ns`
   is the writer's `spillTime`: the seals, spills and pushes done inside
@@ -579,7 +582,7 @@ output.
 | `CellSplitter.h` / `.cpp` | Per-type split loops, staging lines, dictionary form, flush, run and seal orchestration |
 | `CellShuffleWriter.h` / `.cpp` | The writer: layout choice, cell sizing, dictionary probe, memory pressure, seals |
 | `CellShuffleTypeAdapter.h` / `.cpp` | Packs and unpacks complex columns as one binary column |
-| `CellNestedLayout.h` / `.cpp` | Nested layout: nodes and column groups of a shredded row type |
+| `CellNestedLayout.h` / `.cpp` | Maps nested schema nodes to physical columns and column groups |
 | `CellNestedSplitter.h` / `.cpp` | Writer side of the nested layout |
 | `CellNestedAssembler.h` / `.cpp` | Reader side of the nested layout |
 | `CellOutput.h` / `.cpp` | `CellOutput`, `LocalCellOutput` (spill file and merge), `RssCellOutput` (pushes) |

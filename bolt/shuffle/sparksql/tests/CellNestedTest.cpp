@@ -666,8 +666,8 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
 
 TEST_F(CellNestedTest, adapterWhenNestedTypesAreNotNative) {
   // With nativeNestedTypes off on both sides, every nested schema goes
-  // through the adapter's binary column, converted and not shredded, and
-  // reads back as it does in a nested layout - batches of 3000 rows and
+  // through the adapter's binary column and reads back as it does in a
+  // nested layout. This covers batches of 3000 rows and
   // batches of large rows, a struct of three 3 MiB strings and a row of
   // 64 MiB + 1 beside one of 3 MiB, alike.
   const auto notNative = [](CellShuffleOptions& cell, bool) {
@@ -1941,10 +1941,8 @@ TEST_F(CellNestedTest, fieldsShorterThanTheirStructs) {
 }
 
 TEST_F(CellNestedTest, structsPastTheColumnLimitTakeTheAdapter) {
-  // A struct of 65535 fields shreds into 65536 columns, one more than a
-  // nested layout holds: it goes through the adapter's binary column,
-  // converted and not shredded, and reads back whole. A field fewer takes
-  // the nested layout.
+  // A struct of 65535 fields requires 65536 nodes and round-trips through
+  // the adapter's binary column. One fewer field fits in a nested layout.
   constexpr uint32_t kFields = 65'535;
   for (const uint32_t numFields : {kFields, kFields - 1}) {
     SCOPED_TRACE(fmt::format("{} fields", numFields));
@@ -1976,10 +1974,9 @@ TEST_F(CellNestedTest, structsPastTheColumnLimitTakeTheAdapter) {
 }
 
 TEST_F(CellNestedTest, nestedShuffleMetrics) {
-  // A nested layout's batches are shredded, not converted: flattenTime
-  // counts the shredding and splitTime the rest of each split, as V1
-  // counts them, so that together they fit in the time split() took; the
-  // batches and their rows count as the writer's input, as flat ones do.
+  // flattenTime covers nested preparation and expansion. splitTime covers
+  // the remaining split work. Both fit in the measured split() wall time.
+  // Input rows and batches count once.
   // Reading the payloads back - decompressing them, counting their
   // positions and assembling the batches - is the reader's decode time,
   // decompression a share of it.

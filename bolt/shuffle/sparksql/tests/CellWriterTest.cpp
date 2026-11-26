@@ -2472,7 +2472,7 @@ TEST_F(CellWriterTest, spillMemoryKeepsTheNewestSealsUnderALimit) {
 TEST_F(CellWriterTest, sealsAndSpillsAreTimedApartFromTheSplit) {
   // splitTime is the split alone, as V1 counts it: the seals, spills and
   // pushes done inside the splits are spillTime, flat or nested, local
-  // or pushed. With the shred time the two fit in the time the split()
+  // or pushed. Together with flattenTime, they fit in the time the split()
   // calls took, so none of it is counted twice. A small write that never
   // seals or spills has no spillTime, and neither has a write whose
   // only spill is a reclaim between two splits, which the operator counts

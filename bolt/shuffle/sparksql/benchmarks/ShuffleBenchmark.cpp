@@ -22,7 +22,8 @@
 /// `<case>/<writer>/read` times reading its output back; both count rows, so
 /// folly reports ns per row. Each also fills folly user counters with the
 /// steps behind that time - the writer's split, stop, convert, flatten
-/// (Cell: shred), pid, combine, compress, write, evict and reclaim times,
+/// (nested column preparation and expansion for Cell), pid, combine, compress,
+/// write, evict and reclaim times,
 /// bytes and windows, dictionary hits, memory peaks; the reader's
 /// decompress, decode and merge times - so versions compare step by step.
 /// --bm_json_verbose=<file> keeps them all as raw data.
@@ -2198,7 +2199,7 @@ RowTypePtr dataType(const Case& c) {
 
 /// CellNoDict is Cell without string dictionaries; CellUnsealedNulls is
 /// Cell that never seals a window for its null memory; CellAdapter is Cell
-/// with nested columns packed by the type adapter instead of shredded.
+/// with nested columns packed by the type adapter.
 enum class Writer {
   kCell,
   kCellNoDict,

@@ -723,7 +723,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   SCOPE_EXIT {
     pressure_.freedBytes += std::max<int64_t>(*actual, 0);
   };
-  // Idle chunks and unused shredder scratch can be released even during output.
+  // Idle chunks and nested splitter scratch can be released during output.
   *actual = allocator_->shrink();
   if (nestedSplitter_ != nullptr) {
     *actual += nestedSplitter_->releaseScratch();
@@ -896,8 +896,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
 
   shuffleCheck_.reset();
 
-  // The splitter has released its window; return idle chunks, the
-  // shredder's scratch and reservation.
+  // Return idle chunks, nested splitter scratch and the pool reservation.
   if (nestedSplitter_ != nullptr) {
     nestedSplitter_->releaseScratch();
   }

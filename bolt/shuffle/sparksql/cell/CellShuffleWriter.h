@@ -37,7 +37,7 @@ class CellShuffleCheck;
 
 /// Prepares logical rows for CellSplitter and schedules spills and seals.
 /// Hash/range input includes a leading pid column; single/round-robin does not.
-/// Nested columns are shredded or packed by the type adapter.
+/// CellNestedSplitter writes nested columns, or the type adapter packs them.
 ///
 /// Local memory pressure releases buffered spill data, then cell partitions.
 /// Celeborn pushes whole windows at batch boundaries. Memory limits come from
@@ -214,8 +214,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   uint64_t cellSpillThresholdBytes_{0};
   PressureStats pressure_;
   /// Time the flat path spends decoding the columns of its batches and
-  /// classifying their nulls, logged at stop. The nested path's is part of
-  /// the shred time.
+  /// classifying their nulls, logged at stop. The nested splitter includes
+  /// this work in its preparation time.
   uint64_t nullClassifyNs_{0};
   /// Total wall time of adapter_->pack() and splitBatch()/splitNested(), plus
   /// the nested seal/spill time bucketed by active phase so stopOrdinary()

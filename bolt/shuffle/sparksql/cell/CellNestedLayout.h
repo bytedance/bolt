@@ -24,8 +24,8 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// The nested layout (CellFormat.h) of a row type with ARRAY, MAP or ROW
-/// columns: its type tree shredded in pre-order into one plain Cell column
-/// per node except UNKNOWN leaves, which have no physical column.
+/// columns. Each node except an UNKNOWN leaf contributes one physical column
+/// in pre-order.
 /// A leaf is a column of its own type; an ARRAY or MAP an Integer column of
 /// each value's length, null where the value is; a ROW a SmallInt presence
 /// column, 1 at each non-null struct.
@@ -58,8 +58,6 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 ///       |- sum(c1) = M1 -> Group 1 (depth=1): columns=[c2]
 ///       `- sum(c3) = M2 -> Group 2 (depth=1): columns=[c4, c5, c6]
 ///                            `- sum(c6) = M3 -> Group 3 (depth=2): [c7, c8]
-///
-/// Describes the shredding only: no data passes through here.
 class CellNestedLayout {
  public:
   static constexpr uint32_t kNone = ~0u;
@@ -112,8 +110,8 @@ class CellNestedLayout {
   };
 
   /// Whether `rowType` takes a nested layout: it has ARRAY, MAP or ROW
-  /// columns and shreds into at most 65535 columns. Its leaf types are
-  /// the callers' to check first (CellShuffleTypeAdapter::isSupported).
+  /// columns and at most 65535 nodes below the top-level row. Callers check
+  /// the leaf types first with CellShuffleTypeAdapter::isSupported().
   /// Writer and reader decide alike from the same logical row type, unless
   /// both are configured to pack nested types instead.
   static bool supports(const RowTypePtr& rowType);
@@ -125,7 +123,7 @@ class CellNestedLayout {
     return logicalType_;
   }
 
-  /// The shredded columns' layout, a plain one.
+  /// Cell layout of the physical columns.
   const CellLayout& layout() const {
     return layout_;
   }

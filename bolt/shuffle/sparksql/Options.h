@@ -171,7 +171,7 @@ struct CellShuffleOptions {
   // kind whose data starts to compress is picked up again. Off, every frame
   // is compressed and judged.
   bool adaptiveCompression = true;
-  // Shred ARRAY, MAP and ROW columns into plain columns of a nested
+  // Split ARRAY, MAP and ROW columns into physical columns of a nested
   // layout (cell/CellFormat.h). Off, the type adapter packs them row by row
   // into one binary column: a fallback for wide nested schemas at high
   // partition counts, whose per-stream
