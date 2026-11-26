@@ -1618,7 +1618,7 @@ class QueryConfig {
   }
 
   bool simdHashTableEnabled() const {
-    return get<bool>(kSimdHashTableEnabled, false);
+    return get<bool>(kSimdHashTableEnabled, true);
   }
 
   bool isExchangeCompressionEnabled() const {
