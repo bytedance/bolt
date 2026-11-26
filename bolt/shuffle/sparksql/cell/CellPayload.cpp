@@ -378,6 +378,11 @@ CellPayloadDecoder::CellPayloadDecoder(
         BOLT_FAIL("unsupported column type");
     }
   }
+  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
+    if (layout_.stream(s).kind == StreamKind::kStringData) {
+      stringDataStreams_.push_back(s);
+    }
+  }
 }
 
 CellPayloadDecoder::CellPayloadDecoder(
@@ -724,6 +729,17 @@ void CellPayloadDecoder::openPayload(ShuffleByteSource& in) {
   rowCount_ = 0;
   rowsRead_ = 0;
   const uint32_t rowCount = parsePayload(in);
+  uint64_t streamStringBytes = 0;
+  for (const uint32_t stream : stringDataStreams_) {
+    streamStringBytes += streamViews_[stream].size();
+  }
+  // Treat the header's variableBytes as a sizing hint only (never for
+  // allocation), taking the larger of it and actual string data streams so
+  // both dictionary-compressed and corrupted headers stay bounded.
+  const uint64_t variableBytes =
+      std::max(payloadVariableBytes_, streamStringBytes);
+  payloadRowBytes_ = std::max<uint64_t>(
+      1, rowBytes_ + variableBytes / std::max<uint32_t>(rowCount, 1u));
   openColumns(rowCount);
 }
 
@@ -759,17 +775,17 @@ uint32_t CellPayloadDecoder::parsePayload(ShuffleByteSource& in) {
   }
   const uint32_t rowCount = memory::loadUnaligned<uint32_t>(header);
   const uint32_t runCount = memory::loadUnaligned<uint32_t>(header + 4);
-  // variableBytes (offset 8) is unused here; it must be 0 only in a
-  // payload without wire columns.
+  const uint64_t variableBytes = memory::loadUnaligned<uint64_t>(header + 8);
   const uint32_t nullStoredSize = memory::loadUnaligned<uint32_t>(header + 16);
   const uint32_t nullDecodedSize = memory::loadUnaligned<uint32_t>(header + 20);
   const uint32_t numColumns = layout_.numColumns();
   if (numColumns == 0 &&
       (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
-       memory::loadUnaligned<uint64_t>(header + 8) != 0)) {
+       variableBytes != 0)) {
     failMalformedPayload(
         "payload without wire columns must contain only its header");
   }
+  payloadVariableBytes_ = variableBytes;
   if (numColumns != 0 && nullStoredSize < 1) {
     failMalformedPayload("null stored size must be at least 1");
   }

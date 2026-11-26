@@ -29,7 +29,7 @@ class CellNestedAssembler;
 /// The Cell shuffle read chain: inherits stream traversal, decompression,
 /// metrics, and CompositeRows deserialization from CompositeShuffleReader,
 /// and decodes Cell payloads (ShuffleBlockKind::kCellPayload) into batches
-/// of at most batchSize rows: a large payload over several batches, small
+/// of at most maxBatchRows rows: a large payload over several batches, small
 /// ones into one.
 ///
 /// Batches come out in the logical schema: a nested layout's by a
@@ -43,8 +43,8 @@ class CellShuffleReader final : public CompositeShuffleReader {
       Codec* codec, // decompression context; may be null (uncompressed)
       arrow::MemoryPool* arrowPool, // only handed to nextStream()
       memory::MemoryPool* pool,
-      int32_t batchSize,
-      int64_t batchByteSize,
+      int32_t maxBatchRows,
+      int64_t maxBatchBytes,
       // The writer's CellShuffleOptions::nativeNestedTypes.
       bool nativeNestedTypes = true);
 
@@ -61,7 +61,7 @@ class CellShuffleReader final : public CompositeShuffleReader {
   /// or when a CompositeRows block was loaded into the base reader.
   bool nextPayload();
 
-  /// Next batch in the physical (Cell) schema, at most batchSize rows;
+  /// Next batch in the physical (Cell) schema, at most maxBatchRows rows;
   /// nullptr at the end.
   RowVectorPtr nextPhysical();
 

@@ -478,15 +478,15 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
         std::shared_ptr<ReaderStreamIterator> streams,
         const RowTypePtr& outputType,
         memory::MemoryPool* pool,
-        int32_t batchSize)
+        int32_t maxBatchRows)
         : CompositeShuffleReader(
               std::move(streams),
               outputType,
               /*codec=*/nullptr,
               arrow::default_memory_pool(),
               pool,
-              batchSize,
-              /*batchByteSize=*/0),
+              maxBatchRows,
+              /*maxBatchBytes=*/1 << 20),
           outputType_(outputType) {}
 
     std::string_view name() const override {
@@ -496,7 +496,7 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
    private:
     RowVectorPtr nextNonComposite() override {
       RowBlock batch;
-      while (static_cast<int32_t>(batch.size()) < batchSize()) {
+      while (static_cast<int32_t>(batch.size()) < maxBatchRows()) {
         if (!readNextBlock([&](ShuffleBlockKind kind, ShuffleByteSource& src) {
               BOLT_CHECK_EQ(kind, ShuffleBlockKind::kRows);
               rowBlockReader().append(src, batch, ShuffleBlockKind::kRows);

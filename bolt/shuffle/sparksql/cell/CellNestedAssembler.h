@@ -46,9 +46,9 @@ class CellNestedAssembler {
   /// nextBatch(). Throws on malformed input.
   void openPayload(ShuffleByteSource& in);
 
-  /// Returns up to maxBatchRows root rows, aiming for byteBudget bytes.
-  /// A nonpositive budget allows one append. nextPayload returns false at
-  /// EOF or a CompositeRows block. Returns nullptr if no rows were appended.
+  /// Returns up to maxBatchRows root rows, aiming for a positive byteBudget
+  /// bytes. nextPayload returns false at EOF or a CompositeRows block. Returns
+  /// nullptr if no rows were appended.
   RowVectorPtr nextBatch(
       vector_size_t maxBatchRows,
       int64_t byteBudget,

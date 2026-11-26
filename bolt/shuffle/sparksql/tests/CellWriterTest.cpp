@@ -1342,7 +1342,7 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
       if (windowRows == 0) {
         // A window that never closes is one payload per partition.
         EXPECT_EQ(
-            test::readerBatchSizes(bytes, type, codec.get(), pool(), kRows, 0),
+            test::payloadRowCounts(bytes, type, codec.get(), pool()),
             std::vector<vector_size_t>{kRows / kPartitions});
       }
       for (const int32_t batchSize : {333, 1000}) {
@@ -1355,16 +1355,13 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
           EXPECT_EQ(batches[b]->size(), batchSize);
         }
       }
-      // A byte target at or below zero still reads every row, one append
-      // per batch: at most one window's rows when the windows are small.
+      // A non-positive byte budget is rejected at construction time.
       for (const int64_t batchByteSize : {int64_t{0}, int64_t{-1}}) {
         SCOPED_TRACE(batchByteSize);
-        const auto batches = test::readPartition(
-            bytes, type, codec.get(), pool(), 1000, batchByteSize);
-        test::expectPartitionRows(rows[pid], batches, pid, 1000);
-        for (const auto& batch : batches) {
-          EXPECT_LE(batch->size(), windowRows == 0 ? 1000 : windowRows);
-        }
+        BOLT_ASSERT_THROW(
+            test::makeReader(
+                bytes, type, codec.get(), pool(), 1000, batchByteSize),
+            "maxBatchBytes must be positive");
       }
     }
   }
@@ -1411,6 +1408,179 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
   }
 }
 
+TEST_F(CellWriterTest, flatReaderSplitsSingleLargePayloadByByteBudget) {
+  constexpr vector_size_t kRows = 4096;
+  constexpr int64_t kBatchBytes = 64 << 10;
+  const std::string text(1 << 10, 's');
+  const int64_t rowBytes = 8 + 16 + static_cast<int64_t>(text.size());
+
+  // Both flat and dictionary-encoded strings in a single payload must be split
+  // according to the byte budget rather than emitted as one ~4 MiB batch.
+  for (const bool enableDict : {false, true}) {
+    SCOPED_TRACE(enableDict);
+    const auto batch = makeRowVector(
+        {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+         makeFlatVector<StringView>(
+             kRows, [&](auto) { return StringView(text); })});
+    auto options = writerOptions(1, false, arrow::Compression::UNCOMPRESSED);
+    options.cellOptions.enableStringDictionary = enableDict;
+    const auto input = test::roundRobin({batch}, 1);
+    const auto written = test::writeShuffle(options, input, pool());
+    const auto type = asRowType(batch->type());
+
+    const auto batches = test::readPartition(
+        written.partitions[0], type, nullptr, pool(), kRows, kBatchBytes);
+    test::expectPartitionRows(input.rowsOf(1)[0], batches, 0, kRows);
+    ASSERT_GT(batches.size(), 1u);
+    for (size_t b = 0; b < batches.size(); ++b) {
+      if (b + 1 < batches.size()) {
+        EXPECT_GE(batches[b]->size() * rowBytes, kBatchBytes);
+      }
+      EXPECT_LE(batches[b]->size() * rowBytes, kBatchBytes + rowBytes);
+    }
+  }
+
+  // A single row larger than the byte budget still emits one row per batch.
+  const std::string huge(128 << 10, 'h');
+  const auto hugeBatch = makeRowVector(
+      {makeFlatVector<int64_t>(5, [](auto row) { return row; }),
+       makeFlatVector<StringView>(5, [&](auto) { return StringView(huge); })});
+  auto options = writerOptions(1, false, arrow::Compression::UNCOMPRESSED);
+  options.cellOptions.enableStringDictionary = false;
+  const auto hugeInput = test::roundRobin({hugeBatch}, 1);
+  const auto hugeWritten = test::writeShuffle(options, hugeInput, pool());
+  const auto hugeBatches = test::readPartition(
+      hugeWritten.partitions[0],
+      asRowType(hugeBatch->type()),
+      nullptr,
+      pool(),
+      100,
+      kBatchBytes);
+  test::expectPartitionRows(hugeInput.rowsOf(1)[0], hugeBatches, 0, 100);
+  ASSERT_EQ(hugeBatches.size(), 5u);
+  for (const auto& out : hugeBatches) {
+    EXPECT_EQ(out->size(), 1);
+  }
+}
+
+TEST_F(CellWriterTest, flatReaderUpdatesTargetRowsAcrossPayloads) {
+  constexpr int64_t kBatchBytes = 64 << 10;
+  constexpr int32_t kBatchSize = 128;
+
+  // Transition 1: wide payload (1 row of 32 KiB -> batchCap = 2) followed by
+  // narrow small payloads (16 B strings) closes the first batch at batchCap
+  // without reallocating, then opens the next batch at full kBatchSize.
+  const std::string wideStr(32 << 10, 'w');
+  const std::string narrowStr(16, 'n');
+  auto writeSinglePayload = [&](const RowVectorPtr& batch) {
+    auto opts = writerOptions(1, false, arrow::Compression::UNCOMPRESSED);
+    opts.cellOptions.enableStringDictionary = false;
+    return test::writeShuffle(opts, test::roundRobin({batch}, 1), pool())
+        .partitions[0];
+  };
+  const auto wideBatch = makeRowVector(
+      {makeFlatVector<int64_t>(1, [](auto) { return int64_t{0}; }),
+       makeFlatVector<StringView>(
+           1, [&](auto) { return StringView(wideStr); })});
+  std::string wideToNarrowBytes = writeSinglePayload(wideBatch);
+  ShuffleInput wideToNarrowInput;
+  wideToNarrowInput.data.push_back(wideBatch);
+  wideToNarrowInput.pids.push_back({0});
+  for (int i = 0; i < 20; ++i) {
+    auto smallBatch = makeRowVector(
+        {makeFlatVector<int64_t>(
+             10, [&](auto row) { return int64_t{1 + i * 10 + row}; }),
+         makeFlatVector<StringView>(
+             10, [&](auto) { return StringView(narrowStr); })});
+    wideToNarrowBytes.append(writeSinglePayload(smallBatch));
+    wideToNarrowInput.data.push_back(smallBatch);
+    wideToNarrowInput.pids.push_back(std::vector<int32_t>(10, 0));
+  }
+  const auto type = asRowType(wideBatch->type());
+  const auto wideToNarrowOut = test::readPartition(
+      wideToNarrowBytes, type, nullptr, pool(), kBatchSize, kBatchBytes);
+  test::expectPartitionRows(
+      wideToNarrowInput.rowsOf(1)[0], wideToNarrowOut, 0, kBatchSize);
+  ASSERT_EQ(wideToNarrowOut.size(), 3u);
+  EXPECT_EQ(wideToNarrowOut[0]->size(), 2);
+  EXPECT_EQ(wideToNarrowOut[1]->size(), kBatchSize);
+  EXPECT_EQ(wideToNarrowOut[2]->size(), 201 - 2 - kBatchSize);
+
+  // Variable-length payload whose leading rows are shorter than the payload
+  // average stops at the initial batchCap instead of reallocating for a few
+  // extra rows to reach byteBudget.
+  const std::string shortStr(500, 'a');
+  const std::string longStr(1500, 'b');
+  const auto varBatch = makeRowVector(
+      {makeFlatVector<int64_t>(200, [](auto row) { return row; }),
+       makeFlatVector<StringView>(200, [&](auto row) {
+         return row < 100 ? StringView(shortStr) : StringView(longStr);
+       })});
+  const std::string varBytes = writeSinglePayload(varBatch);
+  const auto varOut =
+      test::readPartition(varBytes, type, nullptr, pool(), 1000, kBatchBytes);
+  test::expectPartitionRows(
+      test::roundRobin({varBatch}, 1).rowsOf(1)[0], varOut, 0, 1000);
+  ASSERT_GT(varOut.size(), 2u);
+  // Average row width is 1024 B -> batchCap = 64; batch 0 stops at 64 rows
+  // (~33.5 KiB) rather than reallocating to chase 64 KiB.
+  EXPECT_EQ(varOut[0]->size(), 64);
+  EXPECT_LT(
+      varOut[0]->childAt(0)->values()->capacity(),
+      2 * static_cast<uint64_t>(64) * sizeof(int64_t));
+
+  // Transition 2: narrow payload (10 rows of 16 B) followed by a large payload
+  // of 500 x 1 KiB strings updates payloadRowBytes_ mid-batch so the large
+  // payload is split by the remaining byte budget instead of appended whole.
+  const std::string midStr(1 << 10, 'm');
+  const auto smallFirst = makeRowVector(
+      {makeFlatVector<int64_t>(10, [](auto row) { return row; }),
+       makeFlatVector<StringView>(
+           10, [&](auto) { return StringView(narrowStr); })});
+  const auto largeSecond = makeRowVector(
+      {makeFlatVector<int64_t>(500, [](auto row) { return 10 + row; }),
+       makeFlatVector<StringView>(
+           500, [&](auto) { return StringView(midStr); })});
+  std::string narrowToWideBytes = writeSinglePayload(smallFirst);
+  narrowToWideBytes.append(writeSinglePayload(largeSecond));
+  ShuffleInput narrowToWideInput;
+  narrowToWideInput.data = {smallFirst, largeSecond};
+  narrowToWideInput.pids = {
+      std::vector<int32_t>(10, 0), std::vector<int32_t>(500, 0)};
+  const auto narrowToWideOut = test::readPartition(
+      narrowToWideBytes, type, nullptr, pool(), 1000, kBatchBytes);
+  test::expectPartitionRows(
+      narrowToWideInput.rowsOf(1)[0], narrowToWideOut, 0, 1000);
+  ASSERT_GT(narrowToWideOut.size(), 5u);
+  EXPECT_LT(narrowToWideOut[0]->size(), 100);
+
+  // Tight byte budget on a wide table caps initial preallocation so reading
+  // succeeds in a small reader memory pool (unlike preallocating 4096 rows).
+  constexpr uint32_t kWideCols = 256;
+  std::vector<VectorPtr> wideCols;
+  wideCols.reserve(kWideCols);
+  for (uint32_t c = 0; c < kWideCols; ++c) {
+    wideCols.push_back(makeFlatVector<int64_t>(
+        4, [c](auto row) { return static_cast<int64_t>(c * 100 + row); }));
+  }
+  const auto wideTable = makeRowVector(std::move(wideCols));
+  auto wideOpts = writerOptions(1, false, arrow::Compression::UNCOMPRESSED);
+  const auto wideInput = test::roundRobin({wideTable}, 1);
+  const auto wideWritten = test::writeShuffle(wideOpts, wideInput, pool());
+  auto smallRoot =
+      memory::memoryManager()->addRootPool("cell_reader_tight_budget", 2 << 20);
+  auto smallLeaf = smallRoot->addLeafChild("reader");
+  const auto wideOut = test::readPartition(
+      wideWritten.partitions[0],
+      asRowType(wideTable->type()),
+      nullptr,
+      smallLeaf.get(),
+      4096,
+      16 << 10);
+  test::expectPartitionRows(wideInput.rowsOf(1)[0], wideOut, 0, 4096);
+  EXPECT_LE(smallRoot->peakBytes(), 1 << 20);
+}
+
 TEST_F(CellWriterTest, oneFlatBatchSpansDecodeChunks) {
   constexpr vector_size_t kRows = (64 << 10) + 11;
   std::mt19937 rng(47);
@@ -1431,7 +1601,7 @@ TEST_F(CellWriterTest, oneFlatBatchSpansDecodeChunks) {
       nullptr,
       pool(),
       kRows,
-      0);
+      1 << 30);
   ASSERT_EQ(batches.size(), 1);
   test::expectPartitionRows(input.rowsOf(1)[0], batches, 0, kRows);
 }
@@ -1544,13 +1714,18 @@ TEST_F(CellWriterTest, readerStringBlockBoundaries) {
         EXPECT_EQ(batches[i]->size(), batchSize);
       }
     }
-    const auto batches = test::readPartition(
-        written.partitions[0], type, codec.get(), pool(), 256, 128);
-    test::expectPartitionRows(rows[0], batches, 0, 256);
-    ASSERT_EQ(batches.size(), input.data.size());
-    for (size_t i = 0; i < batches.size(); ++i) {
-      EXPECT_EQ(batches[i]->size(), input.data[i]->size());
+    // Each input batch wrote its own payload.
+    const auto counts = test::payloadRowCounts(
+        written.partitions[0], type, codec.get(), pool());
+    ASSERT_EQ(counts.size(), input.data.size());
+    for (size_t i = 0; i < counts.size(); ++i) {
+      EXPECT_EQ(counts[i], input.data[i]->size());
     }
+    // A small positive byte budget splits individual payloads as well.
+    const auto splitBatches = test::readPartition(
+        written.partitions[0], type, codec.get(), pool(), 256, 128);
+    test::expectPartitionRows(rows[0], splitBatches, 0, 256);
+    EXPECT_GT(splitBatches.size(), input.data.size());
   }
 }
 

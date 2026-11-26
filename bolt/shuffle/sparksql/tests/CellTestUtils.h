@@ -35,7 +35,9 @@
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
@@ -467,22 +469,31 @@ inline std::vector<RowVectorPtr> readPartition(
       nativeNestedTypes);
 }
 
-/// The rows of every batch CellShuffleReader returns from one partition's
-/// bytes; the arguments are makeReader()'s. With a byte target at or below
-/// zero and a batch size above every payload's rows, a batch is a payload.
-inline std::vector<vector_size_t> readerBatchSizes(
+/// The row count of every Cell payload in one partition's `bytes`.
+inline std::vector<vector_size_t> payloadRowCounts(
     const std::string& bytes,
     const RowTypePtr& type,
     Codec* codec,
     memory::MemoryPool* pool,
-    int32_t batchSize,
-    int64_t batchByteSize) {
-  std::vector<vector_size_t> sizes;
-  for (const auto& batch :
-       readPartition(bytes, type, codec, pool, batchSize, batchByteSize)) {
-    sizes.push_back(batch->size());
+    bool nativeNestedTypes = true) {
+  auto decompressor =
+      codec == nullptr ? nullptr : std::make_unique<CodecDecompressor>(codec);
+  CellLayout layout = (nativeNestedTypes && CellNestedLayout::supports(type))
+      ? CellNestedLayout(type).layout()
+      : CellLayout::create(CellShuffleTypeAdapter(type).physicalType());
+  CellPayloadDecoder decoder(std::move(layout), decompressor.get(), pool);
+  StreamByteSource source(std::make_shared<arrow::io::BufferReader>(
+      arrow::Buffer::FromString(bytes)));
+  std::vector<vector_size_t> counts;
+  while (!source.atEnd()) {
+    uint8_t kind = 0;
+    BOLT_CHECK(source.read(&kind, 1), "truncated shuffle block");
+    BOLT_CHECK_EQ(
+        static_cast<ShuffleBlockKind>(kind), ShuffleBlockKind::kCellPayload);
+    counts.push_back(
+        static_cast<vector_size_t>(decoder.readPayloadStreams(source)));
   }
-  return sizes;
+  return counts;
 }
 
 /// Whether row `leftRow` of `left` and row `rightRow` of `right` hold the

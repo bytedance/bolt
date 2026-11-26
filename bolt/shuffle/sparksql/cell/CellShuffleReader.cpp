@@ -30,8 +30,8 @@ CellShuffleReader::CellShuffleReader(
     Codec* codec,
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
-    int32_t batchSize,
-    int64_t batchByteSize,
+    int32_t maxBatchRows,
+    int64_t maxBatchBytes,
     bool nativeNestedTypes)
     : CompositeShuffleReader(
           std::move(streams),
@@ -39,8 +39,8 @@ CellShuffleReader::CellShuffleReader(
           codec,
           arrowPool,
           pool,
-          batchSize,
-          batchByteSize) {
+          maxBatchRows,
+          maxBatchBytes) {
   BOLT_CHECK(
       CellShuffleTypeAdapter::isSupported(outputType),
       "Unsupported Cell logical schema: {}",
@@ -75,9 +75,7 @@ bool CellShuffleReader::nextPayload() {
 RowVectorPtr CellShuffleReader::nextNonComposite() {
   if (nestedAssembler_ != nullptr) {
     return nestedAssembler_->nextBatch(
-        std::max(batchSize(), 1), batchByteSize(), [&] {
-          return nextPayload();
-        });
+        maxBatchRows(), maxBatchBytes(), [&] { return nextPayload(); });
   }
   auto output = nextPhysical();
   if (output != nullptr && adapter_->needsAdaptation()) {
@@ -87,14 +85,17 @@ RowVectorPtr CellShuffleReader::nextNonComposite() {
 }
 
 RowVectorPtr CellShuffleReader::nextPhysical() {
-  const vector_size_t capacity = std::max(batchSize(), 1);
-  // One batch at a time: a large payload comes out over several calls,
-  // small ones fill the same batch until it is full. An empty batch always
-  // takes one append, so a byte target at or below zero reads one append
-  // per batch.
-  while (decoder_->batchRows() < capacity &&
-         (decoder_->batchRows() == 0 ||
-          static_cast<int64_t>(decoder_->batchBytes()) < batchByteSize())) {
+  while (decoder_->payloadRowsLeft() == 0) {
+    if (!nextPayload()) {
+      // End of input, or a composite block that next() emits on its own.
+      return nullptr;
+    }
+  }
+  const uint64_t budget = static_cast<uint64_t>(maxBatchBytes());
+  decoder_->reserveRows(std::min<uint64_t>(
+      maxBatchRows(), (budget - 1) / decoder_->payloadRowBytes() + 1));
+  while (decoder_->batchRows() < decoder_->batchCapacity() &&
+         decoder_->batchBytes() < budget) {
     const uint32_t left = decoder_->payloadRowsLeft();
     if (left == 0) {
       if (!nextPayload()) {
@@ -103,11 +104,14 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
       }
       continue;
     }
-    const auto rows = static_cast<uint32_t>(
-        std::min<int64_t>(left, capacity - decoder_->batchRows()));
-    if (decoder_->batchRows() == 0) {
-      decoder_->reserveRows(capacity);
-    }
+    const uint64_t remainingBytes = budget - decoder_->batchBytes();
+    const uint64_t maxRowsByBytes =
+        (remainingBytes - 1) / decoder_->payloadRowBytes() + 1;
+    const uint32_t rows = static_cast<uint32_t>(std::min<uint64_t>(
+        left,
+        std::min<uint64_t>(
+            decoder_->batchCapacity() - decoder_->batchRows(),
+            maxRowsByBytes)));
     decoder_->appendRows(rows);
   }
   return decoder_->finishBatch();

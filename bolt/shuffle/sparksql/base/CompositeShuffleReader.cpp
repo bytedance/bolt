@@ -31,8 +31,8 @@ CompositeShuffleReader::CompositeShuffleReader(
     Codec* codec,
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
-    int32_t batchSize,
-    int64_t batchByteSize)
+    int32_t maxBatchRows,
+    int64_t maxBatchBytes)
     : decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
@@ -40,10 +40,11 @@ CompositeShuffleReader::CompositeShuffleReader(
       arrowPool_(arrowPool),
       rowBlockReader_(decompressor_.get(), pool),
       pool_(pool),
-      batchSize_(batchSize),
-      batchByteSize_(batchByteSize),
+      maxBatchRows_(std::max(maxBatchRows, 1)),
+      maxBatchBytes_(maxBatchBytes),
       compositeConverter_(outputType, pool_) {
   BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
+  BOLT_CHECK_GT(maxBatchBytes_, 0, "maxBatchBytes must be positive");
 }
 
 std::optional<ShuffleBlockKind> CompositeShuffleReader::nextBlockKind() {
@@ -77,12 +78,10 @@ void CompositeShuffleReader::readCompositeBlock() {
 RowVectorPtr CompositeShuffleReader::nextComposite() {
   const size_t limit = std::min(
       compositeBlock_.rows.size(),
-      nextCompositeRow_ + static_cast<size_t>(std::max(batchSize_, 1)));
-  const uint64_t byteCap = batchByteSize_ > 0
-      ? std::min<uint64_t>(
-            static_cast<uint64_t>(batchByteSize_),
-            std::numeric_limits<int32_t>::max())
-      : static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+      nextCompositeRow_ + static_cast<size_t>(maxBatchRows_));
+  const uint64_t byteCap = std::min<uint64_t>(
+      static_cast<uint64_t>(maxBatchBytes_),
+      std::numeric_limits<int32_t>::max());
   size_t end = nextCompositeRow_;
   uint64_t total = 0;
   while (end < limit) {

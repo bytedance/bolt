@@ -95,6 +95,10 @@ class CellPayloadDecoder {
     return batchRows_;
   }
 
+  vector_size_t batchCapacity() const {
+    return batchCapacity_;
+  }
+
   /// Bytes the batch's values take: fixed widths plus out-of-line strings.
   uint64_t batchBytes() const {
     return static_cast<uint64_t>(batchRows_) * rowBytes_ + batchStringBytes_;
@@ -114,6 +118,12 @@ class CellPayloadDecoder {
   /// Fixed bytes of one decoded row.
   uint32_t rowBytes() const {
     return rowBytes_;
+  }
+
+  /// Estimated decoded bytes per row of the open payload (fixed widths plus
+  /// average variable bytes), at least 1. Updated on every openPayload().
+  uint64_t payloadRowBytes() const {
+    return payloadRowBytes_;
   }
 
  private:
@@ -307,6 +317,7 @@ class CellPayloadDecoder {
   std::vector<uint32_t> sourceStreams_;
   /// Fixed bytes of one decoded row, the batch byte estimate's base.
   uint32_t rowBytes_{0};
+  std::vector<uint32_t> stringDataStreams_;
 
   // Per-payload state, reused across calls. The byte buffers sized from
   // untrusted payload fields live in the reader pool so decoded runs stay
@@ -330,6 +341,8 @@ class CellPayloadDecoder {
   std::vector<ColumnCursor> cursors_;
   uint32_t rowCount_{0};
   uint32_t rowsRead_{0};
+  uint64_t payloadVariableBytes_{0};
+  uint64_t payloadRowBytes_{1};
   BufferPtr compressedScratch_;
   BufferPtr combinedDecoded_;
 

@@ -37,20 +37,21 @@ class Codec;
 /// nextNonComposite() and readNextBlock().
 class CompositeShuffleReader : public BlockShuffleReader {
  public:
+  /// `maxBatchBytes` must be positive; `maxBatchRows` is clamped to at least 1.
   CompositeShuffleReader(
       std::shared_ptr<ReaderStreamIterator> streams,
       const RowTypePtr& outputType,
       Codec* codec,
       arrow::MemoryPool* arrowPool,
       memory::MemoryPool* pool,
-      int32_t batchSize,
-      int64_t batchByteSize);
+      int32_t maxBatchRows,
+      int64_t maxBatchBytes);
 
   ~CompositeShuffleReader() override = default;
 
   /// Next output batch; nullptr when every stream is exhausted.
   /// CompositeRows blocks come out as CompositeRowVectors of at most
-  /// batchSize rows, never concatenated with non-composite rows.
+  /// maxBatchRows rows, never concatenated with non-composite rows.
   RowVectorPtr next() final;
 
   uint64_t decodeTimeNs() const override {
@@ -124,12 +125,12 @@ class CompositeShuffleReader : public BlockShuffleReader {
     return pool_;
   }
 
-  int32_t batchSize() const {
-    return batchSize_;
+  int32_t maxBatchRows() const {
+    return maxBatchRows_;
   }
 
-  int64_t batchByteSize() const {
-    return batchByteSize_;
+  int64_t maxBatchBytes() const {
+    return maxBatchBytes_;
   }
 
   void incrementPayloadsRead() {
@@ -147,7 +148,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
 
   void readCompositeBlock();
 
-  /// The next up to batchSize rows of the last CompositeRows block, rebuilt
+  /// The next up to maxBatchRows rows of the last CompositeRows block, rebuilt
   /// as a CompositeRowVector the way the V1 reader does.
   RowVectorPtr nextComposite();
 
@@ -159,8 +160,8 @@ class CompositeShuffleReader : public BlockShuffleReader {
   uint64_t streamsOpened_{0};
   RowBlockReader rowBlockReader_;
   memory::MemoryPool* const pool_;
-  const int32_t batchSize_;
-  const int64_t batchByteSize_;
+  const int32_t maxBatchRows_;
+  const int64_t maxBatchBytes_;
   ShuffleRowToColumnarConverter compositeConverter_;
   /// Last CompositeRows block's backing buffer and row views (without size
   /// prefix).

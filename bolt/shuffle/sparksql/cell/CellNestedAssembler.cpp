@@ -114,6 +114,8 @@ RowVectorPtr CellNestedAssembler::nextBatch(
     vector_size_t maxBatchRows,
     int64_t byteBudget,
     const std::function<bool()>& nextPayload) {
+  BOLT_CHECK_GT(byteBudget, 0, "byteBudget must be positive");
+  const uint64_t budget = static_cast<uint64_t>(byteBudget);
   auto& rows = *decoders_[0];
   uint64_t batchBytes = 0;
   while (true) {
@@ -121,10 +123,8 @@ RowVectorPtr CellNestedAssembler::nextBatch(
     if (batchRows >= maxBatchRows) {
       break;
     }
-    // As for a flat payload: past the budget, or a single append when there
-    // is none.
-    if (batchRows > 0 &&
-        (byteBudget <= 0 || batchBytes >= static_cast<uint64_t>(byteBudget))) {
+    // Stop once an open batch reaches the byte budget.
+    if (batchRows > 0 && batchBytes >= budget) {
       break;
     }
     if (rows.payloadRowsLeft() == 0) {
@@ -139,16 +139,12 @@ RowVectorPtr CellNestedAssembler::nextBatch(
       }
       continue;
     }
-    uint32_t rowsToAppend = std::min(
-        rows.payloadRowsLeft(),
-        static_cast<uint32_t>(maxBatchRows - batchRows));
-    if (byteBudget > 0) {
-      // The rows the budget has room for, by the payload's bytes per row.
-      const uint64_t budget = static_cast<uint64_t>(byteBudget);
-      rowsToAppend = std::min<uint64_t>(
-          rowsToAppend,
-          std::max<uint64_t>(1, (budget - batchBytes) / payloadRowBytes_));
-    }
+    // The rows the budget has room for, by the payload's bytes per row.
+    const uint32_t rowsToAppend = static_cast<uint32_t>(std::min<uint64_t>(
+        std::min(
+            rows.payloadRowsLeft(),
+            static_cast<uint32_t>(maxBatchRows - batchRows)),
+        std::max<uint64_t>(1, (budget - batchBytes) / payloadRowBytes_)));
     batchBytes += appendGroup(0, rowsToAppend);
   }
   return rows.batchRows() == 0 ? nullptr : assemble();

@@ -27,6 +27,7 @@
 #include <arrow/io/memory.h>
 #include <fmt/format.h>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/Utils.h"
@@ -452,8 +453,8 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
        {{4096, 1 << 20}, {1, 1 << 20}, {1000, 1}}});
 
   // Containers of up to 150000 elements among small ones, partition 0
-  // taking both large rows. Read back whole, a row per batch by batch size
-  // and by byte budget, and an append per batch with no byte target.
+  // taking both large rows. Read back whole, and a row per batch by batch size
+  // and by byte budget.
   cases.push_back(
       {"containers of 150000 elements",
        7,
@@ -495,7 +496,7 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
          input.pids.insert(input.pids.begin() + 1, {0, 0, 1});
          return input;
        },
-       {{4096, 1 << 30}, {1, 1 << 20}, {1000, 1}, {1000, 0}}});
+       {{4096, 1 << 30}, {1, 1 << 20}, {1000, 1}}});
 
   // Every nanosecond of a timestamp, at any depth, as a flat column keeps
   // it: in arrays and in the arrays of maps' values, and at the top level
@@ -784,14 +785,10 @@ TEST_F(CellNestedTest, spillsAndSeals) {
             }
             std::vector<size_t> payloads;
             for (const auto& bytes : written.partitions) {
-              payloads.push_back(test::readerBatchSizes(
-                                     bytes,
-                                     type,
-                                     rss ? lz4.get() : nullptr,
-                                     pool(),
-                                     32 << 10,
-                                     0)
-                                     .size());
+              payloads.push_back(
+                  test::payloadRowCounts(
+                      bytes, type, rss ? lz4.get() : nullptr, pool())
+                      .size());
             }
             EXPECT_GT(payloads[0], 1);
             EXPECT_LT(
@@ -849,34 +846,24 @@ TEST_F(CellNestedTest, sharedColumnGroupCountsAcrossPartitionSeals) {
       },
       [&](const test::WrittenShuffle& written, bool rss) {
         EXPECT_EQ(
-            test::readerBatchSizes(
-                written.partitions[0],
-                type,
-                rss ? lz4.get() : nullptr,
-                pool(),
-                4096,
-                0),
+            test::payloadRowCounts(
+                written.partitions[0], type, rss ? lz4.get() : nullptr, pool()),
             std::vector<vector_size_t>(kBatches, 1));
         EXPECT_TRUE(written.partitions[1].empty());
         EXPECT_EQ(
-            test::readerBatchSizes(
-                written.partitions[2],
-                type,
-                rss ? lz4.get() : nullptr,
-                pool(),
-                4096,
-                0),
+            test::payloadRowCounts(
+                written.partitions[2], type, rss ? lz4.get() : nullptr, pool()),
             (std::vector<vector_size_t>{kBatches}));
       },
-      {{4096, 0}, {1, 1}});
+      {{4096, 1 << 20}, {1, 1}});
 }
 
 TEST_F(CellNestedTest, readsAtEveryByteBudget) {
-  // As for flat payloads, a byte target at or below zero reads one append
-  // per batch, and a large one every row up to the batch size, across
-  // payloads. A positive one also bounds each append, by the payload's
-  // bytes per row, every space's together: a tiny one reads a row per
-  // batch, one between them cuts batches by their bytes.
+  // As for flat payloads, a large byte target reads every row up to the
+  // batch size across payloads, while a positive byte target bounds each
+  // append by the payload's bytes per row across every space: a tiny one
+  // reads a row per batch, and one between them cuts batches by their bytes.
+  // Non-positive budgets are rejected at construction time.
   NestedVectorMaker::Options options;
   options.nullPercent = {10, 20};
   roundTrip(
@@ -885,7 +872,7 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
       7,
       nullptr,
       nullptr,
-      {{1000, 0}, {1000, -1}, {64, 1}, {4096, 3000}, {5000, 1 << 30}});
+      {{64, 1}, {4096, 3000}, {5000, 1 << 30}});
 
   // Three payloads of 1000 rows of an id and 10 elements each: a row
   // decodes into 8 + 4 bytes at the rows' positions and 10 * 8 at the
@@ -909,7 +896,7 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
   const auto bytes =
       test::writeShuffle(sealEveryBatch, uniform, pool()).partitions[0];
   ASSERT_EQ(
-      test::readerBatchSizes(bytes, type, nullptr, pool(), 4096, 0),
+      test::payloadRowCounts(bytes, type, nullptr, pool()),
       (std::vector<vector_size_t>(3, 1000)));
   const auto expected = uniform.rowsOf(1)[0];
   const auto batchSizes = [&](int32_t batchSize, int64_t budget) {
@@ -924,12 +911,9 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
   };
   for (const int64_t budget : {0, -1}) {
     SCOPED_TRACE(budget);
-    // One append a batch, within its payload.
-    std::vector<vector_size_t> appends;
-    for (int payload = 0; payload < 3; ++payload) {
-      appends.insert(appends.end(), {300, 300, 300, 100});
-    }
-    EXPECT_EQ(batchSizes(300, budget), appends);
+    BOLT_ASSERT_THROW(
+        test::makeReader(bytes, type, nullptr, pool(), 300, budget),
+        "maxBatchBytes must be positive");
   }
   // Full batches, across payloads.
   EXPECT_EQ(batchSizes(300, 1 << 30), std::vector<vector_size_t>(10, 300));
@@ -1048,8 +1032,8 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
     const auto written = test::writeShuffle(
         writerOptions(kPartitions, rss), input, pool(), batchOf);
     EXPECT_GT(written.metrics.flattenTime, 0);
-    for (const auto& shape : std::vector<ReadShape>{
-             {4096, 1 << 30}, {1000, 0}, {7, 1}, {250, 2000}}) {
+    for (const auto& shape :
+         std::vector<ReadShape>{{4096, 1 << 30}, {7, 1}, {250, 2000}}) {
       SCOPED_TRACE(fmt::format(
           "batches of {} rows, {} bytes",
           shape.batchSize,
@@ -1271,8 +1255,8 @@ TEST_F(CellNestedTest, positionsUpToTheLimit) {
         .partitions[0];
   };
   {
-    const auto batches =
-        test::readPartition(bytesOf(kMax), type, nullptr, pool(), 4096, 0);
+    const auto batches = test::readPartition(
+        bytesOf(kMax), type, nullptr, pool(), 4096, 1 << 20);
     ASSERT_EQ(batches.size(), 1);
     const auto* arrays = batches[0]->childAt(0)->as<ArrayVector>();
     EXPECT_EQ(arrays->sizeAt(0), kMax);
@@ -1415,10 +1399,13 @@ TEST_F(CellNestedTest, pushWhileABatchIsDecoded) {
     const auto bytes =
         test::partitionBytes(options, writer.metrics().partitionLengths)[0];
     const auto type = asRowType(row->type());
-    // The pushed window, then the row's: a batch each at a byte target of
-    // zero.
+    EXPECT_EQ(
+        test::payloadRowCounts(bytes, type, nullptr, pool()),
+        (std::vector<vector_size_t>{kRows, 1}));
+    // The pushed window and the trailing row also read back as two batches
+    // because together they exceed kMaxPositions (kBig + 200).
     const auto batches =
-        test::readPartition(bytes, type, nullptr, pool(), 4096, 0);
+        test::readPartition(bytes, type, nullptr, pool(), 4096, 1 << 30);
     ASSERT_EQ(batches.size(), 2);
     EXPECT_EQ(batches[0]->size(), kRows);
     ASSERT_EQ(batches[1]->size(), 1);
