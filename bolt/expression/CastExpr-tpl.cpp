@@ -27,9 +27,9 @@
 #define bswap_64(x) __builtin_bswap64(x)
 #endif
 
-#include <folly/String.h>
 #include <algorithm>
 #include "bolt/functions/InlineFlatten.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/lib/StringUtil.h"
 #include "bolt/functions/lib/string/StringImpl.h"
@@ -52,15 +52,9 @@ constexpr auto kDecimalStringFormat = kIsInSpark
 
 util::DateToStringOptions sparkDateToStringOptions(
     const core::QueryConfig& queryConfig) {
-  const auto policy = queryConfig.timeParserPolicy();
-  auto lower = policy;
-  folly::toLowerAscii(lower);
-  bool legacy = false;
-  if (lower == "legacy") {
-    legacy = true;
-  } else if (lower != "corrected" && lower != "exception") {
-    BOLT_USER_FAIL("Invalid time policy: {}", policy);
-  }
+  const bool legacy =
+      functions::parseTimePolicy(queryConfig.timeParserPolicy()) ==
+      functions::TimePolicy::LEGACY;
   return {
       .leadingPositiveSign = !legacy,
       .zeroPaddingYear = true,
