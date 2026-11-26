@@ -452,10 +452,132 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
             c.prefer,
             /*isRowBased=*/c.forced == ShuffleWriterType::RowBased),
         c.cell);
+
+    ShuffleReaderOptions readerOptions;
+    readerOptions.numPartitions =
+        c.partitioning == Partitioning::kSingle ? 1 : 2;
+    readerOptions.partitionShortName = c.partitioning == Partitioning::kHash
+        ? "hash"
+        : c.partitioning == Partitioning::kSingle ? "single"
+                                                  : "rr";
+    readerOptions.forceShuffleWriterType = static_cast<int32_t>(c.forced);
+    readerOptions.preferCellShuffle = c.prefer;
+    EXPECT_EQ(useCellShuffleReader(readerOptions, /*numColumns=*/1), c.cell);
   }
   // An adaptive choice of the row-based writer stays row-based.
   EXPECT_FALSE(useCellShuffle(
       Partitioning::kHash, ShuffleWriterType::Adaptive, true, true));
+}
+
+TEST_F(CellWriterTest, useCellShuffleReaderSelection) {
+  const auto makeReaderOptions = [](const std::string& partitioning,
+                                    int32_t forceType,
+                                    bool preferCell,
+                                    int32_t numPartitions = 4,
+                                    int64_t rowBasedThreshold =
+                                        kDefaultRowBasedShuffleThreshold) {
+    ShuffleReaderOptions options;
+    options.partitionShortName = partitioning;
+    options.forceShuffleWriterType = forceType;
+    options.preferCellShuffle = preferCell;
+    options.numPartitions = numPartitions;
+    options.rowBasedShuffleThreshold = rowBasedThreshold;
+    return options;
+  };
+
+  for (const std::string partitioning : {"hash", "range", "single", "rr"}) {
+    SCOPED_TRACE(partitioning);
+    for (const int32_t writerType :
+         {-1,
+          static_cast<int32_t>(ShuffleWriterType::Adaptive),
+          static_cast<int32_t>(ShuffleWriterType::V1),
+          static_cast<int32_t>(ShuffleWriterType::V2),
+          static_cast<int32_t>(ShuffleWriterType::RowBased),
+          static_cast<int32_t>(ShuffleWriterType::Cell)}) {
+      for (const bool preferCell : {false, true}) {
+        const auto options =
+            makeReaderOptions(partitioning, writerType, preferCell);
+        const bool expected =
+            writerType == static_cast<int32_t>(ShuffleWriterType::Cell) ||
+            (preferCell &&
+             (writerType == static_cast<int32_t>(ShuffleWriterType::Adaptive) ||
+              writerType == static_cast<int32_t>(ShuffleWriterType::V1) ||
+              writerType == static_cast<int32_t>(ShuffleWriterType::V2)));
+        EXPECT_EQ(useCellShuffleReader(options, /*numColumns=*/1), expected)
+            << "writerType=" << writerType << " preferCell=" << preferCell;
+      }
+    }
+  }
+
+  // Adaptive + preferCellShuffle yields to RowBased only when partitioning
+  // supports adaptive selection and the partition x column rule triggers.
+  for (const std::string partitioning : {"hash", "range"}) {
+    EXPECT_TRUE(useCellShuffleReader(
+        makeReaderOptions(
+            partitioning,
+            static_cast<int32_t>(ShuffleWriterType::Adaptive),
+            /*preferCell=*/true,
+            /*numPartitions=*/4,
+            /*rowBasedThreshold=*/12),
+        /*numColumns=*/3));
+    EXPECT_FALSE(useCellShuffleReader(
+        makeReaderOptions(
+            partitioning,
+            static_cast<int32_t>(ShuffleWriterType::Adaptive),
+            /*preferCell=*/true,
+            /*numPartitions=*/4,
+            /*rowBasedThreshold=*/12),
+        /*numColumns=*/4));
+    EXPECT_TRUE(useCellShuffleReader(
+        makeReaderOptions(
+            partitioning,
+            static_cast<int32_t>(ShuffleWriterType::Adaptive),
+            /*preferCell=*/true,
+            rowBasePartitionThreshold),
+        rowBaseColumnNumThreshold - 1));
+    EXPECT_FALSE(useCellShuffleReader(
+        makeReaderOptions(
+            partitioning,
+            static_cast<int32_t>(ShuffleWriterType::Adaptive),
+            /*preferCell=*/true,
+            rowBasePartitionThreshold),
+        rowBaseColumnNumThreshold));
+  }
+
+  for (const std::string partitioning : {"single", "rr"}) {
+    EXPECT_TRUE(useCellShuffleReader(
+        makeReaderOptions(
+            partitioning,
+            static_cast<int32_t>(ShuffleWriterType::Adaptive),
+            /*preferCell=*/true,
+            rowBasePartitionThreshold,
+            /*rowBasedThreshold=*/1),
+        rowBaseColumnNumThreshold));
+  }
+
+  // Negative numPartitions must not wrap numColumns * numPartitions unsigned.
+  EXPECT_TRUE(useCellShuffleReader(
+      makeReaderOptions(
+          "hash",
+          static_cast<int32_t>(ShuffleWriterType::Adaptive),
+          /*preferCell=*/true,
+          /*numPartitions=*/-1,
+          /*rowBasedThreshold=*/1),
+      /*numColumns=*/8));
+
+  // Forced Cell or preferCellShuffle=false must not touch partitionShortName.
+  EXPECT_TRUE(useCellShuffleReader(
+      makeReaderOptions(
+          "", static_cast<int32_t>(ShuffleWriterType::Cell), false),
+      /*numColumns=*/1));
+  for (const int32_t writerType :
+       {-1,
+        static_cast<int32_t>(ShuffleWriterType::Adaptive),
+        static_cast<int32_t>(ShuffleWriterType::V1),
+        static_cast<int32_t>(ShuffleWriterType::RowBased)}) {
+    EXPECT_FALSE(
+        useCellShuffleReader(makeReaderOptions("", writerType, false), 1));
+  }
 }
 
 TEST_F(CellWriterTest, valuesAtTheirLimits) {

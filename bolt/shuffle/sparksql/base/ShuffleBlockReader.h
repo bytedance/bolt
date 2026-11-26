@@ -39,9 +39,20 @@ namespace bytedance::bolt::shuffle::sparksql {
 class Codec;
 
 /// Base interface for block-based shuffle readers consumed by
-/// SparkShuffleReader. Only invoked at batch boundaries and close().
+/// SparkShuffleReader and external wrappers. Only invoked at batch boundaries
+/// and close().
 class BlockShuffleReader {
  public:
+  struct Metrics {
+    uint64_t decodeTimeNs{0};
+    uint64_t decompressTimeNs{0};
+    uint64_t deserializeTimeNs{0};
+    uint64_t readTimeNs{0};
+    uint64_t rowsRead{0};
+    uint64_t payloadsRead{0};
+    uint64_t streamsRead{0};
+  };
+
   virtual ~BlockShuffleReader() = default;
 
   /// Next output batch; nullptr when every stream is exhausted.
@@ -59,6 +70,30 @@ class BlockShuffleReader {
   /// opening each stream and reading each block up to building vectors from it.
   virtual uint64_t readTimeNs() const = 0;
 
+  /// The deserialization share of decodeTimeNs(), disjoint from
+  /// decompressTimeNs() and readTimeNs().
+  uint64_t deserializeTimeNs() const {
+    return disjointDeserializeNs(
+        decodeTimeNs(), decompressTimeNs(), readTimeNs());
+  }
+
+  /// Snapshot of all reader metrics, with decompressTimeNs, readTimeNs and
+  /// deserializeTimeNs disjoint.
+  Metrics metrics() const {
+    const uint64_t decode = decodeTimeNs();
+    const uint64_t decompress = decompressTimeNs();
+    const uint64_t read = readTimeNs();
+    return Metrics{
+        .decodeTimeNs = decode,
+        .decompressTimeNs = decompress,
+        .deserializeTimeNs = disjointDeserializeNs(decode, decompress, read),
+        .readTimeNs = read,
+        .rowsRead = rowsRead(),
+        .payloadsRead = payloadsRead(),
+        .streamsRead = streamsRead(),
+    };
+  }
+
   /// Rows next() returned so far.
   virtual uint64_t rowsRead() const = 0;
 
@@ -70,6 +105,14 @@ class BlockShuffleReader {
 
   /// Reader name for summary logging.
   virtual std::string_view name() const = 0;
+
+ private:
+  static uint64_t
+  disjointDeserializeNs(uint64_t decode, uint64_t decompress, uint64_t read) {
+    return decode > decompress && decode - decompress > read
+        ? decode - decompress - read
+        : 0;
+  }
 };
 
 /// ShuffleByteSource over an arrow input stream, with one byte of lookahead

@@ -37,10 +37,11 @@ The rule is the same under every partitioning. Single and round-robin
 partitioning never pick the row-based writer and, where Cell is not chosen,
 write V1 whatever type is forced, as before.
 
-`useCellShuffle()` in Options.h is the one rule the writer and
-`SparkShuffleReaderNode` follow. A job that sets `preferCellShuffle` writes
-Cell for its single and round-robin exchanges too, so their readers must be
-`SparkShuffleReaderNode` as well.
+`useCellShuffle()` and `useCellShuffleReader()` in Options.h capture the one
+rule the writer and Cell readers (`SparkShuffleReaderNode` or direct
+`CellShuffleReader` wrappers) follow. A job that sets `preferCellShuffle` writes
+Cell for its single and round-robin exchanges too, so their readers must select
+`CellShuffleReader` as well.
 
 The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 `createForType(Cell)` fails on purpose rather than silently writing V1.
@@ -67,10 +68,13 @@ The codec, level and backend come from `PartitionWriterOptions`
 (`compressionType`, `compressionLevel`, `codecBackend`), as for the other
 writers.
 
-Reader side (`ShuffleReaderOptions`): the Cell reader is used by
-`SparkShuffleReaderNode` when the same rule picks Cell from the reader's
-`forceShuffleWriterType` and `preferCellShuffle`. The reader takes
-`compressionType`, `batchSize` and `shuffleBatchByteSize` as usual.
+Reader side (`ShuffleReaderOptions`): callers select Cell via
+`useCellShuffleReader(options, numColumns)` (used by `SparkShuffleReaderNode`
+and external wrappers) and construct `CellShuffleReader(streams, outputType,
+options, arrowPool, pool)` directly, which owns its decompression `Codec` and
+exposes disjoint reader timings and counts through `BlockShuffleReader::metrics()`.
+The reader takes `compressionType`, `codecBackend`, `checksumEnabled`,
+`batchSize` and `shuffleBatchByteSize` from `ShuffleReaderOptions`.
 
 Settings that must match on both sides, because the payloads do not record
 them:

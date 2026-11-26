@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -597,6 +598,104 @@ TEST_F(ShuffleBlockTest, compositeShuffleReaderInterleavesCompositeAndRows) {
   EXPECT_EQ(reader.rowsRead(), 7);
   EXPECT_EQ(reader.payloadsRead(), 3);
   EXPECT_EQ(reader.streamsRead(), 4);
+
+  const auto m = reader.metrics();
+  EXPECT_EQ(m.decodeTimeNs, reader.decodeTimeNs());
+  EXPECT_EQ(m.decompressTimeNs, reader.decompressTimeNs());
+  EXPECT_EQ(m.deserializeTimeNs, reader.deserializeTimeNs());
+  EXPECT_EQ(m.readTimeNs, reader.readTimeNs());
+  EXPECT_EQ(m.rowsRead, 7);
+  EXPECT_EQ(m.payloadsRead, 3);
+  EXPECT_EQ(m.streamsRead, 4);
+  EXPECT_EQ(m.decompressTimeNs, 0);
+  EXPECT_LE(m.readTimeNs + m.deserializeTimeNs, m.decodeTimeNs);
+}
+
+TEST_F(ShuffleBlockTest, blockShuffleReaderMetricsSaturation) {
+  class MockBlockShuffleReader final : public BlockShuffleReader {
+   public:
+    MockBlockShuffleReader(
+        uint64_t decode,
+        uint64_t decompress,
+        uint64_t read,
+        uint64_t rows,
+        uint64_t payloads,
+        uint64_t streams)
+        : decode_(decode),
+          decompress_(decompress),
+          read_(read),
+          rows_(rows),
+          payloads_(payloads),
+          streams_(streams) {}
+
+    RowVectorPtr next() override {
+      return nullptr;
+    }
+    uint64_t decodeTimeNs() const override {
+      return decode_;
+    }
+    uint64_t decompressTimeNs() const override {
+      return decompress_;
+    }
+    uint64_t readTimeNs() const override {
+      return read_;
+    }
+    uint64_t rowsRead() const override {
+      return rows_;
+    }
+    uint64_t payloadsRead() const override {
+      return payloads_;
+    }
+    uint64_t streamsRead() const override {
+      return streams_;
+    }
+    std::string_view name() const override {
+      return "MockBlockShuffleReader";
+    }
+
+   private:
+    uint64_t decode_;
+    uint64_t decompress_;
+    uint64_t read_;
+    uint64_t rows_;
+    uint64_t payloads_;
+    uint64_t streams_;
+  };
+
+  {
+    MockBlockShuffleReader reader(1000, 300, 200, 42, 5, 2);
+    EXPECT_EQ(reader.deserializeTimeNs(), 500);
+    const auto m = reader.metrics();
+    EXPECT_EQ(m.decodeTimeNs, 1000);
+    EXPECT_EQ(m.decompressTimeNs, 300);
+    EXPECT_EQ(m.deserializeTimeNs, 500);
+    EXPECT_EQ(m.readTimeNs, 200);
+    EXPECT_EQ(m.rowsRead, 42);
+    EXPECT_EQ(m.payloadsRead, 5);
+    EXPECT_EQ(m.streamsRead, 2);
+  }
+  {
+    MockBlockShuffleReader underflowDecompress(100, 200, 50, 0, 0, 0);
+    EXPECT_EQ(underflowDecompress.deserializeTimeNs(), 0);
+    EXPECT_EQ(underflowDecompress.metrics().deserializeTimeNs, 0);
+  }
+  {
+    MockBlockShuffleReader exactSum(300, 200, 100, 0, 0, 0);
+    EXPECT_EQ(exactSum.deserializeTimeNs(), 0);
+    EXPECT_EQ(exactSum.metrics().deserializeTimeNs, 0);
+  }
+  {
+    MockBlockShuffleReader underflowRead(300, 200, 150, 0, 0, 0);
+    EXPECT_EQ(underflowRead.deserializeTimeNs(), 0);
+    EXPECT_EQ(underflowRead.metrics().deserializeTimeNs, 0);
+  }
+  {
+    // Sum of decompress and read wraps uint64_t, must still saturate to 0.
+    MockBlockShuffleReader overflowSum(
+        100, std::numeric_limits<uint64_t>::max() - 10, 50, 0, 0, 0);
+    EXPECT_EQ(overflowSum.deserializeTimeNs(), 0);
+    EXPECT_EQ(overflowSum.metrics().deserializeTimeNs, 0);
+  }
 }
 
 } // namespace

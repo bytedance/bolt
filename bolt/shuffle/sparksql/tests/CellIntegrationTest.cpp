@@ -336,4 +336,146 @@ TEST_F(CellIntegrationTest, legacyReaderRejectsCellPayload) {
           static_cast<int>(ShuffleBlockKind::kCellPayload)));
 }
 
+TEST_F(
+    CellIntegrationTest,
+    optionsConstructorReadsFlatAndNestedWithAndWithoutCodec) {
+  constexpr int32_t kPartitions = 3;
+  constexpr vector_size_t kRows = 512;
+  auto batch = makeRowVector(
+      {"id", "s", "arr", "mp", "st"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row * 13; }),
+       makeFlatVector<std::string>(
+           kRows, [](auto row) { return fmt::format("val-{}", row % 17); }),
+       makeArrayVector<int32_t>(
+           kRows,
+           [](auto row) { return row % 4; },
+           [](auto idx) { return static_cast<int32_t>(idx); }),
+       makeMapVector<int32_t, std::string>(
+           kRows,
+           [](auto row) { return row % 3; },
+           [](auto idx) { return static_cast<int32_t>(idx); },
+           [](auto idx) { return fmt::format("m-{}", idx % 5); }),
+       makeRowVector(
+           {"a", "b"},
+           {makeFlatVector<int32_t>(kRows, [](auto row) { return row; }),
+            makeFlatVector<double>(
+                kRows, [](auto row) { return row * 0.5; })})});
+  const auto type = asRowType(batch->type());
+  const auto input = cell::test::roundRobin({batch}, kPartitions);
+  const auto expectedRows = input.rowsOf(kPartitions);
+
+  for (const auto compression :
+       {arrow::Compression::UNCOMPRESSED,
+        arrow::Compression::LZ4_FRAME,
+        arrow::Compression::ZSTD}) {
+    for (const bool nativeNested : {true, false}) {
+      for (const bool rss : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "{} nativeNested={} rss={}",
+            cell::test::codecName(compression),
+            nativeNested,
+            rss));
+        const auto dir = exec::test::TempDirectoryPath::create();
+        auto writerOptions = cell::test::shuffleOptions(
+            dir->path + "/data", kPartitions, compression, rss);
+        writerOptions.cellOptions.nativeNestedTypes = nativeNested;
+        writerOptions.cellOptions.adaptiveCompression = false;
+        const auto written =
+            cell::test::writeShuffle(writerOptions, input, pool());
+
+        ShuffleReaderOptions readerOptions;
+        readerOptions.compressionType = compression;
+        readerOptions.batchSize = 128;
+        readerOptions.shuffleBatchByteSize = 1 << 20;
+        readerOptions.cellNativeNestedTypes = nativeNested;
+        readerOptions.forceShuffleWriterType =
+            static_cast<int32_t>(ShuffleWriterType::Cell);
+
+        for (int32_t pid = 0; pid < kPartitions; ++pid) {
+          auto streams = std::make_shared<SlowStreamIterator>(
+              cell::test::partitionStreams(written, pid),
+              std::chrono::microseconds{0});
+          cell::CellShuffleReader reader(
+              streams,
+              type,
+              readerOptions,
+              arrow::default_memory_pool(),
+              pool());
+          std::vector<RowVectorPtr> decoded;
+          while (auto out = reader.next()) {
+            out->validate({});
+            decoded.push_back(std::move(out));
+          }
+          cell::test::expectPartitionRows(
+              expectedRows[pid], decoded, pid, readerOptions.batchSize);
+
+          const auto m = reader.metrics();
+          EXPECT_EQ(m.rowsRead, expectedRows[pid].size());
+          EXPECT_EQ(m.rowsRead, reader.rowsRead());
+          EXPECT_GT(m.payloadsRead, 0);
+          EXPECT_EQ(m.payloadsRead, reader.payloadsRead());
+          EXPECT_GT(m.streamsRead, 0);
+          EXPECT_EQ(m.streamsRead, reader.streamsRead());
+          EXPECT_EQ(m.decodeTimeNs, reader.decodeTimeNs());
+          EXPECT_EQ(m.decompressTimeNs, reader.decompressTimeNs());
+          EXPECT_EQ(m.readTimeNs, reader.readTimeNs());
+          EXPECT_EQ(m.deserializeTimeNs, reader.deserializeTimeNs());
+          if (compression == arrow::Compression::UNCOMPRESSED) {
+            EXPECT_EQ(m.decompressTimeNs, 0);
+          } else {
+            EXPECT_GT(m.decompressTimeNs, 0);
+          }
+          EXPECT_LE(
+              m.decompressTimeNs + m.readTimeNs + m.deserializeTimeNs,
+              m.decodeTimeNs);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(
+    CellIntegrationTest,
+    optionsConstructorRejectsBadOptionsAndCodecMismatch) {
+  auto batch = makeRowVector({makeFlatVector<std::string>(4096, [](auto row) {
+    return fmt::format("compressible-value-{:04d}", row % 16);
+  })});
+  const auto type = asRowType(batch->type());
+  const auto input = cell::test::roundRobin({batch}, /*numPartitions=*/1);
+  const auto dir = exec::test::TempDirectoryPath::create();
+  auto writerOptions = cell::test::shuffleOptions(
+      dir->path + "/data",
+      /*numPartitions=*/1,
+      arrow::Compression::LZ4_FRAME,
+      /*rss=*/false);
+  writerOptions.cellOptions.adaptiveCompression = false;
+  const auto written = cell::test::writeShuffle(writerOptions, input, pool());
+
+  {
+    ShuffleReaderOptions badOptions;
+    badOptions.compressionType = arrow::Compression::UNCOMPRESSED;
+    badOptions.shuffleBatchByteSize = 0;
+    auto streams = std::make_shared<SlowStreamIterator>(
+        written.partitions, std::chrono::microseconds{0});
+    BOLT_ASSERT_THROW(
+        cell::CellShuffleReader(
+            streams, type, badOptions, arrow::default_memory_pool(), pool()),
+        "maxBatchBytes must be positive");
+  }
+
+  {
+    ShuffleReaderOptions uncompressedOptions;
+    uncompressedOptions.compressionType = arrow::Compression::UNCOMPRESSED;
+    auto streams = std::make_shared<SlowStreamIterator>(
+        written.partitions, std::chrono::microseconds{0});
+    cell::CellShuffleReader reader(
+        streams,
+        type,
+        uncompressedOptions,
+        arrow::default_memory_pool(),
+        pool());
+    BOLT_ASSERT_THROW(reader.next(), "compressed buffer without a codec");
+  }
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test

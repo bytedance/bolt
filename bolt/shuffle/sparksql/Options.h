@@ -35,6 +35,7 @@
 #include <arrow/util/compression.h>
 #include <bolt/common/base/Exceptions.h>
 #include <fmt/format.h>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include "bolt/row/RowFormat.h"
@@ -374,11 +375,10 @@ inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
       partitioning == Partitioning::kHash;
 }
 
-/// Whether the writer writes Cell payloads, which only
-/// SparkShuffleReaderNode reads: the one rule the writer's type choice and
-/// both readers follow, under every partitioning: a forced Cell always; a
-/// forced V1 or V2 when preferCellShuffle is set, which takes priority over
-/// them; a forced RowBased never; the adaptive choice when
+/// Whether the writer writes Cell payloads: the one rule the writer's type
+/// choice and Cell readers follow, under every partitioning: a forced Cell
+/// always; a forced V1 or V2 when preferCellShuffle is set, which takes
+/// priority over them; a forced RowBased never; the adaptive choice when
 /// preferCellShuffle is set, unless it picked the row-based writer
 /// (`isRowBased`, never so without a pid). Where this is false, a
 /// partitioning without a pid (single, round-robin) writes V1.
@@ -398,6 +398,35 @@ inline bool useCellShuffle(
     default:
       return false;
   }
+}
+
+/// Whether a reader configured with `options` for a schema of `numColumns`
+/// columns should use CellShuffleReader. Mirrors BoltShuffleWriter's
+/// adaptive row-based threshold and useCellShuffle().
+inline bool useCellShuffleReader(
+    const ShuffleReaderOptions& options,
+    size_t numColumns) {
+  const auto writerType =
+      static_cast<ShuffleWriterType>(options.forceShuffleWriterType);
+  if (writerType == ShuffleWriterType::Cell) {
+    return true;
+  }
+  if (!options.preferCellShuffle) {
+    return false;
+  }
+  bool isRowBased = false;
+  auto partitioning = Partitioning::kSingle;
+  if (writerType == ShuffleWriterType::Adaptive) {
+    partitioning = toPartitioning(options.partitionShortName);
+    isRowBased = supportAdaptiveShuffleWriter(partitioning) &&
+        ((options.numPartitions >= rowBasePartitionThreshold &&
+          static_cast<int64_t>(numColumns) >= rowBaseColumnNumThreshold) ||
+         static_cast<int64_t>(options.numPartitions) *
+                 static_cast<int64_t>(numColumns) >
+             options.rowBasedShuffleThreshold);
+  }
+  return useCellShuffle(
+      partitioning, writerType, options.preferCellShuffle, isRowBased);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

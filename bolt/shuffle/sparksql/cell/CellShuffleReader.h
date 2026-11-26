@@ -16,11 +16,11 @@
 
 #pragma once
 
+#include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/base/CompositeShuffleReader.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -37,6 +37,15 @@ class CellNestedAssembler;
 /// the type adapter.
 class CellShuffleReader final : public CompositeShuffleReader {
  public:
+  /// Creates a CellShuffleReader from ShuffleReaderOptions, owning its
+  /// decompression codec (null when compressionType is UNCOMPRESSED).
+  CellShuffleReader(
+      std::shared_ptr<ReaderStreamIterator> streams,
+      const RowTypePtr& outputType, // logical row type, no pid column
+      const ShuffleReaderOptions& options,
+      arrow::MemoryPool* arrowPool, // only handed to nextStream()
+      memory::MemoryPool* pool);
+
   CellShuffleReader(
       std::shared_ptr<ReaderStreamIterator> streams,
       const RowTypePtr& outputType, // logical row type, no pid column
@@ -55,6 +64,7 @@ class CellShuffleReader final : public CompositeShuffleReader {
   }
 
  private:
+  void init(const RowTypePtr& outputType, bool nativeNestedTypes);
   RowVectorPtr nextNonComposite() override;
 
   /// Opens the next Cell payload block across streams. Returns false on EOF

@@ -27,6 +27,21 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 CellShuffleReader::CellShuffleReader(
     std::shared_ptr<ReaderStreamIterator> streams,
     const RowTypePtr& outputType,
+    const ShuffleReaderOptions& options,
+    arrow::MemoryPool* arrowPool,
+    memory::MemoryPool* pool)
+    : CompositeShuffleReader(
+          std::move(streams),
+          outputType,
+          options,
+          arrowPool,
+          pool) {
+  init(outputType, options.cellNativeNestedTypes);
+}
+
+CellShuffleReader::CellShuffleReader(
+    std::shared_ptr<ReaderStreamIterator> streams,
+    const RowTypePtr& outputType,
     Codec* codec,
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
@@ -41,17 +56,23 @@ CellShuffleReader::CellShuffleReader(
           pool,
           maxBatchRows,
           maxBatchBytes) {
+  init(outputType, nativeNestedTypes);
+}
+
+void CellShuffleReader::init(
+    const RowTypePtr& outputType,
+    bool nativeNestedTypes) {
   BOLT_CHECK(
       CellShuffleTypeAdapter::isSupported(outputType),
       "Unsupported Cell logical schema: {}",
       outputType->toString());
   if (nativeNestedTypes && CellNestedLayout::supports(outputType)) {
-    nestedAssembler_ =
-        std::make_unique<CellNestedAssembler>(outputType, decompressor(), pool);
+    nestedAssembler_ = std::make_unique<CellNestedAssembler>(
+        outputType, decompressor(), pool());
   } else {
     adapter_ = std::make_unique<CellShuffleTypeAdapter>(outputType);
     decoder_ = std::make_unique<CellPayloadDecoder>(
-        CellLayout::create(adapter_->physicalType()), decompressor(), pool);
+        CellLayout::create(adapter_->physicalType()), decompressor(), pool());
   }
 }
 

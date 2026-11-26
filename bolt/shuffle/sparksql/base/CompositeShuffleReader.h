@@ -29,6 +29,7 @@
 namespace bytedance::bolt::shuffle::sparksql {
 
 class Codec;
+struct ShuffleReaderOptions;
 
 /// Base reader for block-based shuffle formats produced by
 /// CompositeShuffleWriter subclasses. Owns stream traversal, decompression,
@@ -37,6 +38,17 @@ class Codec;
 /// nextNonComposite() and readNextBlock().
 class CompositeShuffleReader : public BlockShuffleReader {
  public:
+  /// Creates the reader from ShuffleReaderOptions, owning its decompression
+  /// codec (null when compressionType is UNCOMPRESSED).
+  /// `options.shuffleBatchByteSize` must be positive; `options.batchSize`
+  /// is clamped to at least 1.
+  CompositeShuffleReader(
+      std::shared_ptr<ReaderStreamIterator> streams,
+      const RowTypePtr& outputType,
+      const ShuffleReaderOptions& options,
+      arrow::MemoryPool* arrowPool,
+      memory::MemoryPool* pool);
+
   /// `maxBatchBytes` must be positive; `maxBatchRows` is clamped to at least 1.
   CompositeShuffleReader(
       std::shared_ptr<ReaderStreamIterator> streams,
@@ -47,7 +59,7 @@ class CompositeShuffleReader : public BlockShuffleReader {
       int32_t maxBatchRows,
       int64_t maxBatchBytes);
 
-  ~CompositeShuffleReader() override = default;
+  ~CompositeShuffleReader() override;
 
   /// Next output batch; nullptr when every stream is exhausted.
   /// CompositeRows blocks come out as CompositeRowVectors of at most
@@ -138,6 +150,16 @@ class CompositeShuffleReader : public BlockShuffleReader {
   }
 
  private:
+  CompositeShuffleReader(
+      std::shared_ptr<ReaderStreamIterator> streams,
+      const RowTypePtr& outputType,
+      std::unique_ptr<Codec> ownedCodec,
+      Codec* codec,
+      arrow::MemoryPool* arrowPool,
+      memory::MemoryPool* pool,
+      int32_t maxBatchRows,
+      int64_t maxBatchBytes);
+
   /// Opens streams until a non-empty stream yields a block kind byte.
   /// Returns std::nullopt when every stream is exhausted.
   std::optional<ShuffleBlockKind> nextBlockKind();
@@ -152,6 +174,8 @@ class CompositeShuffleReader : public BlockShuffleReader {
   /// as a CompositeRowVector the way the V1 reader does.
   RowVectorPtr nextComposite();
 
+  // Declared before decompressor_, which holds a non-owning pointer to it.
+  std::unique_ptr<Codec> ownedCodec_;
   std::unique_ptr<CodecDecompressor> decompressor_;
   std::shared_ptr<ReaderStreamIterator> streams_;
   arrow::MemoryPool* const arrowPool_;

@@ -22,20 +22,42 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/time/Timer.h"
+#include "bolt/shuffle/sparksql/Options.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+namespace {
+
+std::unique_ptr<Codec> createReaderCodec(const ShuffleReaderOptions& options) {
+  if (options.compressionType == arrow::Compression::UNCOMPRESSED) {
+    return nullptr;
+  }
+  return createCodec(
+      options.compressionType,
+      CodecOptions{
+          getCodecBackend(options.codecBackend),
+          kDefaultCompressionLevel,
+          options.checksumEnabled});
+}
+
+} // namespace
 
 CompositeShuffleReader::CompositeShuffleReader(
     std::shared_ptr<ReaderStreamIterator> streams,
     const RowTypePtr& outputType,
+    std::unique_ptr<Codec> ownedCodec,
     Codec* codec,
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
     int32_t maxBatchRows,
     int64_t maxBatchBytes)
-    : decompressor_(
-          codec == nullptr ? nullptr
-                           : std::make_unique<CodecDecompressor>(codec)),
+    : ownedCodec_(std::move(ownedCodec)),
+      decompressor_(
+          (ownedCodec_ ? ownedCodec_.get() : codec) == nullptr
+              ? nullptr
+              : std::make_unique<CodecDecompressor>(
+                    ownedCodec_ ? ownedCodec_.get() : codec)),
       streams_(std::move(streams)),
       arrowPool_(arrowPool),
       rowBlockReader_(decompressor_.get(), pool),
@@ -46,6 +68,42 @@ CompositeShuffleReader::CompositeShuffleReader(
   BOLT_CHECK_NOT_NULL(streams_, "shuffle stream iterator must not be null");
   BOLT_CHECK_GT(maxBatchBytes_, 0, "maxBatchBytes must be positive");
 }
+
+CompositeShuffleReader::CompositeShuffleReader(
+    std::shared_ptr<ReaderStreamIterator> streams,
+    const RowTypePtr& outputType,
+    const ShuffleReaderOptions& options,
+    arrow::MemoryPool* arrowPool,
+    memory::MemoryPool* pool)
+    : CompositeShuffleReader(
+          std::move(streams),
+          outputType,
+          createReaderCodec(options),
+          /*codec=*/nullptr,
+          arrowPool,
+          pool,
+          options.batchSize,
+          options.shuffleBatchByteSize) {}
+
+CompositeShuffleReader::CompositeShuffleReader(
+    std::shared_ptr<ReaderStreamIterator> streams,
+    const RowTypePtr& outputType,
+    Codec* codec,
+    arrow::MemoryPool* arrowPool,
+    memory::MemoryPool* pool,
+    int32_t maxBatchRows,
+    int64_t maxBatchBytes)
+    : CompositeShuffleReader(
+          std::move(streams),
+          outputType,
+          /*ownedCodec=*/nullptr,
+          codec,
+          arrowPool,
+          pool,
+          maxBatchRows,
+          maxBatchBytes) {}
+
+CompositeShuffleReader::~CompositeShuffleReader() = default;
 
 std::optional<ShuffleBlockKind> CompositeShuffleReader::nextBlockKind() {
   while (!exhausted_) {
