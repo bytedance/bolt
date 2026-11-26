@@ -30,6 +30,9 @@
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
+#include <barrier>
+#include <future>
+#include <thread>
 #include <vector>
 
 #include <gmock/gmock-matchers.h>
@@ -503,6 +506,82 @@ TEST_F(MemoryManagerTest, alignmentOptionCheck) {
   }
 }
 
+TEST_F(MemoryManagerTest, totalReservedBytes) {
+  MemoryManager::Options options;
+  options.trackDefaultUsage = true;
+  MemoryManager manager{options};
+  auto systemLeaf = manager.addLeafPool("system-leaf");
+  const MemoryPool& systemRoot = systemRootPool(manager);
+  auto first = manager.addRootPool("first");
+  const MemoryPool& firstRoot = *first;
+  auto aggregate = first->addAggregateChild("aggregate");
+  auto nested = aggregate->addLeafChild("nested");
+  auto second = manager.addRootPool("second");
+  auto leaf = second->addLeafChild("leaf");
+
+  BOLT_ASSERT_THROW(
+      aggregate->rootReservedBytes(),
+      "rootReservedBytes() requires a root memory pool");
+  BOLT_ASSERT_THROW(
+      leaf->rootReservedBytes(),
+      "rootReservedBytes() requires a root memory pool");
+  EXPECT_EQ(systemRoot.rootReservedBytes(), 0);
+  EXPECT_EQ(firstRoot.rootReservedBytes(), 0);
+  EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+  auto* data = systemLeaf->allocate(32 << 10);
+  EXPECT_EQ(systemRoot.rootReservedBytes(), 1 << 20);
+  EXPECT_EQ(manager.getTotalReservedBytes(), 1 << 20);
+  ASSERT_TRUE(nested->maybeReserve(8 << 20));
+  ASSERT_TRUE(leaf->maybeReserve(16 << 20));
+  EXPECT_EQ(firstRoot.rootReservedBytes(), 8 << 20);
+  EXPECT_EQ(second->rootReservedBytes(), 16 << 20);
+  EXPECT_EQ(manager.getTotalReservedBytes(), 25 << 20);
+  systemLeaf->free(data, 32 << 10);
+  nested->release();
+  EXPECT_EQ(systemRoot.rootReservedBytes(), 0);
+  EXPECT_EQ(firstRoot.rootReservedBytes(), 0);
+  EXPECT_EQ(manager.getTotalReservedBytes(), 16 << 20);
+  leaf->release();
+  EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+}
+
+TEST_F(MemoryManagerTest, concurrentRootReservedBytes) {
+  constexpr int64_t kReservation = 8 << 20;
+  constexpr int kRounds = 256;
+  for (bool useGluten : {false, true}) {
+    SCOPED_TRACE(fmt::format("useGluten={}", useGluten));
+    MemoryManager::Options options;
+    options.trackDefaultUsage = true;
+    options.useMemoryPoolForGluten = useGluten;
+    MemoryManager manager{options};
+    for (bool systemRoot : {false, true}) {
+      SCOPED_TRACE(fmt::format("systemRoot={}", systemRoot));
+      auto leaf = systemRoot
+          ? manager.addLeafPool("system-leaf")
+          : manager.addRootPool("business-root")->addLeafChild("leaf");
+      EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+      ASSERT_TRUE(leaf->maybeReserve(kReservation));
+
+      std::barrier startRound{2};
+      std::thread sampler([&]() {
+        EXPECT_EQ(manager.getTotalReservedBytes(), kReservation);
+        for (int i = 0; i < kRounds; ++i) {
+          startRound.arrive_and_wait();
+          EXPECT_THAT(manager.getTotalReservedBytes(), AnyOf(0, kReservation));
+        }
+      });
+      for (int i = 0; i < kRounds; ++i) {
+        startRound.arrive_and_wait();
+        leaf->release();
+        EXPECT_TRUE(leaf->maybeReserve(kReservation));
+      }
+      sampler.join();
+      leaf->release();
+      EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+    }
+  }
+}
+
 TEST_F(MemoryManagerTest, concurrentPoolAccess) {
   MemoryManager manager{};
   const int numAllocThreads = 40;
@@ -510,6 +589,17 @@ TEST_F(MemoryManagerTest, concurrentPoolAccess) {
   std::mutex mu;
   std::vector<std::shared_ptr<MemoryPool>> pools;
   std::atomic<int64_t> poolId{0};
+  std::promise<void> samplerReady;
+  std::atomic<bool> stopCheck{false};
+  std::thread checkThread([&]() {
+    EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+    samplerReady.set_value();
+    while (!stopCheck) {
+      EXPECT_EQ(manager.getTotalReservedBytes(), 0);
+      std::this_thread::sleep_for(std::chrono::microseconds(1));
+    }
+  });
+  samplerReady.get_future().wait();
   for (int32_t i = 0; i < numAllocThreads; ++i) {
     allocThreads.push_back(std::thread([&]() {
       for (int i = 0; i < 1000; ++i) {
@@ -540,13 +630,6 @@ TEST_F(MemoryManagerTest, concurrentPoolAccess) {
     }));
   }
 
-  std::atomic<bool> stopCheck{false};
-  std::thread checkThread([&]() {
-    while (!stopCheck) {
-      std::this_thread::sleep_for(std::chrono::microseconds(1));
-    }
-  });
-
   for (int32_t i = 0; i < allocThreads.size(); ++i) {
     allocThreads[i].join();
   }
@@ -554,6 +637,7 @@ TEST_F(MemoryManagerTest, concurrentPoolAccess) {
   checkThread.join();
   ASSERT_EQ(manager.numPools(), pools.size() + 3);
   pools.clear();
+  EXPECT_EQ(manager.getTotalReservedBytes(), 0);
   ASSERT_EQ(manager.numPools(), 3);
 }
 
@@ -641,6 +725,7 @@ TEST_F(MemoryManagerTest, disableMemoryPoolTracking) {
     MemoryManager manager{options};
     auto root0 = manager.addRootPool("root_0", 35LL << 20);
     auto leaf0 = root0->addLeafChild("leaf_0");
+    EXPECT_EQ(manager.getTotalReservedBytes(), -1);
 
     std::shared_ptr<MemoryPool> root0Dup;
     if (arbitratorKind == kSharedKind) {

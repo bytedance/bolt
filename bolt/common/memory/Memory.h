@@ -268,8 +268,13 @@ class MemoryManager {
       bool allowSpill = true,
       bool allowAbort = false);
 
-  /// Returns the current total memory usage under this memory manager.
+  /// Returns the bytes currently used by the backing allocator.
   int64_t getTotalBytes() const;
+
+  /// Sums the reservations of the system root and all live business roots.
+  /// Each root is sampled independently under its pool mutex. Returns -1 if
+  /// tracking is disabled.
+  int64_t getTotalReservedBytes() const;
 
   /// Returns the number of alive memory pools allocated from addRootPool() and
   /// addLeafPool().

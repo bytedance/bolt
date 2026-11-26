@@ -386,6 +386,11 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   /// unused reservations.
   virtual int64_t reservedBytes() const = 0;
 
+  /// Returns this root pool's reserved bytes, including used and unused
+  /// reservations. Safe to call concurrently with reservation updates.
+  /// Requires isRoot().
+  virtual int64_t rootReservedBytes() const = 0;
+
   /// Checks if it is likely that the reservation on this memory pool can be
   /// incremented by 'size'. Returns false if this seems unlikely. Otherwise
   /// attempts the reservation increment and returns true if succeeded.
@@ -708,6 +713,8 @@ class MemoryPoolImpl : public MemoryPool {
   int64_t reservedBytes() const override {
     return reservationBytes_;
   }
+
+  int64_t rootReservedBytes() const override;
 
   bool maybeReserve(uint64_t size) override;
 

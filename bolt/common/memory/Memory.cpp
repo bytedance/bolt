@@ -387,6 +387,18 @@ int64_t MemoryManager::getTotalBytes() const {
   return allocator_->totalUsedBytes();
 }
 
+int64_t MemoryManager::getTotalReservedBytes() const {
+  if (disableMemoryPoolTracking_) {
+    return -1;
+  }
+  const auto pools = getAlivePools();
+  int64_t total = sysRoot_->rootReservedBytes();
+  for (const auto& pool : pools) {
+    total += pool->rootReservedBytes();
+  }
+  return total;
+}
+
 size_t MemoryManager::numPools() const {
   size_t numPools = sysRoot_->getChildCount();
   {
