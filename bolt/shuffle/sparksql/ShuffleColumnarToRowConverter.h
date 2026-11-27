@@ -90,7 +90,7 @@ class ShuffleColumnarToRowConverter {
       const bytedance::bolt::RowTypePtr& rowType,
       bytedance::bolt::memory::MemoryPool* boltPool,
       bytedance::bolt::row::RowFormat rowFormat =
-          bytedance::bolt::row::RowFormat::COMPACT)
+          bytedance::bolt::row::RowFormat::DENSE)
       : boltPool_(boltPool), rowFormat_(rowFormat) {
     init(rowType);
   }

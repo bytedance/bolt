@@ -22,6 +22,7 @@
 #include "bolt/row/CompactRow.h"
 #include "bolt/row/dense/DenseRow.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
@@ -254,7 +255,8 @@ TEST_F(ShuffleMiscTest, ColumnarToRowStatsSplitVariableWidthRows) {
   const auto bytes = rowBytes(data);
   const auto maxBatchSize = bytes[0] + bytes[1] + bytes[2];
 
-  ShuffleColumnarToRowConverter converter(rowTypeOf(data), pool());
+  ShuffleColumnarToRowConverter converter(
+      rowTypeOf(data), pool(), row::RowFormat::COMPACT);
   auto stats = converter.getWithStats(data, maxBatchSize);
 
   ASSERT_EQ(stats.ranges().size(), 2);
@@ -277,7 +279,8 @@ TEST_F(ShuffleMiscTest, ColumnarToRowStatsMergesSmallLastRange) {
 
   ASSERT_LT(bytes[1], maxBatchSize * 0.8);
 
-  ShuffleColumnarToRowConverter converter(rowTypeOf(data), pool());
+  ShuffleColumnarToRowConverter converter(
+      rowTypeOf(data), pool(), row::RowFormat::COMPACT);
   auto stats = converter.getWithStats(data, maxBatchSize);
 
   ASSERT_EQ(stats.ranges().size(), 1);
@@ -343,7 +346,8 @@ TEST_F(ShuffleMiscTest, ColumnarToRowSlicedStatsReusesOriginalCompactRow) {
   const auto bytes = rowBytes(data);
   const auto maxBatchSize = bytes[0] + bytes[1] + bytes[2];
 
-  ShuffleColumnarToRowConverter converter(rowTypeOf(data), pool());
+  ShuffleColumnarToRowConverter converter(
+      rowTypeOf(data), pool(), row::RowFormat::COMPACT);
   auto fullStats = converter.getWithStats(data, maxBatchSize);
   ASSERT_EQ(fullStats.ranges().size(), 2);
 
@@ -428,6 +432,52 @@ TEST_F(ShuffleMiscTest, ColumnarToRowSlicedStatsReusesComplexDenseRow) {
   ASSERT_EQ(actual->size(), expected->size());
   for (auto row = 0; row < actual->size(); ++row) {
     EXPECT_TRUE(expected->equalValueAt(actual.get(), row, row));
+  }
+}
+
+TEST_F(ShuffleMiscTest, DefaultRowFormatIsDense) {
+  EXPECT_EQ(ShuffleWriterOptions{}.rowFormat, row::RowFormat::DENSE);
+  EXPECT_EQ(ShuffleReaderOptions{}.rowFormat, row::RowFormat::DENSE);
+
+  auto data = makeRowVector(
+      {"c0"},
+      {makeFlatVector<std::string>({"a", "bb", "ccc", "dddd", "eeeee"})});
+  const auto bytes = denseRowBytes(data);
+  ASSERT_NE(bytes, rowBytes(data));
+  const auto totalBytes =
+      std::accumulate(bytes.begin(), bytes.end(), int64_t{0});
+
+  ShuffleColumnarToRowConverter converter(rowTypeOf(data), pool());
+  auto stats = converter.getWithStats(data, totalBytes);
+  ASSERT_EQ(stats.ranges().size(), 1);
+  EXPECT_EQ(stats.getTotalMemorySize(), totalBytes);
+  EXPECT_EQ(stats.ranges()[0].bytes, totalBytes);
+
+  std::vector<uint32_t> indexes(data->size(), 0);
+  std::vector<std::vector<uint8_t*>> sortedRows(1);
+  std::vector<int64_t> partitionBytes(1, 0);
+  converter.convert(stats, indexes, sortedRows, partitionBytes);
+
+  ASSERT_EQ(sortedRows[0].size(), data->size());
+  EXPECT_EQ(partitionBytes[0], totalBytes);
+  for (vector_size_t row = 0; row < data->size(); ++row) {
+    const auto rowSize = *reinterpret_cast<const int32_t*>(sortedRows[0][row]);
+    EXPECT_EQ(static_cast<int64_t>(rowSize) + kSizeOfRowHeader, bytes[row]);
+  }
+
+  auto bodies = rowBodies(sortedRows[0]);
+  auto denseActual =
+      row::DenseRow::deserialize(bodies, rowTypeOf(data), pool());
+  ASSERT_EQ(denseActual->size(), data->size());
+  for (vector_size_t row = 0; row < denseActual->size(); ++row) {
+    EXPECT_TRUE(data->equalValueAt(denseActual.get(), row, row));
+  }
+
+  ShuffleRowToColumnarConverter rowToCol(rowTypeOf(data), pool());
+  auto roundTrip = rowToCol.convert(bodies);
+  ASSERT_EQ(roundTrip->size(), data->size());
+  for (vector_size_t row = 0; row < roundTrip->size(); ++row) {
+    EXPECT_TRUE(data->equalValueAt(roundTrip.get(), row, row));
   }
 }
 
