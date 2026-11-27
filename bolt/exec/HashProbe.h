@@ -521,6 +521,11 @@ class HashProbe : public Operator {
       currentRow = -1;
     }
 
+    // Returns true if there is a matched probe row waiting to be emitted.
+    bool hasPendingRow() const {
+      return currentRow != -1;
+    }
+
    private:
     // The last row number passed to advance for the current input batch.
     vector_size_t currentRow{-1};
@@ -563,6 +568,11 @@ class HashProbe : public Operator {
 
       currentRow = -1;
       currentRowPassed = std::nullopt;
+    }
+
+    // Returns true if there is a probe row waiting to be emitted.
+    bool hasPendingRow() const {
+      return currentRow != -1;
     }
 
    private:

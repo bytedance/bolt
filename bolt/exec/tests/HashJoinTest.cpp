@@ -8919,4 +8919,294 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reusedHashBuildDoesNotNeedInput) {
   ASSERT_TRUE(checked.load());
 }
 
+// Verifies that LeftSemiFilterJoinTracker flushes its pending matched probe row
+// before releasing an input batch whose trailing rows are all lookup misses,
+// preventing stale row indices from leaking into a smaller subsequent batch and
+// corrupting nested DictionaryVector<StringView> outputs.
+TEST_F(HashJoinTest, leftSemiFilterPendingRowWithTrailingMisses) {
+  auto makeDictStringColumn =
+      [&](const std::vector<std::string>& baseStrings,
+          const std::vector<vector_size_t>& dictIndices) {
+        auto base = makeFlatVector<std::string>(baseStrings);
+        auto indices = makeIndices(dictIndices);
+        return BaseVector::wrapInDictionary(
+            nullptr, indices, dictIndices.size(), base);
+      };
+
+  // Use VARCHAR keys so HashTable runs in kHash mode and lookup_->rows retains
+  // all non-null probe rows including lookup misses.
+  // Batch 1 (6 rows): rows 0 and 3 match and pass filter (filling maxBatch=2
+  // with row 3 held pending in LeftSemiFilterJoinTracker), while rows 4 and 5
+  // are trailing misses so the next listJoinResults() call returns 0.
+  auto batch1 = makeRowVector(
+      {"t_key", "t_ts", "t_str"},
+      {
+          makeFlatVector<std::string>(
+              {"k1", "miss_a", "miss_b", "k2", "miss_c", "miss_d"}),
+          makeFlatVector<int64_t>({5, 5, 5, 8, 5, 5}),
+          makeDictStringColumn(
+              {"unused_0",
+               "batch1_long_string_k1_row0",
+               "batch1_miss_str",
+               "batch1_long_string_k2_row3",
+               "unused_4"},
+              {1, 2, 2, 3, 2, 2}),
+      });
+
+  // Batch 2 (2 rows, smaller than Batch 1's pending row index 3): without the
+  // tracker flush fix, stale row index 3 leaks into outputRowMapping_[0] of
+  // Batch 2 and reads past Batch 2's 2-element dictionary index buffer.
+  auto batch2 = makeRowVector(
+      {"t_key", "t_ts", "t_str"},
+      {
+          makeFlatVector<std::string>({"k1", "miss_e"}),
+          makeFlatVector<int64_t>({6, 6}),
+          makeDictStringColumn(
+              {"batch2_long_string_k1_row0", "batch2_miss_str"}, {0, 1}),
+      });
+
+  // Batch 3 (5 rows, larger than a prior pending row index): verifies no
+  // silent cross-batch row substitution when staleRow < current inputSize, and
+  // also ends with trailing misses before EOF to verify the final batch does
+  // not drop its last matched row.
+  auto batch3 = makeRowVector(
+      {"t_key", "t_ts", "t_str"},
+      {
+          makeFlatVector<std::string>(
+              {"k1", "k2", "wrong_row", "miss_f", "miss_g"}),
+          makeFlatVector<int64_t>({4, 9, 100, 4, 4}),
+          makeDictStringColumn(
+              {"batch3_long_string_k1_row0",
+               "batch3_long_string_k2_row1",
+               "batch3_wrong_unmatched_row2",
+               "batch3_miss_str"},
+              {0, 1, 2, 3, 3}),
+      });
+
+  std::vector<RowVectorPtr> probeVectors = {batch1, batch2, batch3};
+  std::vector<RowVectorPtr> buildVectors = {makeRowVector(
+      {"u_key", "u_ts"},
+      {
+          makeFlatVector<std::string>({"k1", "k2"}),
+          makeFlatVector<int64_t>({10, 10}),
+      })};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan =
+      PlanBuilder(planNodeIdGenerator)
+          .values(probeVectors)
+          .hashJoin(
+              {"t_key"},
+              {"u_key"},
+              PlanBuilder(planNodeIdGenerator).values(buildVectors).planNode(),
+              "t_ts <= u_ts",
+              {"t_key", "t_str"},
+              core::JoinType::kLeftSemiFilter)
+          .planNode();
+
+  for (int32_t batchSize : {1, 2, 3}) {
+    SCOPED_TRACE(fmt::format("batchSize={}", batchSize));
+    CursorParameters params;
+    params.planNode = plan;
+    params.maxDrivers = 1;
+    params.serialExecution = true;
+    params.copyResult = false;
+    params.queryCtx = core::QueryCtx::create();
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows,
+          std::to_string(batchSize)},
+         {core::QueryConfig::kMaxOutputBatchRows, std::to_string(batchSize)}});
+
+    auto cursor = TaskCursor::create(params);
+    std::vector<RowVectorPtr> results;
+    while (cursor->moveNext()) {
+      auto output = cursor->current();
+      ASSERT_GT(output->size(), 0);
+      ASSERT_LE(output->size(), batchSize);
+      output->validate({});
+
+      // Exercise the same dictionary flatten path as BoltShuffleWriter.
+      std::vector<VectorPtr> flattenedChildren = output->children();
+      for (auto& child : flattenedChildren) {
+        BaseVector::flattenVector(child);
+        child->validate({});
+      }
+      results.push_back(std::make_shared<RowVector>(
+          pool(),
+          output->type(),
+          nullptr,
+          output->size(),
+          std::move(flattenedChildren)));
+    }
+
+    ASSERT_TRUE(assertEqualResults(
+        duckDbQueryRunner_.execute(
+            "SELECT t_key, t_str FROM t WHERE EXISTS "
+            "(SELECT 1 FROM u WHERE t.t_key = u.u_key AND t.t_ts <= u.u_ts)",
+            asRowType(plan->outputType())),
+        plan->outputType(),
+        results));
+  }
+}
+
+// Verifies that LeftSemiFilterJoinTracker and LeftSemiProjectJoinTracker (both
+// standard and null-aware) never exceed maxOutputBatchRows when a carried-over
+// pending row combines with a full batch of passing rows at results_.atEnd().
+TEST_F(HashJoinTest, leftSemiStrictMaxOutputBatchRowsWithCarryOver) {
+  // Build side: key "k0" has 2 rows so the first listJoinResults(maxOut=2)
+  // fills up on probe row 0 alone and leaves probe row 0 pending in the
+  // tracker; keys "k1".."k70" have 1 row each so the final chunk can fill all
+  // maxOut slots with distinct passing rows right as results_.atEnd() becomes
+  // true.
+  std::vector<std::optional<std::string>> buildKeys = {
+      "k0", "k0", std::nullopt};
+  std::vector<int64_t> buildVals = {10, 20, 15};
+  for (int32_t i = 1; i <= 70; ++i) {
+    buildKeys.push_back(fmt::format("k{}", i));
+    buildVals.push_back(100);
+  }
+  auto buildVector = makeRowVector(
+      {"u_key", "u_val"},
+      {
+          makeNullableFlatVector<std::string>(buildKeys),
+          makeFlatVector<int64_t>(buildVals),
+      });
+
+  std::vector<std::optional<std::string>> probeKeys;
+  std::vector<int64_t> probeVals;
+  probeKeys.push_back("k0");
+  probeVals.push_back(5);
+  for (int32_t i = 1; i <= 66; ++i) {
+    probeKeys.push_back(fmt::format("k{}", i));
+    // Alternate passing (<= 100) and failing (> 100, which becomes NULL under
+    // null-aware IN because build has a null u_key with u_val=15 >= 0).
+    probeVals.push_back((i % 3 == 0) ? 200 : 10);
+  }
+  auto probeBatch1 = makeRowVector(
+      {"t_key", "t_val"},
+      {
+          makeNullableFlatVector<std::string>(probeKeys),
+          makeFlatVector<int64_t>(probeVals),
+      });
+  auto probeBatch2 = makeRowVector(
+      {"t_key", "t_val"},
+      {
+          makeNullableFlatVector<std::string>({"k1", "no_match", std::nullopt}),
+          makeFlatVector<int64_t>({10, 10, 10}),
+      });
+  std::vector<RowVectorPtr> probeVectors = {probeBatch1, probeBatch2};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", {buildVector});
+
+  auto verifyPlanBatchBounds = [&](const core::PlanNodePtr& plan,
+                                   const std::string& referenceSql,
+                                   int32_t maxBatchRows) {
+    SCOPED_TRACE(
+        fmt::format("sql={} maxBatchRows={}", referenceSql, maxBatchRows));
+    CursorParameters params;
+    params.planNode = plan;
+    params.maxDrivers = 1;
+    params.serialExecution = true;
+    params.copyResult = true;
+    params.queryCtx = core::QueryCtx::create();
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows,
+          std::to_string(maxBatchRows)},
+         {core::QueryConfig::kMaxOutputBatchRows,
+          std::to_string(maxBatchRows)}});
+
+    auto cursor = TaskCursor::create(params);
+    std::vector<RowVectorPtr> results;
+    while (cursor->moveNext()) {
+      auto output = cursor->current();
+      ASSERT_GT(output->size(), 0);
+      ASSERT_LE(output->size(), maxBatchRows);
+      output->validate({});
+      results.push_back(output);
+    }
+
+    ASSERT_TRUE(assertEqualResults(
+        duckDbQueryRunner_.execute(referenceSql, asRowType(plan->outputType())),
+        plan->outputType(),
+        results));
+  };
+
+  for (int32_t maxBatchRows : {1, 2, 64}) {
+    // 1. LeftSemiFilter with extra filter.
+    {
+      auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+      auto plan = PlanBuilder(planNodeIdGenerator)
+                      .values(probeVectors)
+                      .hashJoin(
+                          {"t_key"},
+                          {"u_key"},
+                          PlanBuilder(planNodeIdGenerator)
+                              .values({buildVector})
+                              .planNode(),
+                          "t_val <= u_val",
+                          {"t_key", "t_val"},
+                          core::JoinType::kLeftSemiFilter)
+                      .planNode();
+      verifyPlanBatchBounds(
+          plan,
+          "SELECT t_key, t_val FROM t WHERE EXISTS "
+          "(SELECT 1 FROM u WHERE t.t_key = u.u_key AND t.t_val <= u.u_val)",
+          maxBatchRows);
+    }
+
+    // 2. LeftSemiProject (non-null-aware) with extra filter.
+    {
+      auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+      auto plan = PlanBuilder(planNodeIdGenerator)
+                      .values(probeVectors)
+                      .hashJoin(
+                          {"t_key"},
+                          {"u_key"},
+                          PlanBuilder(planNodeIdGenerator)
+                              .values({buildVector})
+                              .planNode(),
+                          "t_val <= u_val",
+                          {"t_key", "t_val", "match"},
+                          core::JoinType::kLeftSemiProject,
+                          /*nullAware=*/false)
+                      .planNode();
+      verifyPlanBatchBounds(
+          plan,
+          "SELECT t_key, t_val, EXISTS "
+          "(SELECT 1 FROM u WHERE (u.u_key IS NOT NULL OR t.t_key IS NOT NULL) "
+          "AND t.t_key = u.u_key AND t.t_val <= u.u_val) FROM t",
+          maxBatchRows);
+    }
+
+    // 3. Null-aware LeftSemiProject with extra filter across 64-bit word
+    // boundaries where leftSemiProjectIsNull_ records NULL match outcomes.
+    {
+      auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+      auto plan = PlanBuilder(planNodeIdGenerator)
+                      .values(probeVectors)
+                      .hashJoin(
+                          {"t_key"},
+                          {"u_key"},
+                          PlanBuilder(planNodeIdGenerator)
+                              .values({buildVector})
+                              .planNode(),
+                          "t_val <= u_val + 1000",
+                          {"t_key", "t_val", "match"},
+                          core::JoinType::kLeftSemiProject,
+                          /*nullAware=*/true)
+                      .planNode();
+      verifyPlanBatchBounds(
+          plan,
+          "SELECT t_key, t_val, "
+          "t_key IN (SELECT u_key FROM u WHERE t.t_val <= u.u_val + 1000) "
+          "FROM t",
+          maxBatchRows);
+    }
+  }
+}
+
 } // namespace
