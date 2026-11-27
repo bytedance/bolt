@@ -180,3 +180,5 @@ add_test(
   COMMAND
     bolt_shuffle_celeborn_partition_writer_test
 )
+
+add_subdirectory(columnar_payload)
