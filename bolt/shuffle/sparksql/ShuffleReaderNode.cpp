@@ -15,7 +15,9 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
+#include <fmt/format.h>
 #include "bolt/common/time/Timer.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 
@@ -32,12 +34,6 @@ SparkShuffleReader::SparkShuffleReader(
       shuffleReaderOptions_(shuffleReaderNode->getShuffleReaderOptions()),
       readerStreamIterator_(shuffleReaderNode->getReaderStreams()),
       arrowPool_(std::make_shared<BoltArrowMemoryPool>(pool())),
-      codec_(createCodec(
-          shuffleReaderOptions_.compressionType,
-          CodecOptions{
-              getCodecBackend(shuffleReaderOptions_.codecBackend),
-              kDefaultCompressionLevel,
-              shuffleReaderOptions_.checksumEnabled})),
       batchSize_(shuffleReaderOptions_.batchSize),
       shuffleBatchByteSize_(shuffleReaderOptions_.shuffleBatchByteSize),
       shuffleBufferSize_(shuffleReaderOptions_.shuffleBufferSize),
@@ -79,18 +75,28 @@ SparkShuffleReader::SparkShuffleReader(
     }
   }
 
-  // must be same as BoltShuffleWriter::decideBoltShuffleWriterType
-  auto partitioning = toPartitioning(partitioningShortName_);
-  isRowBased_ = supportAdaptiveShuffleWriter(partitioning) &&
-      ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
-        ((numPartitions_ >= rowBasePartitionThreshold &&
-          outputType_->size() >= rowBaseColumnNumThreshold) ||
-         static_cast<int64_t>(numPartitions_) * outputType_->size() >
-             shuffleReaderOptions_.rowBasedShuffleThreshold)) ||
-       (shuffleWriterType_ == ShuffleWriterType::RowBased));
+  useCellReader_ =
+      useCellShuffleReader(shuffleReaderOptions_, outputType_->size());
   reuseBufferedInputStream_ = shuffleReaderOptions_.reuseBufferedInputStream;
-  if (shuffleReaderOptions_.reuseColumnBuffer) {
-    columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
+  if (!useCellReader_) {
+    codec_ = createCodec(
+        shuffleReaderOptions_.compressionType,
+        CodecOptions{
+            getCodecBackend(shuffleReaderOptions_.codecBackend),
+            kDefaultCompressionLevel,
+            shuffleReaderOptions_.checksumEnabled});
+    // must be same as BoltShuffleWriter::decideBoltShuffleWriterType
+    auto partitioning = toPartitioning(partitioningShortName_);
+    isRowBased_ = supportAdaptiveShuffleWriter(partitioning) &&
+        ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
+          ((numPartitions_ >= rowBasePartitionThreshold &&
+            outputType_->size() >= rowBaseColumnNumThreshold) ||
+           static_cast<int64_t>(numPartitions_) * outputType_->size() >
+               shuffleReaderOptions_.rowBasedShuffleThreshold)) ||
+         (shuffleWriterType_ == ShuffleWriterType::RowBased));
+    if (shuffleReaderOptions_.reuseColumnBuffer) {
+      columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
+    }
   }
 }
 
@@ -107,6 +113,23 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
+  }
+
+  if (useCellReader_) {
+    if (!blockShuffleReader_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
+      blockShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+          readerStreamIterator_,
+          outputType_,
+          shuffleReaderOptions_,
+          arrowPool_.get(),
+          pool());
+    }
+    auto output = blockShuffleReader_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
   }
 
   if (reuseBufferedInputStream_) {
@@ -202,6 +225,32 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
+  if (blockShuffleReader_) {
+    // Report decompression and deserialization disjointly, matching the
+    // legacy reader's accounting: deserialization is the decode time less
+    // decompression and reading the input. The legacy reader counts its
+    // reads of the streams in the total read time alone, which holds the
+    // block reader's too.
+    const auto& reader = *blockShuffleReader_;
+    const auto m = reader.metrics();
+    decompressTime_ += m.decompressTimeNs;
+    deserializeTime_ += m.deserializeTimeNs;
+    // The three times are disjoint: decode is the deserialization above.
+    LOG(INFO) << fmt::format(
+        "{} totals: rows={}, payloads={}, streams={}, "
+        "read={:.3f}ms, decompress={:.3f}ms, decode={:.3f}ms",
+        reader.name(),
+        m.rowsRead,
+        m.payloadsRead,
+        m.streamsRead,
+        m.readTimeNs / 1e6,
+        m.decompressTimeNs / 1e6,
+        m.deserializeTimeNs / 1e6);
+    {
+      NanosecondTimer timer(&deserializerDestroyTime_);
+      blockShuffleReader_.reset();
+    }
+  }
   {
     auto stats = this->stats().rlock();
     readerStreamIterator_->updateMetrics(

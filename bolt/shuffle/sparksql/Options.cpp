@@ -53,13 +53,37 @@ const char* rowFormatName(row::RowFormat format) {
 
 } // namespace
 
+std::string CellShuffleOptions::toString() const {
+  return fmt::format(
+      "cellMemorySpillRatio={} spillMemoryBytes={} reclaimRunFloorBytes={} "
+      "cellSpillBytesPerStream={} cellSpillMinBytes={} partitionSealBytes={} "
+      "nullMemLimitBytes={} "
+      "enableStringDictionary={} stringDictionaryProbeRowCount={} "
+      "enableNonTemporalStores={} "
+      "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
+      cellMemorySpillRatio,
+      spillMemoryBytes,
+      reclaimRunFloorBytes,
+      cellSpillBytesPerStream,
+      cellSpillMinBytes,
+      partitionSealBytes,
+      nullMemLimitBytes,
+      enableStringDictionary,
+      stringDictionaryProbeRowCount,
+      enableNonTemporalStores,
+      streamCompression,
+      adaptiveCompression,
+      nativeNestedTypes);
+}
+
 std::string ShuffleReaderOptions::toString() const {
   return fmt::format(
       "compressionType={} codecBackend={} batchSize={} "
       "shuffleBatchByteSize={} shuffleBufferSize={} numPartitions={} "
       "partitionShortName={} forceShuffleWriterType={} rowFormat={} "
       "rowBasedShuffleThreshold={} checksumEnabled={} "
-      "reuseBufferedInputStream={} reuseColumnBuffer={}",
+      "reuseBufferedInputStream={} reuseColumnBuffer={} "
+      "preferCellShuffle={} cellNativeNestedTypes={}",
       arrow::util::Codec::GetCodecAsString(compressionType),
       codecBackend,
       batchSize,
@@ -72,7 +96,9 @@ std::string ShuffleReaderOptions::toString() const {
       rowBasedShuffleThreshold,
       checksumEnabled,
       reuseBufferedInputStream,
-      reuseColumnBuffer);
+      reuseColumnBuffer,
+      preferCellShuffle,
+      cellNativeNestedTypes);
 }
 
 std::string PartitionWriterOptions::toString() const {
@@ -111,12 +137,14 @@ std::string ShuffleWriterOptions::toString() const {
   return fmt::format(
       "partitioning={} taskAttemptId={} startPartitionId={} bufferSize={} "
       "bufferReallocThreshold={} shuffleBatchSize={} "
-      "forceShuffleWriterType={} useV2PreallocSizeThreshold={} "
+      "forceShuffleWriterType={} preferCellShuffle={} "
+      "useV2PreallocSizeThreshold={} "
       "enableVectorCombination={} accumulateBatchMaxColumns={} "
       "accumulateBatchMaxBatches={} recommendedColumn2RowSize={} "
       "rowFormat={} rowBasedShuffleThreshold={} shuffleCheckRatio={} "
       "shuffleCheckMaxColumns={} rowvectorModeCompressionMinColumns={} "
-      "rowvectorModeCompressionMaxBufferSize={} partitionWriterOptions=[{}]",
+      "rowvectorModeCompressionMaxBufferSize={} cellOptions=[{}] "
+      "partitionWriterOptions=[{}]",
       partitioningName(partitioning),
       taskAttemptId,
       startPartitionId,
@@ -124,6 +152,7 @@ std::string ShuffleWriterOptions::toString() const {
       bufferReallocThreshold,
       shuffleBatchSize,
       forceShuffleWriterType,
+      preferCellShuffle,
       useV2PreallocSizeThreshold,
       enableVectorCombination,
       accumulateBatchMaxColumns,
@@ -135,6 +164,7 @@ std::string ShuffleWriterOptions::toString() const {
       shuffleCheckMaxColumns,
       rowvectorModeCompressionMinColumns,
       rowvectorModeCompressionMaxBufferSize,
+      cellOptions.toString(),
       partitionWriterOptions.toString());
 }
 
@@ -152,11 +182,14 @@ std::string ShuffleWriterMetrics::toString() const {
   }
   return fmt::format(
       "totalInputRowNumber={} totalInputBatches={} totalBytesWritten={} "
-      "totalBytesEvicted={} totalSpillFiles={} totalWriteTime={} totalEvictTime={} "
-      "totalCompressTime={} splitTime={} convertTime={} flattenTime={} "
+      "totalBytesEvicted={} totalSpillFiles={} spillCount={} "
+      "dictionaryMatchedRows={} dictionaryFallbackRows={} totalWriteTime={} "
+      "totalEvictTime={} "
+      "totalCompressTime={} splitTime={} spillTime={} convertTime={} "
+      "flattenTime={} "
       "computePidTime={} shuffleWriteTime={} externalReclaimTime={} "
       "maxPartitionBufferSize={} avgPreallocSize={} dataSize={} peakBytes={} "
-      "useV2={} useRowBased={} rowVectorModeCompress={} "
+      "useV2={} useRowBased={} useCellShuffle={} rowVectorModeCompress={} "
       "combinedVectorNumber={} combineVectorTimes={} combineVectorCost={} "
       "numPartitions={} totalPartitionLengths={} totalRawPartitionLengths={}",
       totalInputRowNumber,
@@ -164,10 +197,14 @@ std::string ShuffleWriterMetrics::toString() const {
       succinctBytes(totalBytesWritten),
       succinctBytes(totalBytesEvicted),
       totalSpillFiles,
+      spillCount,
+      dictionaryMatchedRows,
+      dictionaryFallbackRows,
       asMillis(totalWriteTime),
       asMillis(totalEvictTime),
       asMillis(totalCompressTime),
       asMillis(splitTime),
+      asMillis(spillTime),
       asMillis(convertTime),
       asMillis(flattenTime),
       asMillis(computePidTime),
@@ -179,6 +216,7 @@ std::string ShuffleWriterMetrics::toString() const {
       succinctBytes(peakBytes),
       useV2,
       useRowBased,
+      useCellShuffle,
       rowVectorModeCompress,
       combinedVectorNumber,
       combineVectorTimes,

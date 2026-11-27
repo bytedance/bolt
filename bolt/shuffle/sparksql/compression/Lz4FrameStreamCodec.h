@@ -46,12 +46,18 @@ class Lz4FrameStreamCompressor : public StreamCompressor {
   int64_t recommendedOutputSize(int64_t inputSize) const override;
 
  private:
+  enum class FrameState {
+    kNotStarted,
+    kInProgress,
+    kEnded,
+  };
+
   void init();
   int64_t writeHeader(uint8_t*& dst, size_t& dstCapacity);
 
   LZ4F_cctx* cctx_{nullptr};
   LZ4F_preferences_t prefs_;
-  bool firstTime_{true};
+  FrameState frameState_{FrameState::kNotStarted};
 };
 
 /// LZ4 Frame streaming decompressor implementation.

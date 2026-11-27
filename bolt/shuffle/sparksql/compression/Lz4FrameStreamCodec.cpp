@@ -22,7 +22,49 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
 constexpr int32_t kLz4DefaultCompressionLevel = 0; // LZ4 default
-constexpr int64_t kDefaultBufferSize = 64 * 1024;
+constexpr int64_t kLz4BlockSize64KB = 64 << 10;
+constexpr int64_t kLz4BlockSize256KB = 256 << 10;
+constexpr int64_t kLz4BlockSize1MB = 1 << 20;
+constexpr int64_t kLz4BlockSize4MB = 4 << 20;
+constexpr int64_t kDefaultBufferSize = kLz4BlockSize64KB;
+
+LZ4F_blockSizeID_t toLz4BlockSizeId(int64_t blockSize) {
+  BOLT_CHECK_GE(blockSize, 0, "LZ4 frame block size must be non-negative.");
+  if (blockSize == 0) {
+    return LZ4F_default;
+  }
+  if (blockSize <= kLz4BlockSize64KB) {
+    return LZ4F_max64KB;
+  }
+  if (blockSize <= kLz4BlockSize256KB) {
+    return LZ4F_max256KB;
+  }
+  if (blockSize <= kLz4BlockSize1MB) {
+    return LZ4F_max1MB;
+  }
+  if (blockSize <= kLz4BlockSize4MB) {
+    return LZ4F_max4MB;
+  }
+  BOLT_FAIL(
+      "LZ4 frame block size {} exceeds maximum supported size ({}).",
+      blockSize,
+      kLz4BlockSize4MB);
+}
+
+int64_t lz4BlockSizeBytes(LZ4F_blockSizeID_t blockSizeId) {
+  switch (blockSizeId) {
+    case LZ4F_max256KB:
+      return kLz4BlockSize256KB;
+    case LZ4F_max1MB:
+      return kLz4BlockSize1MB;
+    case LZ4F_max4MB:
+      return kLz4BlockSize4MB;
+    case LZ4F_default:
+    case LZ4F_max64KB:
+    default:
+      return kLz4BlockSize64KB;
+  }
+}
 
 LZ4F_preferences_t DefaultPreferences() {
   LZ4F_preferences_t prefs;
@@ -54,7 +96,11 @@ void Lz4FrameStreamCompressor::init() {
   if (checksumEnabled()) {
     prefs_.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
   }
-  firstTime_ = true;
+  if (useIndependentBlocks()) {
+    prefs_.frameInfo.blockMode = LZ4F_blockIndependent;
+  }
+  prefs_.frameInfo.blockSizeID = toLz4BlockSizeId(blockSize());
+  frameState_ = FrameState::kNotStarted;
 
   LZ4F_errorCode_t ret = LZ4F_createCompressionContext(&cctx_, LZ4F_VERSION);
   BOLT_CHECK(
@@ -65,7 +111,10 @@ void Lz4FrameStreamCompressor::init() {
 int64_t Lz4FrameStreamCompressor::writeHeader(
     uint8_t*& dst,
     size_t& dstCapacity) {
-  if (!firstTime_) {
+  BOLT_CHECK(
+      frameState_ != FrameState::kEnded,
+      "Bolt shuffle codec: frame has already ended; call reset() first.");
+  if (frameState_ == FrameState::kInProgress) {
     return 0;
   }
 
@@ -77,7 +126,7 @@ int64_t Lz4FrameStreamCompressor::writeHeader(
   BOLT_CHECK(
       !LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_compressBegin failed.");
 
-  firstTime_ = false;
+  frameState_ = FrameState::kInProgress;
   dst += ret;
   dstCapacity -= ret;
   return static_cast<int64_t>(ret);
@@ -103,7 +152,7 @@ StreamCompressResult Lz4FrameStreamCompressor::compress(
   size_t bound = LZ4F_compressBound(static_cast<size_t>(inputLen), &prefs_);
   BOLT_CHECK(
       bound <= dstCapacity,
-      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
+      "Bolt shuffle codec: LZ4F_compressUpdate failed, output too small for compression.");
 
   size_t ret = LZ4F_compressUpdate(
       cctx_,
@@ -137,7 +186,7 @@ StreamFlushResult Lz4FrameStreamCompressor::flush(
   size_t bound = LZ4F_compressBound(0, &prefs_);
   BOLT_CHECK(
       bound <= dstCapacity,
-      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
+      "Bolt shuffle codec: LZ4F_flush failed, output too small for flush.");
 
   size_t ret = LZ4F_flush(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CHECK(!LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_flush failed.");
@@ -164,18 +213,25 @@ StreamEndResult Lz4FrameStreamCompressor::end(
   size_t bound = LZ4F_compressBound(0, &prefs_);
   BOLT_CODEC_CHECK(
       bound <= dstCapacity,
-      "LZ4F_compressBegin failed, output too small for compression.");
+      "LZ4F_compressEnd failed, output too small for end.");
 
   size_t ret = LZ4F_compressEnd(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_compressEnd failed.");
+  frameState_ = FrameState::kEnded;
 
   bytesWritten += static_cast<int64_t>(ret);
   return StreamEndResult{bytesWritten, true};
 }
 
 void Lz4FrameStreamCompressor::reset() {
-  // LZ4 frame API doesn't have a reset function for compression context
-  // We need to free and recreate
+  // A context that has not started or whose frame ended starts the next one at
+  // LZ4F_compressBegin, keeping the block buffer and state it allocated:
+  // recreating them for every frame dominates when frames are small and many.
+  // An in-progress frame has no reset in the LZ4 frame API: free and recreate.
+  if (frameState_ != FrameState::kInProgress) {
+    frameState_ = FrameState::kNotStarted;
+    return;
+  }
   if (cctx_) {
     LZ4F_freeCompressionContext(cctx_);
     cctx_ = nullptr;
@@ -184,7 +240,7 @@ void Lz4FrameStreamCompressor::reset() {
 }
 
 int64_t Lz4FrameStreamCompressor::recommendedInputSize() const {
-  return kDefaultBufferSize;
+  return lz4BlockSizeBytes(prefs_.frameInfo.blockSizeID);
 }
 
 int64_t Lz4FrameStreamCompressor::recommendedOutputSize(

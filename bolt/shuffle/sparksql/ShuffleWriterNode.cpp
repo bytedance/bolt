@@ -76,7 +76,7 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
   BOLT_CHECK(
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
-  shuffleWriter_ = BoltShuffleWriter::create(
+  shuffleWriter_ = BoltShuffleWriter::createShuffleWriter(
       shuffleWriterOptions_,
       rv->childrenSize() - 1,
       rv->size(),

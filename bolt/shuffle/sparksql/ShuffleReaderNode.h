@@ -37,6 +37,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
+#include "bolt/shuffle/sparksql/base/ShuffleBlockReader.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
 class SparkShuffleReaderNode : public bytedance::bolt::core::PlanNode {
@@ -146,6 +147,11 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   std::shared_ptr<ColumnBufferPool> columnBufferPool_{nullptr};
 
   std::unique_ptr<BoltColumnarBatchDeserializer> columnarBatchDeserializer_;
+
+  // Block-based shuffle reader (currently CellShuffleReader), independent of
+  // the legacy deserializer stack above.
+  std::unique_ptr<BlockShuffleReader> blockShuffleReader_;
+  bool useCellReader_ = false;
 
   bool isRowBased_ = false;
 

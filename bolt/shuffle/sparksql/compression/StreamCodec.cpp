@@ -28,6 +28,17 @@ std::string StreamCompressor::toString() const {
   return fmt::format("{}: {}", name(), options_.toString());
 }
 
+bool StreamCompressor::supports(CodecType type) {
+  switch (type) {
+    case CodecType::ZSTD:
+    case CodecType::GZIP:
+    case CodecType::LZ4_FRAME:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::unique_ptr<StreamCompressor> StreamCompressor::create(
     CodecType type,
     const CodecOptions& options) {
