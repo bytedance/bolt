@@ -116,6 +116,10 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
       NanosecondTimer timer(&deserializerCreateTime_);
       auto chainedStream = std::make_shared<ChainedReaderStream>(
           readerStreamIterator_, arrowPool_.get());
+      if (!chainedStream->hasNext()) {
+        finished_ = true;
+        return nullptr;
+      }
       columnarBatchDeserializer_ =
           std::make_unique<BoltColumnarBatchDeserializer>(
               std::move(chainedStream),

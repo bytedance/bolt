@@ -72,6 +72,16 @@ class ChainedReaderStream final : public arrow::io::InputStream {
     return position_;
   }
 
+  // Returns true if at least one sub-stream is available to read (advancing to
+  // the first sub-stream if needed), or false if the iterator is exhausted or
+  // the stream has been closed.
+  bool hasNext() {
+    if (closed_ || eos_) {
+      return false;
+    }
+    return current_ != nullptr || advance();
+  }
+
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     if (closed_) {
       return arrow::Status::IOError("ChainedReaderStream is closed");

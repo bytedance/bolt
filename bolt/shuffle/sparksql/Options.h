@@ -75,7 +75,7 @@ static constexpr int32_t rowBaseColumnNumThreshold = 5;
 // Whether to reuse a single BufferedInputStream across all reader streams by
 // chaining them into one continuous stream, instead of creating a new
 // BufferedInputStream (and deserializer) per stream.
-static constexpr bool kDefaultReuseBufferedInputStream = false;
+static constexpr bool kDefaultReuseBufferedInputStream = true;
 
 static constexpr bool kDefaultReuseColumnBuffer = false;
 
