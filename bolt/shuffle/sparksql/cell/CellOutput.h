@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <limits>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -150,22 +152,36 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// borrowed by finalize().
   void writePartitionShare(uint32_t pid, DataFileWriter& out) override;
 
-  struct SpilledRun {
-    /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
-    /// segment for that partition.
-    std::vector<uint64_t> pidEnds;
-  };
+  static constexpr uint32_t kNoSegment = std::numeric_limits<uint32_t>::max();
+  static constexpr uint32_t kSegmentChunkShift = 12;
+  static constexpr uint32_t kSegmentChunkSize = 1u << kSegmentChunkShift;
+  static constexpr uint32_t kSegmentChunkMask = kSegmentChunkSize - 1;
 
-  /// One partition's slice of a SpilledRun.
+  /// One partition's slice of a spilled run.
   struct SpillSegment {
     uint64_t begin;
     uint64_t end;
   };
 
-  /// One partition's closed payload: its run segments, oldest first, and
-  /// its null body in the spill file.
+  /// Fixed-size SoA block of spilled segments and intrusive next links.
+  struct SegmentChunk {
+    SpillSegment segments[kSegmentChunkSize];
+    uint32_t next[kSegmentChunkSize];
+  };
+
+  /// Intrusive singly-linked list of a partition's open spilled segments,
+  /// oldest first.
+  struct SegmentChain {
+    uint32_t head{kNoSegment};
+    uint32_t tail{kNoSegment};
+    uint32_t count{0};
+  };
+
+  /// One partition's closed payload: its run segments chain, oldest first,
+  /// and its null body in the spill file.
   struct SealedPayload {
-    std::vector<SpillSegment> segments;
+    uint32_t firstSegment{kNoSegment};
+    uint32_t segmentCount{0};
     uint64_t nullOffset{0};
     uint32_t nullLength{0};
     /// The null body's size decompressed; 0 when stored as it is.
@@ -174,11 +190,11 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     uint64_t variableBytes{0};
   };
 
-  /// The non-empty segments of `pid` across runs [from, end), oldest first.
-  static std::vector<SpillSegment> partitionSegments(
-      const std::vector<SpilledRun>& runs,
-      uint32_t pid,
-      size_t from);
+  /// Appends one spilled segment onto partition `pid`'s open chain.
+  void appendSegment(uint32_t pid, SpillSegment segment);
+
+  /// Copies `count` segments chained from `head` into the data file.
+  void copySegmentChain(DataFileWriter& out, uint32_t head, uint32_t count);
 
   /// Appends partition `pid`'s sealed payload `payload`.
   void writeSealedPayload(
@@ -186,10 +202,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid,
       const SealedPayload& payload,
       std::span<const uint8_t> encodingTags);
-
-  /// Copies one spilled run segment, in its final form, into the data
-  /// file.
-  void copySpilledSegment(DataFileWriter& out, const SpillSegment& segment);
 
   /// Appends one partition's payload for the current (open) window:
   /// header, null body and row counts straight from memory, then the
@@ -216,11 +228,13 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Every run's compression.
   RunCompressor compressor_;
 
-  /// Every Run, oldest first. A partition's open payload owns its segments
-  /// from openFrom_[pid] on; a seal moves them into the partition's
-  /// SealedPayload and the partition's open payload past them.
-  std::vector<SpilledRun> runs_;
-  std::vector<size_t> openFrom_;
+  /// Chunked SoA storage for spilled segments across all partitions.
+  std::vector<std::unique_ptr<SegmentChunk>> segmentChunks_;
+  uint32_t numSegments_{0};
+  /// Per partition: open spilled segment chain, oldest first.
+  std::vector<SegmentChain> pendingSegments_;
+  /// Non-empty spill runs written so far.
+  uint64_t numRuns_{0};
   /// Per partition: its sealed payloads, oldest first.
   std::vector<std::vector<SealedPayload>> sealed_;
   /// Window and partition seals completed so far.
@@ -232,9 +246,9 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 
   /// Pre-compression bytes merged so far.
   uint64_t rawBytesWritten_{0};
-  /// Pre-compression bytes merged per partition.
+  /// Pre-compression bytes per partition: spilled runs accumulated in
+  /// spillCells(), sealed/open headers and resident tails added at merge.
   std::vector<int64_t> rawPartitionLengths_;
-  std::vector<uint64_t> segmentSizes_;
   BufferPtr scratch_;
 };
 

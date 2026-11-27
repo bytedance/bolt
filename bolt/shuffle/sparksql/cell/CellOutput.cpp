@@ -19,6 +19,7 @@
 #include <folly/ScopeGuard.h>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
@@ -88,14 +89,14 @@ uint64_t uncompressedRunBytes(uint32_t numStreams, uint64_t payloadBytes) {
   return combinedRunHeaderBytes(numStreams) + payloadBytes;
 }
 
-/// Writes partition `pid`'s resident cells to `sink` as one run; nothing
-/// when it has none.
-void writeCells(
+/// Writes partition `pid`'s resident cells to `sink` as one run and returns its
+/// uncompressed payload bytes; nothing written and returns 0 when it has none.
+uint64_t writeCells(
     RunCompressor& compressor,
     RunSink& sink,
     const CellWindowInput& in,
     uint32_t pid) {
-  compressor.write(
+  return compressor.write(
       sink,
       in.layout->numStreams(),
       [&](uint32_t s) { return in.cells->bytes(pid, s); },
@@ -116,33 +117,73 @@ LocalCellOutput::LocalCellOutput(
       options_(std::move(options)),
       layout_(layout),
       pool_(pool),
-      compressor_(options_, cellOptions, &compressTimeNs_) {
-  openFrom_.assign(options_.numPartitions, 0);
-  sealed_.resize(options_.numPartitions);
+      compressor_(options_, cellOptions, &compressTimeNs_) {}
+
+void LocalCellOutput::appendSegment(uint32_t pid, SpillSegment segment) {
+  BOLT_CHECK_LT(numSegments_, kNoSegment, "too many cell spill segments");
+  const uint32_t idx = numSegments_++;
+  const uint32_t chunkIdx = idx >> kSegmentChunkShift;
+  const uint32_t slot = idx & kSegmentChunkMask;
+  if (chunkIdx == segmentChunks_.size()) {
+    segmentChunks_.emplace_back(new SegmentChunk);
+  }
+  auto& chunk = *segmentChunks_[chunkIdx];
+  chunk.segments[slot] = segment;
+  chunk.next[slot] = kNoSegment;
+  auto& chain = pendingSegments_[pid];
+  if (chain.count == 0) {
+    chain.head = idx;
+  } else {
+    segmentChunks_[chain.tail >> kSegmentChunkShift]
+        ->next[chain.tail & kSegmentChunkMask] = idx;
+  }
+  chain.tail = idx;
+  ++chain.count;
 }
 
 void LocalCellOutput::spillCells(const CellWindowInput& in) {
   auto writeGuard = scopedWrite();
-  SpilledRun run;
   // Runs are compressed as they spill, in their final form: both disk
   // passes write compressed bytes and the merge copies the segments
   // verbatim.
-  auto& ends = run.pidEnds;
-  ends.resize(in.numPartitions + 1);
-  ends[0] = spill_.end();
-
   SpillRunSink sink(spill_);
+  struct WrittenSegment {
+    uint32_t pid;
+    SpillSegment segment;
+    uint64_t rawBytes;
+  };
+  std::vector<WrittenSegment> written;
+  written.reserve(std::min<size_t>(in.numPartitions, 256));
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     if (in.runPartitions == nullptr || in.runPartitions[pid] != 0) {
-      writeCells(compressor_, sink, in, pid);
+      const uint64_t begin = spill_.end();
+      const uint64_t rawBytes = writeCells(compressor_, sink, in, pid);
+      const uint64_t end = spill_.end();
+      if (end > begin) {
+        BOLT_DCHECK_GT(rawBytes, 0);
+        written.push_back({pid, {begin, end}, rawBytes});
+      }
     }
-    ends[pid + 1] = spill_.end();
   }
   // A spill exists to free memory: hand the workspace capacity back too.
   compressor_.releaseBuffers();
   scratch_.reset();
   spill_.flush();
-  runs_.push_back(std::move(run));
+  if (!written.empty()) {
+    if (pendingSegments_.empty()) {
+      pendingSegments_.resize(options_.numPartitions);
+    }
+    if (rawPartitionLengths_.empty()) {
+      rawPartitionLengths_.assign(options_.numPartitions, 0);
+    }
+    const uint32_t numStreams = layout_->numStreams();
+    for (const auto& entry : written) {
+      appendSegment(entry.pid, entry.segment);
+      rawPartitionLengths_[entry.pid] += static_cast<int64_t>(
+          uncompressedRunBytes(numStreams, entry.rawBytes));
+    }
+    ++numRuns_;
+  }
 }
 
 void LocalCellOutput::sealPayloads(const CellWindowInput& in) {
@@ -151,15 +192,21 @@ void LocalCellOutput::sealPayloads(const CellWindowInput& in) {
     if (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0) {
       continue;
     }
-    // The partition's open payload ends here: its segments since the last
-    // seal become the sealed payload's, and later Runs open the next one.
-    const size_t from = openFrom_[pid];
-    openFrom_[pid] = runs_.size();
     if (in.rowCounts[pid] == 0) {
+      BOLT_DCHECK(pendingSegments_.empty() || pendingSegments_[pid].count == 0);
       continue;
     }
+    if (sealed_.empty()) {
+      sealed_.resize(options_.numPartitions);
+    }
+    // The partition's open payload ends here: its spilled segments since the
+    // last seal become the sealed payload's.
     SealedPayload payload;
-    payload.segments = partitionSegments(runs_, pid, from);
+    if (!pendingSegments_.empty()) {
+      payload.firstSegment = pendingSegments_[pid].head;
+      payload.segmentCount = pendingSegments_[pid].count;
+      pendingSegments_[pid] = {};
+    }
     payload.rows = in.rowCounts[pid];
     payload.variableBytes = in.variableBytes[pid];
     resetBuffer(scratch_, 0, pool_);
@@ -189,15 +236,14 @@ void LocalCellOutput::writeSealedPayload(
     const SealedPayload& payload,
     std::span<const uint8_t> encodingTags) {
   const uint32_t rows = payload.rows;
-  const auto& segments = payload.segments;
   BOLT_CHECK_LE(
-      segments.size(),
+      payload.segmentCount,
       kMaxPayloadRuns,
       "Cell payload of partition {} holds {} runs, more than maxRunCount ({})",
       pid,
-      segments.size(),
+      payload.segmentCount,
       kMaxPayloadRuns);
-  const uint32_t runCount = static_cast<uint32_t>(segments.size());
+  const uint32_t runCount = payload.segmentCount;
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
   appendLe32(scratch_, rows, pool_);
@@ -221,59 +267,26 @@ void LocalCellOutput::writeSealedPayload(
   out.write(scratch_->as<char>(), scratch_->size());
 
   // Each spilled segment is a run of its own, oldest first.
-  for (const auto& segment : segments) {
-    copySpilledSegment(out, segment);
-  }
+  copySegmentChain(out, payload.firstSegment, payload.segmentCount);
 }
 
-void LocalCellOutput::copySpilledSegment(
+void LocalCellOutput::copySegmentChain(
     DataFileWriter& out,
-    const SpillSegment& segment) {
-  const uint32_t numStreams = layout_->numStreams();
-  const uint64_t segmentBytes = segment.end - segment.begin;
-  // The spill segment is a run in wire form.
-  BOLT_CHECK_GE(segmentBytes, 1, "corrupt cell spill segment");
-  uint8_t layoutByte = 0;
-  spill_.read(segment.begin, &layoutByte, 1);
-  const auto layout = static_cast<RunLayout>(layoutByte);
-  if (layout == RunLayout::kSeparate) {
-    // Compressed stream by stream at spill time: the final run.
-    // A kSeparate run header: layout byte, stored and decoded size per
-    // stream.
-    const uint64_t headerBytes = separateRunHeaderBytes(numStreams);
-    BOLT_CHECK_GE(segmentBytes, headerBytes, "corrupt cell spill segment");
-    segmentSizes_.resize(2ull * numStreams);
-    spill_.read(segment.begin + 1, segmentSizes_.data(), headerBytes - 1);
-    uint64_t decodedSum = 0;
-    for (uint32_t s = 0; s < numStreams; ++s) {
-      const uint64_t decoded = segmentSizes_[numStreams + s];
-      decodedSum += decoded != 0 ? decoded : segmentSizes_[s];
-    }
-    rawBytesWritten_ += uncompressedRunBytes(numStreams, decodedSum);
+    uint32_t head,
+    uint32_t count) {
+  uint32_t idx = head;
+  for (uint32_t i = 0; i < count; ++i) {
+    BOLT_DCHECK_NE(idx, kNoSegment);
+    const auto& chunk = *segmentChunks_[idx >> kSegmentChunkShift];
+    const uint32_t slot = idx & kSegmentChunkMask;
+    const SpillSegment& segment = chunk.segments[slot];
+    const uint64_t segmentBytes = segment.end - segment.begin;
+    BOLT_CHECK_GE(segmentBytes, 1, "corrupt cell spill segment");
     ++copiedSegments_;
     out.copyFrom(spill_, segment.begin, segmentBytes);
-    return;
+    idx = chunk.next[slot];
   }
-  BOLT_CHECK(
-      layout == RunLayout::kCombined ||
-          layout == RunLayout::kCombinedUncompressed,
-      "corrupt cell spill segment");
-  BOLT_CHECK_GE(
-      segmentBytes,
-      combinedRunHeaderBytes(numStreams),
-      "corrupt cell spill segment");
-  segmentSizes_.resize(numStreams);
-  spill_.read(
-      segment.begin + kCombinedRunDecodedSizesOffset,
-      segmentSizes_.data(),
-      sizeof(uint64_t) * numStreams);
-  uint64_t decodedSum = 0;
-  for (const auto size : segmentSizes_) {
-    decodedSum += size;
-  }
-  rawBytesWritten_ += uncompressedRunBytes(numStreams, decodedSum);
-  ++copiedSegments_;
-  out.copyFrom(spill_, segment.begin, segmentBytes);
+  BOLT_DCHECK_EQ(idx, kNoSegment);
 }
 
 void LocalCellOutput::writeOpenPayload(
@@ -281,8 +294,10 @@ void LocalCellOutput::writeOpenPayload(
     const CellWindowInput& in,
     uint32_t pid) {
   const uint64_t total = residentBytes(in, pid);
-  const auto segments = partitionSegments(runs_, pid, openFrom_[pid]);
-  const uint64_t runs = segments.size() + (total > 0 ? 1 : 0);
+  const SegmentChain chain =
+      pendingSegments_.empty() ? SegmentChain{} : pendingSegments_[pid];
+  const uint64_t runs =
+      static_cast<uint64_t>(chain.count) + (total > 0 ? 1 : 0);
   BOLT_CHECK_LE(
       runs,
       kMaxPayloadRuns,
@@ -300,28 +315,13 @@ void LocalCellOutput::writeOpenPayload(
   out.write(scratch_->as<char>(), scratch_->size());
   // Mid-window spilled runs first (they hold the older blocks), the
   // resident cells last.
-  for (const auto& segment : segments) {
-    copySpilledSegment(out, segment);
-  }
+  copySegmentChain(out, chain.head, chain.count);
   if (total > 0) {
     rawBytesWritten_ += uncompressedRunBytes(layout_->numStreams(), total);
     DataRunSink sink(out);
-    writeCells(compressor_, sink, in, pid);
+    const uint64_t writtenBytes = writeCells(compressor_, sink, in, pid);
+    BOLT_DCHECK_EQ(writtenBytes, total);
   }
-}
-
-std::vector<LocalCellOutput::SpillSegment> LocalCellOutput::partitionSegments(
-    const std::vector<SpilledRun>& runs,
-    uint32_t pid,
-    size_t from) {
-  std::vector<SpillSegment> segments;
-  for (size_t i = from; i < runs.size(); ++i) {
-    const auto& run = runs[i];
-    if (run.pidEnds[pid + 1] > run.pidEnds[pid]) {
-      segments.push_back({run.pidEnds[pid], run.pidEnds[pid + 1]});
-    }
-  }
-  return segments;
 }
 
 void LocalCellOutput::appendBlockKind() {
@@ -336,7 +336,9 @@ void LocalCellOutput::finalize(
   // in memory is written straight into the data file by the merge,
   // alongside any runs the window already spilled mid-stream.
   mergeInput_ = &in;
-  rawPartitionLengths_.assign(in.numPartitions, 0);
+  if (rawPartitionLengths_.empty()) {
+    rawPartitionLengths_.assign(in.numPartitions, 0);
+  }
   {
     SCOPE_EXIT {
       mergeInput_ = nullptr;
@@ -345,26 +347,34 @@ void LocalCellOutput::finalize(
     mergeToDataFile(options_, spill_, {this, &composite_}, metrics);
   }
   compressor_.releaseBuffers();
-  segmentSizes_.clear();
-  segmentSizes_.shrink_to_fit();
   scratch_.reset();
-  metrics.rawPartitionLengths = rawPartitionLengths_;
+  segmentChunks_.clear();
+  segmentChunks_.shrink_to_fit();
+  numSegments_ = 0;
+  std::vector<SegmentChain>().swap(pendingSegments_);
+  std::vector<std::vector<SealedPayload>>().swap(sealed_);
+  metrics.rawPartitionLengths = std::move(rawPartitionLengths_);
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
   LOG(INFO) << "CellShuffleWriter merge: seals=" << numSeals_
-            << " runs=" << runs_.size()
-            << " segmentsCopied=" << copiedSegments_;
+            << " runs=" << numRuns_ << " segmentsCopied=" << copiedSegments_;
   logCompression(compressor_);
 }
 
 void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
   BOLT_CHECK_NOT_NULL(mergeInput_, "Cell payloads merged outside finalize()");
   const uint64_t rawStart = rawBytesWritten_;
-  for (const auto& payload : sealed_[pid]) {
-    writeSealedPayload(out, pid, payload, mergeInput_->encodingTags);
+  if (!sealed_.empty()) {
+    for (const auto& payload : sealed_[pid]) {
+      writeSealedPayload(out, pid, payload, mergeInput_->encodingTags);
+    }
+    std::vector<SealedPayload>().swap(sealed_[pid]);
   }
   if (mergeInput_->rowCounts[pid] > 0) {
     writeOpenPayload(out, *mergeInput_, pid);
+  }
+  if (!pendingSegments_.empty()) {
+    pendingSegments_[pid] = {};
   }
   rawPartitionLengths_[pid] +=
       static_cast<int64_t>(rawBytesWritten_ - rawStart);

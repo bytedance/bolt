@@ -275,7 +275,7 @@ RunCompressor::RunCompressor(
 
 RunCompressor::~RunCompressor() = default;
 
-void RunCompressor::write(
+uint64_t RunCompressor::write(
     RunSink& sink,
     uint32_t numStreams,
     RunStreamSize size,
@@ -287,7 +287,7 @@ void RunCompressor::write(
     total += sizes_[s];
   }
   if (total == 0) {
-    return;
+    return 0;
   }
   const std::span<const uint64_t> sizes = sizes_;
   if (codec_ == nullptr || total < kMinCompressBytes) {
@@ -297,7 +297,7 @@ void RunCompressor::write(
       ++stats_.tinyFrames;
       stats_.tinyBytes += total;
     }
-    return;
+    return total;
   }
   skipper_.prepareStreams(numStreams);
   if (total < kMinSeparateRunBytes) {
@@ -326,7 +326,7 @@ void RunCompressor::write(
         stored == 0 ? RunLayout::kCombinedUncompressed : RunLayout::kCombined,
         stored == 0 ? total : stored);
     sink.patch(headerAt, prefix, sizeof(prefix));
-    return;
+    return total;
   }
   // kSeparate: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
@@ -363,6 +363,7 @@ void RunCompressor::write(
     });
   }
   sink.patch(headerAt, header.data(), header.size() * sizeof(uint64_t));
+  return total;
 }
 
 void RunCompressor::storeUncompressed(

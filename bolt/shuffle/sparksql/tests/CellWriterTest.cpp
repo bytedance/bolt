@@ -3102,5 +3102,118 @@ TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
   EXPECT_GE(actual, 0);
 }
 
+TEST_F(CellWriterTest, sparseSpillsAndPartialSealsPreservePartitionOrder) {
+  constexpr int32_t kPartitions = 16;
+  ShuffleInput input;
+  int64_t seq = 0;
+  const auto appendBatch =
+      [&](const std::vector<int32_t>& pids,
+          const std::vector<std::optional<int64_t>>& ids,
+          const std::vector<std::optional<std::string>>& strs) {
+        input.data.push_back(makeRowVector(
+            {"id", "s"},
+            {makeNullableFlatVector<int64_t>(ids),
+             makeNullableFlatVector<std::string>(strs)}));
+        input.pids.push_back(pids);
+      };
+  const auto tagged = [&](size_t len) {
+    return fmt::format("{:08d}_{}", seq++, std::string(len, 'x'));
+  };
+
+  // Batch 0: cold partition 1 exceeds the spill floor (spills into run 0
+  // without sealing), partition 2 holds all-null rows (0 cell bytes), and
+  // partition 3 keeps tiny resident rows.
+  {
+    std::vector<int32_t> pids;
+    std::vector<std::optional<int64_t>> ids;
+    std::vector<std::optional<std::string>> strs;
+    for (int i = 0; i < 10; ++i) {
+      pids.push_back(1);
+      ids.push_back(seq);
+      strs.push_back(tagged(1024));
+    }
+    for (int i = 0; i < 5; ++i) {
+      pids.push_back(2);
+      ids.push_back(std::nullopt);
+      strs.push_back(std::nullopt);
+    }
+    for (int i = 0; i < 2; ++i) {
+      pids.push_back(3);
+      ids.push_back(seq);
+      strs.push_back(tagged(128));
+    }
+    appendBatch(pids, ids, strs);
+  }
+
+  // Batch 1: cold partition 1 spills a second time into run 1 while staying
+  // below partitionSealBytes.
+  {
+    std::vector<int32_t> pids(8, 1);
+    std::vector<std::optional<int64_t>> ids;
+    std::vector<std::optional<std::string>> strs;
+    for (int i = 0; i < 8; ++i) {
+      ids.push_back(seq);
+      strs.push_back(tagged(600));
+    }
+    appendBatch(pids, ids, strs);
+  }
+
+  // Batches 2 & 3: hot partition 0 triggers two partial seals while cold
+  // partitions 1, 2, and 3 remain open.
+  for (int batch = 0; batch < 2; ++batch) {
+    std::vector<int32_t> pids(20, 0);
+    std::vector<std::optional<int64_t>> ids;
+    std::vector<std::optional<std::string>> strs;
+    for (int i = 0; i < 20; ++i) {
+      ids.push_back(seq);
+      strs.push_back(tagged(1024));
+    }
+    appendBatch(pids, ids, strs);
+  }
+
+  // Batch 4: small unspilled resident tail for partition 1 and an extra null
+  // row for partition 2.
+  const int64_t id0 = seq;
+  const auto s0 = tagged(256);
+  const int64_t id1 = seq;
+  const auto s1 = tagged(256);
+  appendBatch({1, 1, 2}, {id0, id1, std::nullopt}, {s0, s1, std::nullopt});
+
+  auto options = writerOptions(kPartitions);
+  options.cellOptions.enableStringDictionary = false;
+  options.cellOptions.spillMemoryBytes = 0;
+  options.cellOptions.partitionSealBytes = 16 << 10;
+  options.cellOptions.cellSpillBytesPerStream = 1;
+  options.cellOptions.cellSpillMinBytes = 4 << 10;
+
+  const auto written = test::writeShuffle(options, input, pool());
+  EXPECT_GT(written.metrics.totalBytesEvicted, 0);
+  EXPECT_EQ(written.metrics.spillCount, 2);
+
+  const auto type = asRowType(input.data[0]->type());
+  const auto codec = test::lz4Codec();
+  EXPECT_EQ(
+      test::payloadRowCounts(written.partitions[0], type, codec.get(), pool()),
+      (std::vector<vector_size_t>{20, 20}));
+  EXPECT_EQ(
+      test::payloadRowCounts(written.partitions[1], type, codec.get(), pool()),
+      (std::vector<vector_size_t>{20}));
+  EXPECT_EQ(
+      test::payloadRowCounts(written.partitions[2], type, codec.get(), pool()),
+      (std::vector<vector_size_t>{6}));
+  EXPECT_EQ(
+      test::payloadRowCounts(written.partitions[3], type, codec.get(), pool()),
+      (std::vector<vector_size_t>{2}));
+  for (int32_t pid = 4; pid < kPartitions; ++pid) {
+    EXPECT_TRUE(written.partitions[pid].empty());
+  }
+
+  for (const auto& shape : test::kReadShapes) {
+    SCOPED_TRACE(shape.batchSize);
+    test::expectReadsBack(
+        input, written, arrow::Compression::LZ4_FRAME, pool(), shape);
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell

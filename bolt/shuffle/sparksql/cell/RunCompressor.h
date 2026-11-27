@@ -185,8 +185,9 @@ class RunCompressor {
   /// Writes one run of `numStreams` streams, `size(s)` bytes each, that
   /// `visit` hands over - twice for a frame stored after all. The sizes
   /// come first: they choose the layout and fill the header. A run without
-  /// bytes writes nothing.
-  void write(
+  /// bytes writes nothing and returns 0; otherwise returns the total
+  /// uncompressed payload bytes across all streams.
+  uint64_t write(
       RunSink& sink,
       uint32_t numStreams,
       RunStreamSize size,
