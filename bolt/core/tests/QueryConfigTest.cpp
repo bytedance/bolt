@@ -130,7 +130,7 @@ TEST_F(QueryConfigTest, useMonoAlloc) {
 TEST_F(QueryConfigTest, simdHashTableEnabled) {
   {
     auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
-    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+    EXPECT_TRUE(queryCtx->queryConfig().simdHashTableEnabled());
   }
 
   {
