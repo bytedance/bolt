@@ -3895,6 +3895,71 @@ TEST_P(TestColumnReader, testTimestamp) {
   }
 }
 
+TEST_P(TestColumnReader, timestampSignedNanos) {
+  proto::ColumnEncoding encoding;
+  encoding.set_kind(proto::ColumnEncoding_Kind_DIRECT);
+  EXPECT_CALL(streams_, getEncodingProxy(_)).WillRepeatedly(Return(&encoding));
+  EXPECT_CALL(streams_, getStreamProxy(_, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(streams_, getStreamProxy(_, proto::Stream_Kind_ROW_INDEX, false))
+      .WillRepeatedly(Return(nullptr));
+
+  // RLEv1 literal runs. Timestamp nanoseconds use an unsigned RLE stream but
+  // may contain a signed value, as written by Arrow for a negative fraction.
+  auto literalRun = [](const std::vector<uint64_t>& values) {
+    std::vector<unsigned char> bytes{
+        static_cast<unsigned char>(-values.size())};
+    for (auto value : values) {
+      do {
+        const auto lowBits = value & 0x7f;
+        value >>= 7;
+        bytes.push_back(lowBits | (value ? 0x80 : 0));
+      } while (value);
+    }
+    return bytes;
+  };
+  std::vector<uint64_t> seconds;
+  for (int64_t second : {-1, 0, -1, 1, -1, 0}) {
+    const auto value = second - EPOCH_OFFSET;
+    seconds.push_back((static_cast<uint64_t>(value) << 1) ^ (value >> 63));
+  }
+  const auto secondsBytes = literalRun(seconds);
+  // Encoded -876544000ns, -1000ns, +123456000ns (twice), zero (twice).
+  // Low 3 bits encode the count of trailing decimal zeros minus one.
+  const auto nanosBytes = literalRun(
+      {static_cast<uint64_t>(int64_t{-7012350}),
+       static_cast<uint64_t>(int64_t{-6}),
+       987650,
+       987650,
+       0,
+       0});
+  const unsigned char present[] = {0xff, 0xde}; // Row 2 is null.
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(
+          Return(new SeekableArrayInputStream(present, sizeof(present))));
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_DATA, true))
+      .WillRepeatedly(Return(new SeekableArrayInputStream(
+          secondsBytes.data(), secondsBytes.size())));
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_NANO_DATA, true))
+      .WillRepeatedly(Return(
+          new SeekableArrayInputStream(nanosBytes.data(), nanosBytes.size())));
+
+  auto type = HiveTypeParser().parse("struct<ts:timestamp>");
+  buildReader(type);
+  auto batch = newBatch(type);
+  next(7, batch);
+  auto timestamps = getOnlyChild<FlatVector<Timestamp>>(batch);
+  ASSERT_EQ(timestamps->size(), 7);
+  EXPECT_EQ(getNullCount(timestamps), 1);
+  EXPECT_TRUE(timestamps->isNullAt(2));
+  EXPECT_EQ(timestamps->valueAt(0), Timestamp(-2, 123456000));
+  EXPECT_EQ(timestamps->valueAt(1), Timestamp(-1, 999999000));
+  EXPECT_EQ(timestamps->valueAt(3), Timestamp(-2, 123456000));
+  EXPECT_EQ(timestamps->valueAt(4), Timestamp(1, 123456000));
+  EXPECT_EQ(timestamps->valueAt(5), Timestamp(-1, 0));
+  EXPECT_EQ(timestamps->valueAt(6), Timestamp(0, 0));
+}
+
 TEST_P(TestColumnReader, testDecimal64) {
   // set getEncoding
   proto::ColumnEncoding directEncoding;
