@@ -35,6 +35,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(__aarch64__) && defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
+
 #include <folly/CpuId.h>
 #include <folly/FileUtil.h>
 #include <folly/String.h>
@@ -137,6 +142,23 @@ bool hasBmi2() {
 bool hasNeon() {
 #if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__CUDACC__)
   return true;
+#else
+  return false;
+#endif
+}
+
+bool hasSimd() {
+#if defined(__aarch64__)
+  return hasNeon();
+#else
+  return hasAvx2();
+#endif
+}
+
+bool hasSve() {
+#if defined(__aarch64__) && defined(__linux__)
+  static const bool supported = (getauxval(AT_HWCAP) & HWCAP_SVE) != 0;
+  return supported && FLAGS_bolt_enable_sve;
 #else
   return false;
 #endif
