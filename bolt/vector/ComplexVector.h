@@ -184,6 +184,8 @@ class RowVector : public BaseVector {
       const BaseVector* source,
       const folly::Range<const CopyRange*>& ranges) override;
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override;
+
   uint64_t retainedSize() const override {
     auto size = BaseVector::retainedSize();
     for (auto& child : children_) {
@@ -613,6 +615,8 @@ struct ArrayVectorBase : BaseVector {
     sizes_->asMutable<vector_size_t>()[i] = size;
   }
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override;
+
   /// Verify that an ArrayVector/MapVector does not contain overlapping [offset,
   /// size] ranges. Throws in case overlaps are found.
   void checkRanges() const;
@@ -727,6 +731,8 @@ class ArrayVector : public ArrayVectorBase {
   void copyRanges(
       const BaseVector* source,
       const folly::Range<const CopyRange*>& ranges) override;
+
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override;
 
   uint64_t retainedSize() const override {
     return BaseVector::retainedSize() + offsets_->capacity() +
@@ -866,6 +872,8 @@ class MapVector : public ArrayVectorBase {
   void copyRanges(
       const BaseVector* source,
       const folly::Range<const CopyRange*>& ranges) override;
+
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override;
 
   uint64_t retainedSize() const override {
     return BaseVector::retainedSize() + offsets_->capacity() +
