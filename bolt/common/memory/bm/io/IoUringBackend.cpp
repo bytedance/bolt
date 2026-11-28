@@ -131,6 +131,64 @@ std::vector<BackendCompletion> IoUringBackend::reap() {
   return completions;
 }
 
+#elif defined(OS_MACOSX)
+
+struct IoUringState {
+  EventFd completionEvent;
+  std::vector<BackendCompletion> completions;
+};
+
+IoUringBackend::IoUringBackend(uint32_t ringDepth) {
+  (void)ringDepth;
+  state_ = std::make_unique<IoUringState>();
+}
+
+IoUringBackend::~IoUringBackend() = default;
+
+int IoUringBackend::completionFd() const {
+  return state_->completionEvent.fd();
+}
+
+BackendSubmitStatus IoUringBackend::submit(
+    uint64_t requestId,
+    const IoRequest& request) {
+  ssize_t bytes;
+  do {
+    if (request.opcode == IoOpcode::Read) {
+      bytes = ::pread(
+          request.fd,
+          request.buffer.ioData(),
+          request.buffer.length(),
+          static_cast<off_t>(request.fileOffset));
+    } else {
+      bytes = ::pwrite(
+          request.fd,
+          request.buffer.ioData(),
+          request.buffer.length(),
+          static_cast<off_t>(request.fileOffset));
+    }
+  } while (bytes < 0 && errno == EINTR);
+
+  IoResult result;
+  if (bytes >= 0) {
+    result.bytes = static_cast<uint64_t>(bytes);
+  } else {
+    result.error = IoErrorCode::BackendIoError;
+    result.nativeErrorCode = errno;
+  }
+  state_->completions.push_back(
+      BackendCompletion{requestId, std::move(result)});
+  state_->completionEvent.notify();
+  return BackendSubmitStatus::Submitted;
+}
+
+std::vector<BackendCompletion> IoUringBackend::reap() {
+  state_->completionEvent.drainNonBlocking();
+  std::vector<BackendCompletion> completions;
+  completions.swap(state_->completions);
+  return completions;
+}
+
 #else
 
 struct IoUringState {};

@@ -29,7 +29,11 @@
 #include <utility>
 
 #include <glog/logging.h>
+#if defined(OS_MACOSX)
+#include <sys/event.h>
+#else
 #include <sys/epoll.h>
+#endif
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -46,21 +50,43 @@ uint64_t elapsedUs(
   return duration > 0 ? static_cast<uint64_t>(duration) : 0;
 }
 
-int createEpollFd() {
+int createEventQueueFd() {
+#if defined(OS_MACOSX)
+  const int fd = ::kqueue();
+  BOLT_CHECK_GE(fd, 0, "kqueue failed: {}", std::strerror(errno));
+#else
   const int fd = ::epoll_create1(EPOLL_CLOEXEC);
   BOLT_CHECK_GE(fd, 0, "epoll_create1 failed: {}", std::strerror(errno));
+#endif
   return fd;
 }
 
-void registerEpollFd(int epollFd, int fd, uint32_t eventId) {
+void registerEventFd(int eventQueueFd, int fd, uint32_t eventId) {
+#if defined(OS_MACOSX)
+  struct kevent event;
+  EV_SET(
+      &event,
+      fd,
+      EVFILT_READ,
+      EV_ADD | EV_ENABLE,
+      0,
+      0,
+      reinterpret_cast<void*>(static_cast<uintptr_t>(eventId)));
+  BOLT_CHECK_EQ(
+      ::kevent(eventQueueFd, &event, 1, nullptr, 0, nullptr),
+      0,
+      "kevent add failed: {}",
+      std::strerror(errno));
+#else
   epoll_event event{};
   event.events = EPOLLIN;
   event.data.u32 = eventId;
   BOLT_CHECK_EQ(
-      ::epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event),
+      ::epoll_ctl(eventQueueFd, EPOLL_CTL_ADD, fd, &event),
       0,
       "epoll_ctl add failed: {}",
       std::strerror(errno));
+#endif
 }
 
 } // namespace
@@ -76,14 +102,15 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
     : config_(config),
       depthController_(createDepthController(config_.depthControl)),
       backend_(std::move(backend)),
-      epollFd_(createEpollFd()),
+      eventQueueFd_(createEventQueueFd()),
       requestQueue_(config_.priorityWeights) {
   BOLT_CHECK(
       validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
       "invalid DiskIoSchedulerConfig");
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
-  registerEpollFd(epollFd_.get(), wakeupEvent_.fd(), kWakeupEvent);
-  registerEpollFd(epollFd_.get(), backend_->completionFd(), kCompletionEvent);
+  registerEventFd(eventQueueFd_.get(), wakeupEvent_.fd(), kWakeupEvent);
+  registerEventFd(
+      eventQueueFd_.get(), backend_->completionFd(), kCompletionEvent);
   stats_.depthControl = depthController_->stats();
   worker_ = std::thread([this] { run(); });
 }
@@ -284,16 +311,36 @@ void DiskIoSchedulerImpl::run() {
 
 uint64_t DiskIoSchedulerImpl::waitForWorkerEvent(int timeoutMs) {
   const auto waitStart = std::chrono::steady_clock::now();
+#if defined(OS_MACOSX)
+  struct kevent events[2];
+  timespec timeout{};
+  const timespec* timeoutPtr = nullptr;
+  if (timeoutMs >= 0) {
+    timeout.tv_sec = timeoutMs / 1000;
+    timeout.tv_nsec = static_cast<long>(timeoutMs % 1000) * 1'000'000;
+    timeoutPtr = &timeout;
+  }
+#else
   epoll_event events[2];
+#endif
   while (true) {
-    const int ready = ::epoll_wait(epollFd_.get(), events, 2, timeoutMs);
+#if defined(OS_MACOSX)
+    const int ready =
+        ::kevent(eventQueueFd_.get(), nullptr, 0, events, 2, timeoutPtr);
+#else
+    const int ready = ::epoll_wait(eventQueueFd_.get(), events, 2, timeoutMs);
+#endif
     if (ready >= 0) {
       return elapsedUs(waitStart, std::chrono::steady_clock::now());
     }
     if (errno == EINTR) {
       continue;
     }
+#if defined(OS_MACOSX)
+    BOLT_CHECK(false, "kevent wait failed: {}", std::strerror(errno));
+#else
     BOLT_CHECK(false, "epoll_wait failed: {}", std::strerror(errno));
+#endif
   }
 }
 

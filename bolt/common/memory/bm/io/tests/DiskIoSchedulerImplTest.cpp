@@ -42,7 +42,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#if defined(__linux__)
 #include <sys/epoll.h>
+#endif
 #include <unistd.h>
 
 using namespace bytedance::bolt::memory::bm;
@@ -54,8 +56,10 @@ std::unique_ptr<char[]> makeBuffer(size_t size) {
 }
 
 constexpr auto kFutureTimeout = std::chrono::seconds(5);
+#if defined(__linux__)
 constexpr std::string_view kEventFdTarget = "anon_inode:[eventfd]";
 constexpr std::string_view kEpollFdTarget = "anon_inode:[eventpoll]";
+#endif
 
 IoRequest makeValidRequest(IoPriority priority = IoPriority::Medium) {
   IoRequest request;
@@ -82,6 +86,7 @@ bool waitUntilReady(std::future<IoResult>& future) {
   return future.wait_for(kFutureTimeout) == std::future_status::ready;
 }
 
+#if defined(__linux__)
 size_t countEventAndEpollFds() {
   DIR* dir = ::opendir("/proc/self/fd");
   BOLT_CHECK(dir != nullptr, "failed to open /proc/self/fd");
@@ -104,6 +109,21 @@ size_t countEventAndEpollFds() {
   ::closedir(dir);
   return count;
 }
+#elif defined(__APPLE__)
+size_t countOpenFds() {
+  DIR* dir = ::opendir("/dev/fd");
+  BOLT_CHECK(dir != nullptr, "failed to open /dev/fd");
+  size_t count = 0;
+  while (const auto* entry = ::readdir(dir)) {
+    const std::string_view name(entry->d_name);
+    if (name != "." && name != "..") {
+      ++count;
+    }
+  }
+  ::closedir(dir);
+  return count;
+}
+#endif
 
 bool waitUntilCurrentDepth(DiskIoSchedulerImpl& scheduler, uint32_t expected) {
   const auto deadline =
@@ -495,6 +515,7 @@ class NeverCompleteBackend : public IoBackend {
 
 } // namespace
 
+#if defined(__linux__)
 TEST(DiskIoSchedulerImplTest, fdCounterTracksOnlyEventAndEpollDescriptors) {
   const auto openFdsBefore = countEventAndEpollFds();
 
@@ -509,9 +530,14 @@ TEST(DiskIoSchedulerImplTest, fdCounterTracksOnlyEventAndEpollDescriptors) {
   ASSERT_GE(epollFd.get(), 0);
   EXPECT_EQ(openFdsBefore + 2, countEventAndEpollFds());
 }
+#endif
 
-TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
+TEST(DiskIoSchedulerImplTest, constructorClosesFdsWhenValidationThrows) {
+#if defined(__linux__)
   const auto openFdsBefore = countEventAndEpollFds();
+#elif defined(__APPLE__)
+  const auto openFdsBefore = countOpenFds();
+#endif
 
   DiskIoSchedulerConfig config;
   config.ringDepth = 16;
@@ -525,7 +551,11 @@ TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
       }(),
       "invalid DiskIoSchedulerConfig");
 
+#if defined(__linux__)
   EXPECT_EQ(openFdsBefore, countEventAndEpollFds());
+#elif defined(__APPLE__)
+  EXPECT_EQ(openFdsBefore, countOpenFds());
+#endif
 }
 
 TEST(DiskIoSchedulerImplTest, constructorUsesDefaultBackendWhenSupported) {
@@ -540,6 +570,8 @@ TEST(DiskIoSchedulerImplTest, constructorUsesDefaultBackendWhenSupported) {
         std::string::npos)
         << ex.what();
   }
+#elif defined(OS_MACOSX)
+  EXPECT_NO_THROW({ DiskIoSchedulerImpl scheduler(config); });
 #else
   BOLT_ASSERT_THROW(
       [&] { DiskIoSchedulerImpl scheduler(config); }(),

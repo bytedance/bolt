@@ -38,6 +38,10 @@ class EventFd {
 
  private:
   ScopedFd fd_;
+  // Keep the layout independent of private build-system definitions.
+#if defined(__APPLE__)
+  ScopedFd notifyFd_;
+#endif
 };
 
 } // namespace bytedance::bolt::memory::bm
