@@ -16,14 +16,21 @@
 
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
+#include <arrow/io/memory.h>
 #include <arrow/memory_pool.h>
+#include <arrow/util/bit_util.h>
+#include <cstring>
 #include <numeric>
 
+#include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/row/CompactRow.h"
 #include "bolt/row/dense/DenseRow.h"
+#include "bolt/shuffle/sparksql/Payload.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/Utils.h"
+#include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 
@@ -103,6 +110,60 @@ std::vector<std::string_view> rowBodies(const std::vector<uint8_t*>& rows) {
         reinterpret_cast<const char*>(row + kSizeOfRowHeader), rowSize);
   }
   return bodies;
+}
+
+class MetricsTrackingStreamIterator final : public MemoryReaderStreamIterator {
+ public:
+  using MemoryReaderStreamIterator::MemoryReaderStreamIterator;
+
+  void updateMetrics(
+      int64_t numRows,
+      int64_t numBatches,
+      int64_t decompressTime,
+      int64_t deserializeTime,
+      int64_t deserializerCreateTime,
+      int64_t deserializerDestroyTime,
+      int64_t mergeTime,
+      int64_t totalReadTime) override {
+    metricsUpdated = true;
+    outputRows = numRows;
+  }
+
+  bool metricsUpdated{false};
+  int64_t outputRows{-1};
+};
+
+std::vector<char> serializeBigIntStream(
+    const std::vector<int64_t>& values,
+    arrow::MemoryPool* pool) {
+  const auto numRows = static_cast<uint32_t>(values.size());
+  const auto validityBytes = arrow::bit_util::BytesForBits(numRows);
+  auto validity =
+      arrow::AllocateResizableBuffer(validityBytes, pool).ValueOrDie();
+  std::memset(validity->mutable_data(), 0xFF, validityBytes);
+
+  auto data = arrow::AllocateResizableBuffer(numRows * sizeof(int64_t), pool)
+                  .ValueOrDie();
+  std::memcpy(data->mutable_data(), values.data(), numRows * sizeof(int64_t));
+
+  const std::vector<bool> isValidityBuffer = {true, false};
+  auto payload = BlockPayload::fromBuffers(
+                     Payload::Type::kUncompressed,
+                     numRows,
+                     {std::move(validity), std::move(data)},
+                     &isValidityBuffer,
+                     pool,
+                     /*codec=*/nullptr,
+                     Payload::Mode::kBuffer,
+                     /*hasComplexType=*/false)
+                     .ValueOrDie();
+
+  auto out = arrow::io::BufferOutputStream::Create(1 << 10, pool).ValueOrDie();
+  BOLT_CHECK(payload->serialize(out.get()).ok(), "serialize failed");
+  auto buffer = out->Finish().ValueOrDie();
+  return std::vector<char>(
+      reinterpret_cast<const char*>(buffer->data()),
+      reinterpret_cast<const char*>(buffer->data()) + buffer->size());
 }
 
 } // namespace
@@ -479,6 +540,69 @@ TEST_F(ShuffleMiscTest, DefaultRowFormatIsDense) {
   for (vector_size_t row = 0; row < roundTrip->size(); ++row) {
     EXPECT_TRUE(data->equalValueAt(roundTrip.get(), row, row));
   }
+}
+
+TEST_F(ShuffleMiscTest, ReuseBufferedInputStreamEmptyPartition) {
+  auto outputType = ROW({"c0"}, {BIGINT()});
+  auto streamIter = std::make_shared<MetricsTrackingStreamIterator>(
+      std::vector<std::vector<char>>{});
+
+  ShuffleReaderOptions readerOptions;
+  EXPECT_TRUE(readerOptions.reuseBufferedInputStream);
+  readerOptions.numPartitions = 8;
+  readerOptions.forceShuffleWriterType = 0; // Adaptive
+  readerOptions.partitionShortName = "hash";
+
+  auto readerNode = std::make_shared<SparkShuffleReaderNode>(
+      core::PlanNodeId("reader_empty"), outputType, readerOptions, streamIter);
+
+  exec::test::CursorParameters params;
+  params.planNode = readerNode;
+  params.serialExecution = true;
+
+  auto cursor = exec::test::TaskCursor::create(params);
+  EXPECT_FALSE(cursor->moveNext());
+  EXPECT_TRUE(streamIter->metricsUpdated);
+  EXPECT_EQ(streamIter->outputRows, 0);
+}
+
+TEST_F(ShuffleMiscTest, ReuseBufferedInputStreamMultipleStreams) {
+  auto outputType = ROW({"c0"}, {BIGINT()});
+  auto* arrowPool = arrow::default_memory_pool();
+  auto stream0 = serializeBigIntStream({10, 20, 30}, arrowPool);
+  auto stream1 = serializeBigIntStream({40, 50}, arrowPool);
+  auto streamIter = std::make_shared<MetricsTrackingStreamIterator>(
+      std::vector<std::vector<char>>{std::move(stream0), std::move(stream1)});
+
+  ShuffleReaderOptions readerOptions;
+  EXPECT_TRUE(readerOptions.reuseBufferedInputStream);
+  readerOptions.numPartitions = 8;
+  readerOptions.forceShuffleWriterType = 0; // Adaptive
+  readerOptions.partitionShortName = "hash";
+
+  auto readerNode = std::make_shared<SparkShuffleReaderNode>(
+      core::PlanNodeId("reader_multi"), outputType, readerOptions, streamIter);
+
+  exec::test::CursorParameters params;
+  params.planNode = readerNode;
+  params.serialExecution = true;
+
+  std::vector<int64_t> actual;
+  auto cursor = exec::test::TaskCursor::create(params);
+  while (cursor->moveNext()) {
+    auto batch = cursor->current();
+    auto* col = batch->childAt(0)->asFlatVector<int64_t>();
+    ASSERT_NE(col, nullptr);
+    for (vector_size_t i = 0; i < batch->size(); ++i) {
+      ASSERT_FALSE(col->isNullAt(i));
+      actual.push_back(col->valueAt(i));
+    }
+    cursor->current().reset();
+  }
+
+  EXPECT_EQ(actual, (std::vector<int64_t>{10, 20, 30, 40, 50}));
+  EXPECT_TRUE(streamIter->metricsUpdated);
+  EXPECT_EQ(streamIter->outputRows, 5);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

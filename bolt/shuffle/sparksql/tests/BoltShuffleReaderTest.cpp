@@ -30,6 +30,7 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/Payload.h"
+#include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -70,23 +71,31 @@ std::shared_ptr<arrow::Buffer> buildStream(
     int32_t numPayloads,
     int32_t rowsPerPayload,
     const std::vector<bool>* isValidityBuffer,
-    arrow::MemoryPool* pool) {
+    arrow::MemoryPool* pool,
+    int32_t startPayloadIdx = 0) {
   auto stream =
       arrow::io::BufferOutputStream::Create(1 << 12, pool).ValueOrDie();
   for (int32_t p = 0; p < numPayloads; ++p) {
-    auto payload = BlockPayload::fromBuffers(
-                       Payload::Type::kUncompressed,
-                       rowsPerPayload,
-                       makePayloadBuffers(p, rowsPerPayload, pool),
-                       isValidityBuffer,
-                       pool,
-                       /*codec=*/nullptr,
-                       Payload::Mode::kBuffer,
-                       /*hasComplexType=*/false)
-                       .ValueOrDie();
+    auto payload =
+        BlockPayload::fromBuffers(
+            Payload::Type::kUncompressed,
+            rowsPerPayload,
+            makePayloadBuffers(startPayloadIdx + p, rowsPerPayload, pool),
+            isValidityBuffer,
+            pool,
+            /*codec=*/nullptr,
+            Payload::Mode::kBuffer,
+            /*hasComplexType=*/false)
+            .ValueOrDie();
     BOLT_CHECK(payload->serialize(stream.get()).ok(), "serialize failed");
   }
   return stream->Finish().ValueOrDie();
+}
+
+std::vector<char> toBytes(const std::shared_ptr<arrow::Buffer>& buffer) {
+  return std::vector<char>(
+      reinterpret_cast<const char*>(buffer->data()),
+      reinterpret_cast<const char*>(buffer->data()) + buffer->size());
 }
 
 class BoltShuffleReaderTest : public ::testing::Test {
@@ -198,6 +207,53 @@ TEST_F(BoltShuffleReaderTest, AllocationCountBounded) {
 
   EXPECT_LT(allocs, kPayloads * kBuffersPerPayload * 1.2)
       << "saw " << allocs << " allocations; perf fix may have regressed";
+}
+
+TEST_F(BoltShuffleReaderTest, ChainedReaderStreamHasNextEmpty) {
+  auto iter = std::make_shared<MemoryReaderStreamIterator>(
+      std::vector<std::vector<char>>{});
+  ChainedReaderStream stream(iter, pool_);
+  EXPECT_FALSE(stream.hasNext());
+  EXPECT_FALSE(stream.hasNext());
+
+  uint8_t byte = 0;
+  auto readResult = stream.Read(1, &byte);
+  ASSERT_TRUE(readResult.ok());
+  EXPECT_EQ(*readResult, 0);
+}
+
+TEST_F(BoltShuffleReaderTest, ChainedReaderStreamHasNextClosed) {
+  auto buf = buildStream(1, 8, &isValidityBuffer_, pool_);
+  auto iter = std::make_shared<MemoryReaderStreamIterator>(
+      std::vector<std::vector<char>>{toBytes(buf)});
+  ChainedReaderStream stream(iter, pool_);
+  ASSERT_TRUE(stream.Close().ok());
+  EXPECT_FALSE(stream.hasNext());
+}
+
+TEST_F(BoltShuffleReaderTest, ChainedReaderStreamHasNextMultipleStreams) {
+  constexpr int32_t kRows = 16;
+  auto buf0 = buildStream(1, kRows, &isValidityBuffer_, pool_, 0);
+  auto buf1 = buildStream(1, kRows, &isValidityBuffer_, pool_, 1);
+  auto iter = std::make_shared<MemoryReaderStreamIterator>(
+      std::vector<std::vector<char>>{toBytes(buf0), toBytes(buf1)});
+  auto chainedStream = std::make_shared<ChainedReaderStream>(iter, pool_);
+  EXPECT_TRUE(chainedStream->hasNext());
+  EXPECT_TRUE(chainedStream->hasNext());
+
+  factory_ = std::make_unique<BoltColumnarBatchDeserializerFactory>(
+      schema_,
+      /*codec=*/nullptr,
+      rowType_,
+      /*batchSize=*/1024,
+      /*shuffleBatchByteSize=*/1 << 20,
+      pool_,
+      boltPool_.get(),
+      /*checksumEnabled=*/false);
+  factory_->setpartitioningShortName("single");
+  auto deserializer = factory_->createDeserializer(chainedStream);
+  drainAndVerify(*deserializer, 2 * kRows);
+  EXPECT_FALSE(chainedStream->hasNext());
 }
 
 } // namespace
