@@ -729,7 +729,8 @@ std::unique_ptr<RowContainer> makeOldKeyRowContainer(
 
 std::unique_ptr<BmRowContainer> makeBmRowContainer(
     DatasetKind dataset,
-    const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager,
+    uint64_t chunkHeapTargetBytes) {
   auto types = columnTypes(dataset);
   std::vector<bool> nullable(types.size(), false);
   return std::make_unique<BmRowContainer>(
@@ -737,7 +738,13 @@ std::unique_ptr<BmRowContainer> makeBmRowContainer(
       std::move(nullable),
       0,
       bufferManager,
-      memory::bm::MemoryTag::kHashBuild);
+      memory::bm::MemoryTag::kHashBuild,
+      static_cast<uint32_t>(
+          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
+      static_cast<uint32_t>(
+          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
+      nullptr,
+      chunkHeapTargetBytes);
 }
 
 std::unique_ptr<BmRowContainer> makeBmKeyRowContainer(
@@ -1055,16 +1062,21 @@ void warmupStoreBatchOld(const BenchmarkOptions& options) {
   folly::doNotOptimizeAway(container->numRows());
 }
 
-void warmupStoreBatchBm(const BenchmarkOptions& options) {
+void warmupStoreBatchBm(
+    const BenchmarkOptions& options,
+    uint64_t chunkHeapTargetBytes,
+    BmBatchStringStoreMode stringStoreMode) {
   if (!shouldWarmupBenchmarks()) {
     return;
   }
   auto warmup = makeWarmupOptions(options);
   BenchmarkContext context(
       "warmup-store-batch-bm", warmup.dataBytes, 0, warmup.compression);
-  auto container = makeBmRowContainer(warmup.dataset, context.bufferManager);
+  auto container = makeBmRowContainer(
+      warmup.dataset, context.bufferManager, chunkHeapTargetBytes);
   auto input = makeReusableInputBatches(context.pool.get(), warmup);
-  storeReusableInputBatchesBmBatch(*container, input, warmup);
+  storeReusableInputBatchesBmBatch(
+      *container, input, warmup, nullptr, stringStoreMode);
   folly::doNotOptimizeAway(container->numRows());
 }
 

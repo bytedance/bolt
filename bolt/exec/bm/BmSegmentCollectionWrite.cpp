@@ -83,6 +83,11 @@ BlockRef& BmSegmentCollection::ensureHeapBlockSlow(
   BOLT_DCHECK(!chunk.consumed);
   const auto blockSize = std::max(heapBlockSize_, minBytes);
   chunk.heapBlocks.push_back(addBlock(blockSize));
+  chunk.heapAllocatedBytes += chunk.heapBlocks.back().size;
+  if (chunkHeapTargetBytes_ != 0 &&
+      chunk.heapAllocatedBytes >= chunkHeapTargetBytes_) {
+    chunk.sealRequested = true;
+  }
   return chunk.heapBlocks.back();
 }
 
@@ -96,6 +101,14 @@ ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
 
   segment.currentChunk = chunk->meta.id;
   segment.chunks.push_back(std::move(chunk));
+  if (!segment.chunkRowDirectory.empty()) {
+    segment.chunkRowDirectory.appendChunkStart(segment.chunks.back()->meta);
+  } else if (
+      segment.chunks.size() > 1 &&
+      segment.chunks[segment.chunks.size() - 2]->meta.rowCount <
+          rowsPerChunk_) {
+    segment.chunkRowDirectory.rebuild(segment.chunks);
+  }
   auto& current = *segment.chunks.back();
   segment.writeCursor.chunk = &current;
   segment.writeCursor.nextRow = current.rowBlock.ptr;

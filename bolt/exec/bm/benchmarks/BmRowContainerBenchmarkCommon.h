@@ -209,7 +209,8 @@ std::unique_ptr<RowContainer> makeOldKeyRowContainer(
 
 std::unique_ptr<BmRowContainer> makeBmRowContainer(
     DatasetKind dataset,
-    const std::shared_ptr<memory::bm::BufferManager>& bufferManager);
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager,
+    uint64_t chunkHeapTargetBytes = 0);
 
 std::unique_ptr<BmRowContainer> makeBmKeyRowContainer(
     DatasetKind dataset,
@@ -294,7 +295,10 @@ void warmupStoreBm(const BenchmarkOptions& options);
 
 void warmupStoreBatchOld(const BenchmarkOptions& options);
 
-void warmupStoreBatchBm(const BenchmarkOptions& options);
+void warmupStoreBatchBm(
+    const BenchmarkOptions& options,
+    uint64_t chunkHeapTargetBytes,
+    BmBatchStringStoreMode stringStoreMode);
 
 void warmupReadOld(const BenchmarkOptions& options);
 

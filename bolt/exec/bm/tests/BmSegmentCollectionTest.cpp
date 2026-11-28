@@ -28,6 +28,67 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
+TEST_F(BmRowContainerTest, ChunkRowDirectoryLocatesDenseBoundariesDirectly) {
+  const std::vector<RowNumber> starts{0, 3, 10, 11, 63, 64, 65, 130};
+  std::vector<std::unique_ptr<ChunkData>> chunks;
+  chunks.reserve(starts.size());
+  for (size_t i = 0; i < starts.size(); ++i) {
+    auto chunk = std::make_unique<ChunkData>();
+    chunk->meta.id = i;
+    chunk->meta.firstRowNumber = starts[i];
+    chunk->meta.rowCount =
+        i + 1 < starts.size() ? starts[i + 1] - starts[i] : 71;
+    chunks.push_back(std::move(chunk));
+  }
+
+  ChunkRowDirectory directory;
+  EXPECT_TRUE(directory.empty());
+  directory.rebuild(chunks);
+  EXPECT_FALSE(directory.empty());
+  ChunkRowDirectory incremental;
+  for (const auto& chunk : chunks) {
+    incremental.appendChunkStart(chunk->meta);
+  }
+
+  size_t expectedChunk = 0;
+  for (RowNumber row = 0; row <= 200; ++row) {
+    while (expectedChunk + 1 < starts.size() &&
+           starts[expectedChunk + 1] <= row) {
+      ++expectedChunk;
+    }
+    EXPECT_EQ(expectedChunk, directory.chunkIndex(row, chunks.size() - 1))
+        << "row=" << row;
+    EXPECT_EQ(expectedChunk, incremental.chunkIndex(row, chunks.size() - 1))
+        << "incremental row=" << row;
+  }
+}
+
+TEST_F(BmRowContainerTest, IrregularDirectorySurvivesConsumedChunkMetadata) {
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 0, 4096);
+  BmSegmentCollection segments(
+      bufferManager_, MemoryTag::kTesting, &layout, 4096, 64, nullptr, 128);
+  auto& segment = segments.createSegment(kDefaultPartition);
+  std::vector<BatchAppendRange> ranges;
+  segments.reserveRowsInBatch(segment, 0, 32, ranges, nullptr);
+  auto& firstChunk = segments.currentChunk(segment);
+  auto& firstHeap = segments.ensureHeapBlockInChunk(firstChunk, 64);
+  firstHeap.used = firstHeap.size;
+  (void)segments.ensureHeapBlockInChunk(firstChunk, 64);
+  ASSERT_TRUE(firstChunk.sealRequested);
+  segments.sealChunkAtBatchBoundary(segment);
+  (void)segments.reserveRowsInCurrentChunk(segment, 32, 1, nullptr);
+
+  ASSERT_FALSE(segment.chunkRowDirectory.empty());
+  ASSERT_EQ(2, segment.chunks.size());
+  const auto firstBlock = segment.chunks[0]->rowBlock.id;
+  const auto secondBlock = segment.chunks[1]->rowBlock.id;
+  segments.releaseChunkBlocks(*segment.chunks[0]);
+
+  EXPECT_TRUE(segment.chunks[0]->consumed);
+  EXPECT_EQ(firstBlock, segments.rowIdForRowNumber(segment, 31).rowBlockId);
+  EXPECT_EQ(secondBlock, segments.rowIdForRowNumber(segment, 32).rowBlockId);
+}
+
 TEST_F(
     BmRowContainerTest,
     SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) {
@@ -104,6 +165,38 @@ TEST_F(BmRowContainerTest, SegmentCollectionListsLiveSegmentIdsInIdOrder) {
   EXPECT_EQ(
       (std::vector<SegmentId>{firstId, thirdId, fourthId}),
       segments.allSegmentIds());
+}
+
+TEST_F(BmRowContainerTest, HeapCapacityCountsAllocatedBlocks) {
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 0, 4096);
+  BmSegmentCollection segments(
+      bufferManager_, MemoryTag::kTesting, &layout, 4096, 64);
+  auto& segment = segments.createSegment(kDefaultPartition);
+  segments.newRowInSegment(segment);
+  auto& chunk = segments.currentChunk(segment);
+
+  auto& first = segments.ensureHeapBlockInChunk(chunk, 40);
+  EXPECT_EQ(64, first.size);
+  first.used += 40;
+  EXPECT_EQ(64, chunk.heapAllocatedBytes);
+
+  auto& reused = segments.ensureHeapBlockInChunk(chunk, 16);
+  EXPECT_EQ(first.id, reused.id);
+  reused.used += 16;
+  EXPECT_EQ(64, chunk.heapAllocatedBytes);
+
+  auto& second = segments.ensureHeapBlockInChunk(chunk, 17);
+  EXPECT_EQ(64, second.size);
+  second.used += 17;
+  EXPECT_EQ(128, chunk.heapAllocatedBytes);
+
+  auto& oversized = segments.ensureHeapBlockInChunk(chunk, 160);
+  EXPECT_EQ(160, oversized.size);
+  oversized.used += 160;
+  EXPECT_EQ(288, chunk.heapAllocatedBytes);
+
+  segments.releaseChunkBlocks(chunk);
+  EXPECT_EQ(0, chunk.heapAllocatedBytes);
 }
 
 } // namespace

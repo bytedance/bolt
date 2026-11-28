@@ -19,7 +19,9 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/exec/bm/BmRowContainerPublicTypes.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -75,9 +77,54 @@ struct ChunkData {
   // width payload blocks referenced by rows in its row block.
   std::vector<BlockRef> heapBlocks;
   std::vector<HeapBaseRef> heapBases;
+  // Total allocation capacity of heap blocks currently owned by this chunk.
+  // This is independent of committed payload in BlockRef::used.
+  uint64_t heapAllocatedBytes{0};
+  // Set when heap allocation reaches the configured soft target. The writer
+  // acts on this only at a complete batch-prefix boundary.
+  bool sealRequested{false};
   // Consuming merge reads can drop blocks after this chunk has been read. The
   // metadata stays so rowNumber/chunk indexing is not disturbed.
   bool consumed{false};
+};
+
+// Direct row-number directory for segments whose chunks have unequal row
+// counts. Each entry covers 64 row numbers. baseChunk is the chunk containing
+// offset 0 and chunkStartMask has one bit for every successor chunk beginning
+// at offsets 1..63. A lookup is one indexed load plus an inclusive popcount.
+// Regular layouts do not allocate this directory.
+struct alignas(uint64_t) ChunkRowDirectoryEntry {
+  uint64_t chunkStartMask{0};
+  ChunkId baseChunk{0};
+};
+
+static_assert(sizeof(ChunkRowDirectoryEntry) == 16);
+
+class ChunkRowDirectory {
+ public:
+  void rebuild(const std::vector<std::unique_ptr<ChunkData>>& chunks);
+  void appendChunkStart(const DataChunkMeta& chunk);
+
+  size_t chunkIndex(RowNumber rowNumber, ChunkId lastChunk) const {
+    const auto group = static_cast<size_t>(rowNumber >> 6);
+    if (group >= entries_.size()) {
+      return lastChunk;
+    }
+    const auto offset = static_cast<uint32_t>(rowNumber & 63);
+    const uint64_t inclusiveMask = offset == 63
+        ? std::numeric_limits<uint64_t>::max()
+        : (uint64_t{1} << (offset + 1)) - 1;
+    const auto& entry = entries_[group];
+    return static_cast<size_t>(entry.baseChunk) +
+        __builtin_popcountll(entry.chunkStartMask & inclusiveMask);
+  }
+
+  bool empty() const {
+    return entries_.empty();
+  }
+
+ private:
+  std::vector<ChunkRowDirectoryEntry> entries_;
 };
 
 struct SegmentWriteCursor {
@@ -95,6 +142,9 @@ struct SegmentData {
   RowNumber nextRowNumber{0};
   ChunkId currentChunk{kNoBlock};
   SegmentWriteCursor writeCursor;
+  // Empty while row numbers can be mapped by rowsPerChunk division.
+  // Populated when a short chunk has a successor.
+  ChunkRowDirectory chunkRowDirectory;
 };
 
 } // namespace bytedance::bolt::exec::bm

@@ -56,13 +56,48 @@ void checkPartition(PartitionId partition) {
 
 } // namespace
 
+void ChunkRowDirectory::rebuild(
+    const std::vector<std::unique_ptr<ChunkData>>& chunks) {
+  entries_.clear();
+  if (chunks.empty()) {
+    return;
+  }
+  BOLT_CHECK_EQ(chunks.front()->meta.firstRowNumber, 0);
+  entries_.reserve(
+      (static_cast<size_t>(chunks.back()->meta.firstRowNumber) >> 6) + 1);
+  for (const auto& chunk : chunks) {
+    appendChunkStart(chunk->meta);
+  }
+}
+
+void ChunkRowDirectory::appendChunkStart(const DataChunkMeta& chunk) {
+  // Each directory entry covers 64 row numbers: divide by 64 to find the
+  // entry, and take the remainder for the bit position within that entry.
+  // For example, row 67 belongs to entry 1 (rows 64..127), at bit 3.
+  const auto group = static_cast<size_t>(chunk.firstRowNumber >> 6);
+  const auto offset = static_cast<uint32_t>(chunk.firstRowNumber & 63);
+  BOLT_CHECK_LE(
+      chunk.id, static_cast<ChunkId>(std::numeric_limits<ChunkId>::max() - 1));
+  const auto precedingChunk = chunk.id == 0 ? 0 : chunk.id - 1;
+  while (entries_.size() <= group) {
+    entries_.push_back({.chunkStartMask = 0, .baseChunk = precedingChunk});
+  }
+  auto& entry = entries_[group];
+  if (offset == 0) {
+    entry.baseChunk = chunk.id;
+  } else {
+    entry.chunkStartMask |= uint64_t{1} << offset;
+  }
+}
+
 BmSegmentCollection::BmSegmentCollection(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     memory::bm::MemoryTag tag,
     const BmRowLayout* layout,
     uint32_t rowBlockSize,
     uint32_t heapBlockSize,
-    std::shared_ptr<memory::MemoryPool> allocationPool)
+    std::shared_ptr<memory::MemoryPool> allocationPool,
+    uint64_t chunkHeapTargetBytes)
     : bufferManager_(std::move(bufferManager)),
       allocationPool_(
           allocationPool != nullptr ? std::move(allocationPool)
@@ -71,6 +106,7 @@ BmSegmentCollection::BmSegmentCollection(
       layout_(layout),
       rowBlockSize_(rowBlockSize),
       heapBlockSize_(heapBlockSize),
+      chunkHeapTargetBytes_(chunkHeapTargetBytes),
       activeSegments_(kMaxPartitions, kNoSegment),
       partitionSegments_(kMaxPartitions) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
