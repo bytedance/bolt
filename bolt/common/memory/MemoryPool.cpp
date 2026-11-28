@@ -863,6 +863,12 @@ int64_t MemoryPoolImpl::currentBytes() const {
   return usedBytes();
 }
 
+int64_t MemoryPoolImpl::rootReservedBytes() const {
+  BOLT_CHECK(isRoot(), "rootReservedBytes() requires a root memory pool");
+  std::lock_guard<std::mutex> l(mutex_);
+  return reservationBytes_;
+}
+
 int64_t MemoryPoolImpl::releasableReservation() const {
   if (isLeaf()) {
     std::lock_guard<std::mutex> l(mutex_);
