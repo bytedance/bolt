@@ -98,10 +98,6 @@ HashBuild::HashBuild(
       keyChannelMap_(joinNode_->rightKeys().size()),
       supportRangePartitionSkewed_(
           driverCtx->queryConfig().isHashJoinSkewedPartitionEnabled()),
-      skewFileSizeRatioThreshold_(
-          driverCtx->queryConfig().skewFileSizeRatioThreshold()),
-      skewRowCountRatioThreshold_(
-          driverCtx->queryConfig().skewRowCountRatioThreshold()),
       isDREnabled_(operatorCtx_->driverCtx()
                        ->queryConfig()
                        .isDataRetentionUpdateEnabled()) {
@@ -434,8 +430,6 @@ void HashBuild::setupSpiller(
        joinBridge_->numBuilders() == 1 &&
        operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1));
   spiller_->setSpillConfig(&spillConfig);
-  spiller_->setSkewThreshold(
-      skewFileSizeRatioThreshold_, skewRowCountRatioThreshold_);
 
   // Enable hybrid mode for spiller if hybrid join is enabled.
   // Works for both initial spill and repartition spill during restoration.
@@ -740,14 +734,7 @@ bool HashBuild::ensureInputFits(RowVectorPtr& input, SpilledRows spilledRows) {
   // is already sufficient reservations.
   if (!reserveMemory(input, spilledRows)) {
     if (isFirstSpill_) {
-      isFirstSpill_ = false;
-      if (calculateJoinBits<false>()) {
-        spiller_.reset();
-        setupSpiller();
-      }
-      spiller_->setMemoryUsedTriggered(pool()->currentBytes());
-      auto* spillConf = const_cast<common::SpillConfig*>(spillConfig());
-      operatorCtx_->adjustSpillCompressionKind(spillConf);
+      prepareForFirstSpill();
     }
     if (!requestSpill(input)) {
       return false;
@@ -1178,28 +1165,6 @@ bool HashBuild::finishHashBuild() {
   }
 
   if (spiller_ != nullptr) {
-    if (spillThreshold_.has_value()) {
-      // after read from spill file, memory used for HashTable entries
-      // should be taken into consideration especially when spillThreshold_
-      // is extremely large
-      BOLT_CHECK(memoryUsedForFirstSpill_.has_value());
-      auto maxRestoreRowCount = spillThreshold_.value();
-      auto usedMemBytes = memoryUsedForFirstSpill_.value();
-      auto bytesForHashTable = bits::nextPowerOfTwo(maxRestoreRowCount) * 8;
-      if (usedMemBytes > bytesForHashTable) {
-        maxRestoreRowCount =
-            (double)(1 - bytesForHashTable * 1.0 / usedMemBytes) *
-            maxRestoreRowCount;
-        LOG(INFO) << __FUNCTION__
-                  << " recalculated : usedMemBytes = " << usedMemBytes
-                  << ", bytesForHashTable = " << bytesForHashTable
-                  << ", spillThreshold_.value() = " << spillThreshold_.value()
-                  << ", maxRestoreRowCount = " << maxRestoreRowCount;
-      }
-      maxRestoreRowCount =
-          std::min(maxRestoreRowCount, (uint64_t)maxHashTableBucketCount_);
-      spiller_->setMaxRowsInMemory(maxRestoreRowCount);
-    }
     spiller_->finishSpill(spillPartitions);
     if (spiller_->rangePartitioningApplicable()) {
       addRuntimeStat("skewedHashBuildUsingRangePartition", RuntimeCounter(1));
@@ -1709,15 +1674,7 @@ void HashBuild::reclaim(
       task->findPeerOperators(operatorCtx_->driverCtx()->pipelineId, this);
 
   if (isFirstSpill_ && operators.size() == 1) {
-    isFirstSpill_ = false;
-    LOG(INFO) << name() << " calculateJoinBits triggered by " << __FUNCTION__;
-    if (calculateJoinBits<false>()) {
-      spiller_.reset();
-      setupSpiller();
-    }
-    spiller_->setMemoryUsedTriggered(pool()->currentBytes());
-    auto* spillConf = const_cast<common::SpillConfig*>(spillConfig());
-    operatorCtx_->adjustSpillCompressionKind(spillConf);
+    prepareForFirstSpill();
   }
 
   for (auto* op : operators) {
@@ -1823,6 +1780,35 @@ void HashBuild::close() {
   }
 }
 
+void HashBuild::prepareForFirstSpill() {
+  BOLT_CHECK(isFirstSpill_);
+  isFirstSpill_ = false;
+  if (calculateJoinBits<false>()) {
+    spiller_.reset();
+    setupSpiller();
+  }
+
+  // Reserve room for hash table entries when estimating restore partition
+  // counts. Set the file row limit before writing spill files.
+  auto maxRestoreRowCount = spillThreshold_.value();
+  const auto usedMemBytes = pool()->currentBytes();
+  const auto bytesForHashTable = bits::nextPowerOfTwo(maxRestoreRowCount) * 8;
+  if (usedMemBytes > bytesForHashTable) {
+    maxRestoreRowCount =
+        (1.0 - static_cast<double>(bytesForHashTable) / usedMemBytes) *
+        maxRestoreRowCount;
+  }
+  maxRestoreRowCount = std::min(
+      maxRestoreRowCount, static_cast<uint64_t>(maxHashTableBucketCount_));
+  spiller_->setMaxRowsInMemory(maxRestoreRowCount);
+  LOG(INFO) << __FUNCTION__ << ": spillThreshold = " << spillThreshold_.value()
+            << ", usedMemBytes = " << usedMemBytes
+            << ", maxRestoreRowCount = " << maxRestoreRowCount;
+
+  auto* spillConf = const_cast<common::SpillConfig*>(spillConfig());
+  operatorCtx_->adjustSpillCompressionKind(spillConf);
+}
+
 template <bool isRepartition>
 bool HashBuild::calculateJoinBits(
     uint8_t maxjoinBits,
@@ -1834,7 +1820,6 @@ bool HashBuild::calculateJoinBits(
   if constexpr (!isRepartition) {
     operatorCtx_->traverseOpToGetRowCount(totalRowCnt, processedRowCnt);
     spillThreshold_ = rowsInMem;
-    memoryUsedForFirstSpill_ = pool()->currentBytes();
 
     if (totalRowCnt <= 0 || processedRowCnt <= 0) {
       LOG(INFO) << name() << " DO NOTHING!!!  totalRowCnt=" << totalRowCnt
