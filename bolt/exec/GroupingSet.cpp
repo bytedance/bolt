@@ -817,6 +817,11 @@ bool GroupingSet::getOutput(
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+  uint64_t releasedBytes = 0;
+  if (noMoreInput_ && !outputTableReleased_) {
+    releasedBytes = table_ ? table_->releaseTable() : 0;
+    outputTableReleased_ = true;
+  }
   const int32_t numGroups = table_
       ? table_->rows()->listRows(
             &iterator, maxOutputRows, maxOutputBytes, groups)
@@ -825,14 +830,24 @@ bool GroupingSet::getOutput(
     if (table_ != nullptr) {
       table_->clear();
     }
-    return false;
-  }
-  if (supportRowBasedOutput_) {
-    extractGroupsInRowFormat(folly::Range<char**>(groups, numGroups), result);
   } else {
-    extractGroups(folly::Range<char**>(groups, numGroups), result);
+    if (supportRowBasedOutput_) {
+      extractGroupsInRowFormat(folly::Range<char**>(groups, numGroups), result);
+    } else {
+      extractGroups(folly::Range<char**>(groups, numGroups), result);
+    }
+    // Both output forms own their copied keys and aggregate values.
+    if (noMoreInput_ && sortedAggregations_ == nullptr) {
+      releasedBytes += table_->rows()->releaseOutputRangesBefore(iterator);
+    }
   }
-  return true;
+  if (releasedBytes > 0) {
+    stats_.aggOutputReleasedBytes += releasedBytes;
+    // Keep the freed lookup reservation available while extracting this batch,
+    // then return unused reservation once after all output has been copied.
+    pool_.release();
+  }
+  return numGroups > 0;
 }
 
 void GroupingSet::extractGroupsInRowFormat(

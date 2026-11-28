@@ -49,6 +49,55 @@ class RowContainerTest : public exec::test::RowContainerTestBase,
     BOLT_TEST_VALUE_ENABLE();
   }
 
+  void testOutputRangeRelease(
+      RowContainer& data,
+      int32_t numRows,
+      int32_t normalizedRows,
+      int32_t batchRows,
+      uint64_t maxBytes = RowContainer::kUnlimited) {
+    ASSERT_TRUE(data.supportsOutputRangeRelease());
+    const auto column = data.keyTypes().size();
+    for (auto i = 0; i < numRows; ++i) {
+      if (i == normalizedRows) {
+        data.disableNormalizedKeys();
+      }
+      auto* row = data.newRow();
+      RowContainer::valueAt<int64_t>(row, data.columnAt(column).offset()) = i;
+    }
+    const auto bytesBefore = data.allocatedBytes();
+    uint64_t releasedBytes = 0;
+    int32_t outputRows = 0;
+    RowContainerIterator iter;
+    std::vector<char*> rows(batchRows);
+    auto result = BaseVector::create(BIGINT(), batchRows, pool_.get());
+    while (const auto count =
+               data.listRows(&iter, batchRows, maxBytes, rows.data())) {
+      data.extractColumn(rows.data(), count, column, result);
+      releasedBytes += data.releaseOutputRangesBefore(iter);
+      EXPECT_EQ(0, data.releaseOutputRangesBefore(iter));
+      for (auto i = 0; i < count; ++i) {
+        ASSERT_EQ(outputRows + i, result->asFlatVector<int64_t>()->valueAt(i));
+      }
+      outputRows += count;
+      EXPECT_GE(data.numRows(), numRows - outputRows);
+      if (iter.rowOffset == 0) {
+        EXPECT_EQ(numRows - outputRows, data.numRows());
+      }
+    }
+    EXPECT_EQ(numRows, outputRows);
+    EXPECT_EQ(bytesBefore, releasedBytes);
+    EXPECT_EQ(0, data.numRows());
+    EXPECT_EQ(0, data.allocatedBytes());
+    data.clear();
+    EXPECT_NE(nullptr, data.newRow());
+    EXPECT_EQ(1, data.numRows());
+    RowContainerIterator reusedIter;
+    ASSERT_EQ(1, data.listRows(&reusedIter, 1, rows.data()));
+    EXPECT_GT(data.releaseOutputRangesBefore(reusedIter), 0);
+    EXPECT_EQ(0, data.numRows());
+    EXPECT_EQ(0, data.allocatedBytes());
+  }
+
   void testExtractColumn(
       RowContainer& container,
       const std::vector<char*>& rows,
@@ -1093,6 +1142,650 @@ TEST_F(RowContainerTest, erase) {
   EXPECT_EQ(0, free.first);
   EXPECT_EQ(0, free.second);
   data->checkConsistency();
+}
+
+TEST_F(RowContainerTest, listRowsThenAppendAtBatchBoundary) {
+  const auto rangeBytes =
+      memory::AllocationTraits::pageBytes(memory::AllocationPool::kMinPages);
+  for (const int32_t numKeys : {1, 3}) {
+    const std::vector<TypePtr> keys(numKeys, BIGINT());
+    for (const bool normalized : {false, true}) {
+      auto layout = makeRowContainer(keys, {});
+      const auto stride =
+          layout->fixedRowSize() + (normalized ? sizeof(normalized_key_t) : 0);
+      const int32_t boundary = rangeBytes / stride;
+      for (const int32_t initialRows :
+           {1, boundary - 1, boundary, boundary + 1}) {
+        for (const bool disableBeforeAppend : {false, true}) {
+          for (const int32_t extraBatchRows : {0, 1}) {
+            SCOPED_TRACE(fmt::format(
+                "keys {}, normalized {}, rows {}, disable {}, extra {}",
+                numKeys,
+                normalized,
+                initialRows,
+                disableBeforeAppend,
+                extraBatchRows));
+            auto data = makeRowContainer(keys, {});
+            if (!normalized) {
+              data->disableNormalizedKeys();
+            }
+            std::vector<char*> expected(initialRows);
+            for (auto& row : expected) {
+              row = data->newRow();
+            }
+            RowContainerIterator iter;
+            const auto batchSize = initialRows + extraBatchRows;
+            std::vector<char*> rows(batchSize);
+            ASSERT_EQ(
+                initialRows, data->listRows(&iter, batchSize, rows.data()));
+            EXPECT_TRUE(
+                std::equal(expected.begin(), expected.end(), rows.begin()));
+            if (disableBeforeAppend) {
+              data->disableNormalizedKeys();
+            }
+            auto* appended = data->newRow();
+            ASSERT_EQ(1, data->listRows(&iter, batchSize, rows.data()));
+            EXPECT_EQ(appended, rows[0]);
+            const auto bytes = data->allocatedBytes();
+            EXPECT_EQ(bytes, data->releaseOutputRangesBefore(iter));
+            EXPECT_EQ(0, data->numRows());
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(RowContainerTest, shareAllocatorAfterOutputRangeRelease) {
+  constexpr int32_t kRows = 4096;
+  for (const bool useMono : {false, true}) {
+    auto input = makeRowVector({
+        makeFlatVector<std::string>(
+            kRows,
+            [](auto row) {
+              return fmt::format("{:08d}{}", row, std::string(128, 'x'));
+            },
+            nullEvery(11)),
+        makeArrayVector<int64_t>(
+            kRows,
+            [](auto row) { return row % 4; },
+            [](auto element) { return element; },
+            nullEvery(7)),
+    });
+    auto data = std::make_unique<RowContainer>(
+        input->type()->asRow().children(),
+        true,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        true,
+        false,
+        pool_.get(),
+        RowContainer::RowContainerParam{
+            .useMonotonicStringAllocation = useMono});
+    // The released ranges include both normalized and ordinary row layouts.
+    constexpr int32_t kNormalizedRows = kRows / 3;
+    data->store(
+        std::static_pointer_cast<RowVector>(input->slice(0, kNormalizedRows)));
+    data->disableNormalizedKeys();
+    data->store(std::static_pointer_cast<RowVector>(
+        input->slice(kNormalizedRows, kRows - kNormalizedRows)));
+    const auto payloadSize = data->stringAllocator().cumulativeBytes();
+    RowContainerIterator iter;
+    std::vector<char*> rows(kRows * 3 / 4);
+    ASSERT_EQ(rows.size(), data->listRows(&iter, rows.size(), rows.data()));
+    ASSERT_GT(data->releaseOutputRangesBefore(iter), 0);
+    ASSERT_GT(data->numRows(), 0);
+    EXPECT_EQ(payloadSize, data->stringAllocator().cumulativeBytes());
+    auto shared = data->stringAllocatorShared();
+    auto* foreign = shared->allocate(1024);
+    foreign->begin()[0] = 'x';
+    data->clear();
+    EXPECT_EQ('x', foreign->begin()[0]);
+    shared->free(foreign);
+    // Payloads from released rows stay in the shared arena until its owner
+    // clears it. RowContainer::clear() must preserve foreign allocations.
+    EXPECT_GT(shared->cumulativeBytes(), 0);
+    data.reset();
+    shared->clear();
+    EXPECT_NO_THROW(shared->checkEmpty());
+  }
+}
+
+TEST_F(RowContainerTest, remainingOutputRowSizeEstimate) {
+  constexpr int32_t kRows = 4096;
+  for (const bool useMono : {false, true}) {
+    auto input =
+        makeRowVector({makeFlatVector<std::string>(kRows, [](auto row) {
+          return std::string(row < 3000 ? 4096 : 32, 'x');
+        })});
+    auto data = std::make_unique<RowContainer>(
+        input->type()->asRow().children(),
+        true,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        true,
+        false,
+        pool_.get(),
+        RowContainer::RowContainerParam{
+            .useMonotonicStringAllocation = useMono});
+    data->store(input);
+    const auto initialEstimate = data->estimateRowSize().value();
+    RowContainerIterator iter;
+    std::vector<char*> rows(3000);
+    ASSERT_EQ(rows.size(), data->listRows(&iter, rows.size(), rows.data()));
+    ASSERT_GT(data->releaseOutputRangesBefore(iter), 0);
+    ASSERT_GT(data->numRows(), 0);
+    EXPECT_EQ(data->estimateRowSize().value(), initialEstimate);
+    data->clear();
+    EXPECT_EQ(0, data->allocatedBytes());
+    EXPECT_FALSE(data->estimateRowSize().has_value());
+    data->store(std::static_pointer_cast<RowVector>(input->slice(3000, 1)));
+    EXPECT_LT(data->estimateRowSize().value(), initialEstimate);
+  }
+}
+
+TEST_F(RowContainerTest, releaseOutputRangesBefore) {
+  auto data = makeRowContainer({BIGINT()}, {BIGINT()});
+  ASSERT_TRUE(data->supportsOutputRangeRelease());
+
+  constexpr int32_t kNumRows = 4096;
+  std::vector<char*> rows;
+  rows.reserve(kNumRows);
+  for (auto i = 0; i < kNumRows; ++i) {
+    auto* row = data->newRow();
+    RowContainer::valueAt<int64_t>(row, data->columnAt(0).offset()) = i;
+    RowContainer::valueAt<int64_t>(row, data->columnAt(1).offset()) = i * 10;
+    rows.push_back(row);
+  }
+  ASSERT_GT(data->numRows(), 0);
+
+  RowContainerIterator iter;
+  std::vector<char*> output(kNumRows);
+  ASSERT_GT(data->listRows(&iter, kNumRows / 2, output.data()), 0);
+  auto releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_GT(releasedBytes, 0);
+  EXPECT_LT(data->numRows(), kNumRows);
+
+  auto remainingRows = data->numRows();
+  iter.reset();
+  ASSERT_EQ(remainingRows, data->listRows(&iter, remainingRows, output.data()));
+  for (auto i = 0; i < remainingRows; ++i) {
+    EXPECT_EQ(
+        RowContainer::valueAt<int64_t>(output[i], data->columnAt(1).offset()),
+        RowContainer::valueAt<int64_t>(output[i], data->columnAt(0).offset()) *
+            10);
+  }
+
+  releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_GT(releasedBytes, 0);
+  ASSERT_EQ(0, data->listRows(&iter, 1, output.data()));
+  releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_EQ(releasedBytes, 0);
+  EXPECT_EQ(0, data->numRows());
+  data->clear();
+  EXPECT_EQ(0, data->numRows());
+}
+
+TEST_F(RowContainerTest, releaseOutputRangesAtExactBatchEnd) {
+  auto layout = makeRowContainer({BIGINT()}, {BIGINT()});
+  const auto rangeBytes =
+      memory::AllocationTraits::pageBytes(memory::AllocationPool::kMinPages);
+  const int32_t boundary =
+      rangeBytes / (layout->fixedRowSize() + sizeof(normalized_key_t));
+  for (const int32_t numRows : {1024, boundary, boundary + 1}) {
+    SCOPED_TRACE(numRows);
+    auto data = makeRowContainer({BIGINT()}, {BIGINT()});
+    for (auto i = 0; i < numRows; ++i) {
+      data->newRow();
+    }
+    const auto bytesBefore = data->allocatedBytes();
+    RowContainerIterator iter;
+    std::vector<char*> output(boundary);
+    const auto firstBatchRows = std::min(numRows, boundary);
+    ASSERT_EQ(firstBatchRows, data->listRows(&iter, boundary, output.data()));
+    auto releasedBytes = data->releaseOutputRangesBefore(iter);
+    EXPECT_GT(releasedBytes, 0);
+    EXPECT_EQ(numRows - firstBatchRows, data->numRows());
+    EXPECT_EQ(0, data->releaseOutputRangesBefore(iter));
+    if (numRows > boundary) {
+      EXPECT_EQ(0, iter.allocationIndex);
+      EXPECT_EQ(1, data->listRows(&iter, boundary, output.data()));
+      releasedBytes += data->releaseOutputRangesBefore(iter);
+    }
+    EXPECT_EQ(bytesBefore, releasedBytes);
+    EXPECT_EQ(0, data->numRows());
+    EXPECT_EQ(0, data->allocatedBytes());
+    EXPECT_EQ(0, data->listRows(&iter, boundary, output.data()));
+  }
+}
+
+TEST_F(RowContainerTest, releaseOutputRangesWithAllocatorAndNormalizedKeys) {
+  constexpr int32_t kNumRows = 150000;
+  for (const int32_t numKeys : {3, 32}) {
+    for (const int32_t normalizedRows : {0, 1007, kNumRows}) {
+      SCOPED_TRACE(
+          fmt::format("keys {}, normalized {}", numKeys, normalizedRows));
+      RowContainer data(
+          std::vector<TypePtr>(numKeys, BIGINT()),
+          true,
+          std::vector<Accumulator>{},
+          std::vector<TypePtr>{BIGINT()},
+          false,
+          false,
+          false,
+          true,
+          false,
+          pool_.get());
+      testOutputRangeRelease(data, kNumRows, normalizedRows, 1024);
+    }
+  }
+}
+
+TEST_F(RowContainerTest, releaseOutputRangeBoundaryMatrix) {
+  for (const auto& keys : std::vector<std::vector<TypePtr>>{
+           std::vector<TypePtr>(2, BIGINT()),
+           {BIGINT()},
+           std::vector<TypePtr>(3, BIGINT()),
+           std::vector<TypePtr>(32, BIGINT())}) {
+    auto make = [&]() {
+      return std::make_unique<RowContainer>(
+          keys,
+          true,
+          std::vector<Accumulator>{},
+          std::vector<TypePtr>{BIGINT()},
+          false,
+          false,
+          false,
+          true,
+          false,
+          pool_.get());
+    };
+    auto layout = make();
+    const auto stride = layout->fixedRowSize() + sizeof(normalized_key_t);
+    const int32_t boundary =
+        memory::AllocationTraits::pageBytes(memory::AllocationPool::kMinPages) /
+        stride;
+    const int32_t numRows = std::max<int32_t>(boundary + 3, 1024);
+    for (const int32_t normalizedRows :
+         {0, boundary - 1, boundary, boundary + 1, numRows}) {
+      for (const int32_t batchRows :
+           {1, boundary - 1, boundary, boundary + 1}) {
+        for (const uint64_t maxBytes :
+             {RowContainer::kUnlimited,
+              uint64_t(boundary * stride - 1),
+              uint64_t(boundary * stride)}) {
+          SCOPED_TRACE(fmt::format(
+              "keys {}, normalized {}, batch rows {}, max bytes {}",
+              keys.size(),
+              normalizedRows,
+              batchRows,
+              maxBytes));
+          auto data = make();
+          testOutputRangeRelease(
+              *data, numRows, normalizedRows, batchRows, maxBytes);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(RowContainerTest, outputRangeReleaseRejectsUnsafeRows) {
+  RowContainerIterator atEnd;
+  atEnd.allocationIndex = std::numeric_limits<int32_t>::max();
+  std::vector<std::unique_ptr<RowContainer>> unsafeRows;
+  unsafeRows.push_back(makeRowContainer({BIGINT()}, {}, false, true));
+  auto sharedAllocator = std::make_shared<HashStringAllocator>(pool_.get());
+  unsafeRows.push_back(std::make_unique<RowContainer>(
+      std::vector<TypePtr>{VARCHAR()},
+      true,
+      std::vector<Accumulator>{},
+      std::vector<TypePtr>{},
+      false,
+      false,
+      false,
+      false,
+      false,
+      pool_.get(),
+      RowContainer::RowContainerParam{.hsaAllocator = sharedAllocator}));
+  for (const auto& data : unsafeRows) {
+    data->newRow();
+    ASSERT_FALSE(data->supportsOutputRangeRelease());
+    const auto bytes = data->allocatedBytes();
+    EXPECT_EQ(0, data->releaseOutputRangesBefore(atEnd));
+    EXPECT_EQ(bytes, data->allocatedBytes());
+    EXPECT_EQ(1, data->numRows());
+  }
+  auto data = makeRowContainer({BIGINT()}, {});
+  auto* row = data->newRow();
+  data->newRow();
+  data->eraseRows(folly::Range<char**>(&row, 1));
+  EXPECT_FALSE(data->supportsOutputRangeRelease());
+  EXPECT_EQ(0, data->releaseOutputRangesBefore(atEnd));
+  EXPECT_EQ(1, data->numRows());
+}
+
+TEST_F(RowContainerTest, releaseExternalOutputRangesAndCleanupOnce) {
+  constexpr int32_t kRows = 4096;
+  constexpr int32_t kNativeBytes = 256;
+  struct State {
+    int32_t index;
+    void* native;
+    HashStringAllocator::Header* extra;
+  };
+  for (const bool variableKeys : {false, true}) {
+    auto input = variableKeys
+        ? makeRowVector({
+              makeFlatVector<std::string>(
+                  kRows,
+                  [](auto row) {
+                    return fmt::format("{:08d}{}", row, std::string(128, 'x'));
+                  }),
+              makeArrayVector<int64_t>(
+                  kRows,
+                  [](auto row) { return row % 4; },
+                  [](auto element) { return element; },
+                  nullEvery(7)),
+          })
+        : makeRowVector(
+              {makeFlatVector<int64_t>(kRows, [](auto row) { return row; })});
+    for (const bool sharedArena : {false, true}) {
+      if (variableKeys && sharedArena) {
+        continue;
+      }
+      for (const bool useMono : {false, true}) {
+        for (const bool stopEarly : {false, true}) {
+          SCOPED_TRACE(fmt::format(
+              "variable {}, shared {}, mono {}, stop {}",
+              variableKeys,
+              sharedArena,
+              useMono,
+              stopEarly));
+          std::vector<int32_t> destroyCounts(kRows, 0);
+          int32_t destroyed = 0;
+          int32_t stateOffset = 0;
+          HashStringAllocator* allocator = nullptr;
+          std::vector<Accumulator> accumulators;
+          accumulators.emplace_back(
+              true,
+              sizeof(State),
+              true,
+              alignof(State),
+              BIGINT(),
+              BIGINT(),
+              nullptr,
+              nullptr,
+              [&](folly::Range<char**> rows) {
+                for (auto* row : rows) {
+                  auto& state = RowContainer::valueAt<State>(row, stateOffset);
+                  EXPECT_EQ(1, ++destroyCounts.at(state.index));
+                  ++destroyed;
+                  pool_->free(state.native, kNativeBytes);
+                  if (state.extra) {
+                    allocator->free(state.extra);
+                  }
+                }
+              });
+          auto shared = sharedArena
+              ? std::make_shared<HashStringAllocator>(pool_.get())
+              : nullptr;
+          auto* foreign = shared ? shared->allocate(1024) : nullptr;
+          if (foreign) {
+            foreign->begin()[0] = 'z';
+          }
+          auto data = std::make_unique<RowContainer>(
+              input->type()->asRow().children(),
+              true,
+              accumulators,
+              std::vector<TypePtr>{},
+              false,
+              false,
+              false,
+              true,
+              false,
+              pool_.get(),
+              RowContainer::RowContainerParam{
+                  .hsaAllocator = shared,
+                  .useMonotonicStringAllocation = useMono});
+          allocator = &data->stringAllocator();
+          stateOffset = data->columnAt(input->childrenSize()).offset();
+          ASSERT_TRUE(data->supportsOutputRangeRelease());
+          std::vector<DecodedVector> decoded(input->childrenSize());
+          for (auto i = 0; i < decoded.size(); ++i) {
+            decoded[i].decode(*input->childAt(i));
+          }
+          for (int32_t i = 0; i < kRows; ++i) {
+            if (i == kRows / 3) {
+              data->disableNormalizedKeys();
+            }
+            auto* row = data->newRow();
+            new (row + stateOffset) State{
+                i,
+                pool_->allocate(kNativeBytes),
+                i % 512 == 0
+                    ? allocator->allocate(HashStringAllocator::kMaxAlloc + 64)
+                    : nullptr};
+            for (auto column = 0; column < decoded.size(); ++column) {
+              data->store(decoded[column], i, row, column);
+            }
+          }
+          RowContainerIterator iter;
+          std::vector<char*> rows(257);
+          std::vector<RowVectorPtr> output;
+          bool cleanedBeforeEnd = false;
+          while (const auto count =
+                     data->listRows(&iter, rows.size(), rows.data())) {
+            auto batch = BaseVector::create<RowVector>(
+                input->type(), count, pool_.get());
+            for (auto column = 0; column < input->childrenSize(); ++column) {
+              data->extractColumn(
+                  rows.data(), count, column, batch->childAt(column));
+            }
+            const auto bytesBefore = data->allocatedBytes();
+            const auto poolBytesBefore = pool_->currentBytes();
+            const auto destroyedBefore = destroyed;
+            const auto released = data->releaseOutputRangesBefore(iter);
+            EXPECT_EQ(bytesBefore - data->allocatedBytes(), released);
+            EXPECT_GE(
+                poolBytesBefore - pool_->currentBytes(),
+                released +
+                    uint64_t(destroyed - destroyedBefore) * kNativeBytes);
+            EXPECT_EQ(kRows - data->numRows(), destroyed);
+            EXPECT_EQ(0, data->releaseOutputRangesBefore(iter));
+            output.push_back(std::move(batch));
+            cleanedBeforeEnd |= destroyed > 0 && destroyed < kRows;
+            if (stopEarly && cleanedBeforeEnd) {
+              break;
+            }
+          }
+          EXPECT_TRUE(cleanedBeforeEnd);
+          data->clear();
+          data.reset();
+          EXPECT_EQ(kRows, destroyed);
+          for (const auto count : destroyCounts) {
+            EXPECT_EQ(1, count);
+          }
+          int32_t offset = 0;
+          for (const auto& batch : output) {
+            assertEqualVectors(input->slice(offset, batch->size()), batch);
+            offset += batch->size();
+          }
+          EXPECT_EQ(!stopEarly, offset == kRows);
+          if (foreign) {
+            EXPECT_EQ('z', foreign->begin()[0]);
+            shared->free(foreign);
+            EXPECT_NO_THROW(shared->checkEmpty());
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(RowContainerTest, releaseVariableOutputRangesAndPrivatePayloads) {
+  constexpr int32_t kNumRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(
+          kNumRows,
+          [](auto row) {
+            if (row % 3 == 0) {
+              return std::string{};
+            }
+            if (row % 3 == 1) {
+              return std::string("inline");
+            }
+            return fmt::format("{:08d}{}", row, std::string(120, 'x'));
+          },
+          nullEvery(11)),
+      makeArrayVector<std::string>(
+          kNumRows,
+          [](auto row) { return row % 5; },
+          [](auto element) {
+            return fmt::format("{:08d}{}", element, std::string(120, 'y'));
+          },
+          nullEvery(13)),
+  });
+  for (const bool useMono : {false, true}) {
+    for (const auto& [numRows, stopEarly] :
+         {std::pair<int32_t, bool>{0, false},
+          {1, false},
+          {kNumRows, false},
+          {kNumRows, true}}) {
+      SCOPED_TRACE(fmt::format(
+          "mono {}, rows {}, stop early {}", useMono, numRows, stopEarly));
+      auto data = std::make_unique<RowContainer>(
+          std::vector<TypePtr>{BIGINT()},
+          true,
+          std::vector<Accumulator>{},
+          std::vector<TypePtr>{
+              input->childAt(1)->type(), input->childAt(2)->type()},
+          false,
+          false,
+          false,
+          true,
+          false,
+          pool_.get(),
+          RowContainer::RowContainerParam{
+              .useMonotonicStringAllocation = useMono});
+      data->store(
+          std::static_pointer_cast<RowVector>(input->slice(0, numRows)));
+      const auto bytesBefore = data->allocatedBytes();
+      const auto payloadSizeBefore = data->stringAllocator().cumulativeBytes();
+      const auto payloadRetainedBytesBefore =
+          data->stringAllocator().retainedSize();
+      uint64_t releasedBytes = 0;
+      bool releasedBeforeLastBatch = false;
+      RowContainerIterator iter;
+      std::vector<char*> rows(257);
+      std::vector<RowVectorPtr> output;
+      while (const auto count =
+                 data->listRows(&iter, rows.size(), 8192, rows.data())) {
+        auto batch =
+            BaseVector::create<RowVector>(input->type(), count, pool_.get());
+        for (auto column = 0; column < input->childrenSize(); ++column) {
+          data->extractColumn(
+              rows.data(), count, column, batch->childAt(column));
+        }
+        const auto released = data->releaseOutputRangesBefore(iter);
+        releasedBytes += released;
+        releasedBeforeLastBatch |= released > 0 && data->numRows() > 0;
+        EXPECT_EQ(0, data->releaseOutputRangesBefore(iter));
+        if (data->numRows() > 0) {
+          EXPECT_EQ(
+              payloadSizeBefore, data->stringAllocator().cumulativeBytes());
+          EXPECT_EQ(
+              payloadRetainedBytesBefore,
+              data->stringAllocator().retainedSize());
+        }
+        output.push_back(std::move(batch));
+        if (stopEarly && releasedBeforeLastBatch) {
+          break;
+        }
+      }
+      EXPECT_EQ(bytesBefore, releasedBytes + data->allocatedBytes());
+      if (numRows == kNumRows) {
+        EXPECT_TRUE(releasedBeforeLastBatch);
+      }
+      if (stopEarly) {
+        EXPECT_GT(data->numRows(), 0);
+      } else {
+        EXPECT_EQ(0, data->numRows());
+        EXPECT_EQ(0, data->allocatedBytes());
+      }
+      data.reset();
+      int32_t offset = 0;
+      // Output must survive both arena cleanup and destruction during output.
+      for (const auto& batch : output) {
+        assertEqualVectors(input->slice(offset, batch->size()), batch);
+        offset += batch->size();
+      }
+      if (stopEarly) {
+        EXPECT_LT(offset, numRows);
+      } else {
+        EXPECT_EQ(numRows, offset);
+      }
+    }
+  }
+}
+
+TEST_F(RowContainerTest, releaseFixedOutputRangesWithSharedPayloadAllocator) {
+  auto sharedAllocator = std::make_shared<HashStringAllocator>(pool_.get());
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1}),
+      makeFlatVector<std::string>({std::string(512, 'x')}),
+  });
+  auto owner = std::make_unique<RowContainer>(
+      std::vector<TypePtr>{BIGINT()},
+      true,
+      std::vector<Accumulator>{},
+      std::vector<TypePtr>{input->childAt(1)->type()},
+      false,
+      false,
+      false,
+      false,
+      false,
+      pool_.get(),
+      RowContainer::RowContainerParam{.hsaAllocator = sharedAllocator});
+  owner->store(input);
+  const auto payloadBytes = sharedAllocator->retainedSize();
+  auto data = std::make_unique<RowContainer>(
+      std::vector<TypePtr>{BIGINT()},
+      true,
+      std::vector<Accumulator>{},
+      std::vector<TypePtr>{},
+      false,
+      false,
+      false,
+      true,
+      false,
+      pool_.get(),
+      RowContainer::RowContainerParam{.hsaAllocator = sharedAllocator});
+  ASSERT_TRUE(data->supportsOutputRangeRelease());
+  for (auto i = 0; i < 4096; ++i) {
+    data->newRow();
+  }
+  const auto fixedBytes = data->allocatedBytes() - payloadBytes;
+  uint64_t releasedBytes = 0;
+  RowContainerIterator iter;
+  std::vector<char*> rows(1024);
+  while (data->listRows(&iter, rows.size(), rows.data())) {
+    releasedBytes += data->releaseOutputRangesBefore(iter);
+  }
+  EXPECT_EQ(fixedBytes, releasedBytes);
+  EXPECT_EQ(0, data->numRows());
+  data.reset();
+  EXPECT_EQ(payloadBytes, sharedAllocator->retainedSize());
+  RowContainerIterator ownerIter;
+  ASSERT_EQ(1, owner->listRows(&ownerIter, 1, rows.data()));
+  auto output = BaseVector::create(input->childAt(1)->type(), 1, pool_.get());
+  owner->extractColumn(rows.data(), 1, 1, output);
+  assertEqualVectors(input->childAt(1), output);
 }
 
 TEST_P(RowContainerTest, initialNulls) {

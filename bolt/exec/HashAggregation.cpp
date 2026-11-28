@@ -145,10 +145,12 @@ void HashAggregation::initialize() {
         aggResultType->toString(),
         expectedType->toString(),
         core::AggregationNode::stepName(aggregationNode_->step()));
-    // only can used row based spill for fix accumulate and no sorting keys
+    // External state may contain owning pointers even in a fixed-size slot.
+    // Fixed-size external accumulators are not serialized by RowFormatInfo.
     canUseRowBasedSpill &=
-        (aggregateInfos[i].function->isFixedSize() ||
-         aggregateInfos[i].function->supportAccumulatorSerde()) &&
+        (aggregateInfos[i].function->isFixedSize()
+             ? !aggregateInfos[i].function->accumulatorUsesExternalMemory()
+             : aggregateInfos[i].function->supportAccumulatorSerde()) &&
         aggregateInfos[i].sortingKeys.empty();
     alignment = RowContainer::combineAlignments(
         aggregateInfos[i].function->accumulatorAlignmentSize(), alignment);
