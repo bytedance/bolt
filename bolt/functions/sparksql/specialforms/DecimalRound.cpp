@@ -118,6 +118,9 @@ class DecimalRoundFunction : public exec::VectorFunction {
       BOLT_DCHECK(status.ok());
       return rescaledValue;
     } else {
+      if (input == 0) {
+        return 0;
+      }
       TResult rescaledValue;
       DecimalUtil::divideWithRoundUp<TResult, TInput, int128_t>(
           rescaledValue, input, divideFactor_.value(), false, 0, 0);
