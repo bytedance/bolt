@@ -68,6 +68,14 @@ class HashAggregation : public Operator {
 
   void close() override;
 
+  void setProjectNode(std::shared_ptr<const core::ProjectNode> projectNode) {
+    projectNode_ = projectNode;
+  }
+
+  void setExpandNode(std::shared_ptr<const core::ExpandNode> expandNode) {
+    expandNode_ = expandNode;
+  }
+
  private:
   void updateRuntimeStats();
 
@@ -105,6 +113,23 @@ class HashAggregation : public Operator {
   // Invoked to record runtime metrics every output
   void recordRuntimeMetrics();
 
+  void initProjection();
+
+  RowVectorPtr rollupProjection(RowVectorPtr input, int32_t rowIndex);
+
+  void initRollupAgg();
+
+  RowVectorPtr getRollupOutput(
+      uint32_t maxOutputRows,
+      const core::QueryConfig& queryConfig,
+      int64_t beforeMemorySize,
+      uint64_t accumulatorRowSize);
+
+  std::shared_ptr<const core::AggregationNode>
+  createIntermediateOrFinalAggregation(
+      core::AggregationNode::Step step,
+      std::shared_ptr<const core::AggregationNode> partialAggNode);
+
   const bool isPartialOutput_;
   const bool isPartialStep_;
   const bool isGlobal_;
@@ -128,7 +153,7 @@ class HashAggregation : public Operator {
   const volatile int32_t partialAggregationSpillMaxPct_;
 
   int64_t maxPartialAggregationMemoryUsage_;
-  std::unique_ptr<GroupingSet> groupingSet_;
+  std::shared_ptr<GroupingSet> groupingSet_;
 
   // Size of a single output row estimated using
   // 'groupingSet_->estimateRowSize()'. If spilling, this value is set to max
@@ -175,6 +200,17 @@ class HashAggregation : public Operator {
   bool supportRowBasedOutput_{false};
   std::vector<AggregateInfo> aggregatesForExtractColumns_;
   RowVectorPtr convertedInput_{nullptr};
+
+  std::shared_ptr<const core::ExpandNode> expandNode_;
+  std::shared_ptr<const core::ProjectNode> projectNode_;
+
+  std::vector<std::vector<column_index_t>> fieldProjections_;
+  std::vector<std::vector<std::shared_ptr<const core::ConstantTypedExpr>>>
+      constantProjections_;
+
+  std::vector<std::shared_ptr<GroupingSet>> groupingSetsRollUp_;
+  int32_t groupingSetIndex{0};
+  int64_t rollUpNumInputRows_{0};
 };
 
 } // namespace bytedance::bolt::exec
