@@ -39,6 +39,7 @@
 #include "bolt/dwio/dwrf/test/OrcTest.h"
 #include "bolt/dwio/dwrf/test/utils/E2EWriterTestUtil.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
+#include "bolt/type/filter/FilterUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -60,6 +61,31 @@ using namespace bytedance::bolt::dwrf;
 using namespace bytedance::bolt::test;
 
 namespace {
+class CollectStringHook : public ValueHook {
+ public:
+  explicit CollectStringHook(vector_size_t size) : values_(size) {}
+
+  bool acceptsNulls() const override {
+    return true;
+  }
+
+  void addNull(vector_size_t row) override {
+    values_[row] = std::nullopt;
+  }
+
+  void addValue(vector_size_t row, const void* value) override {
+    values_[row] =
+        std::string(*reinterpret_cast<const folly::StringPiece*>(value));
+  }
+
+  const std::vector<std::optional<std::string>>& values() const {
+    return values_;
+  }
+
+ private:
+  std::vector<std::optional<std::string>> values_;
+};
+
 const std::string& getStructFile() {
   static const std::string structFile_ = getExampleFilePath("struct.orc");
   return structFile_;
@@ -2865,6 +2891,113 @@ TEST_F(TestReader, missingSubfieldsNoResultReusing) {
       }),
   });
   assertEqualVectors(expected, actual);
+}
+
+TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
+  auto fileSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {BIGINT(), BOOLEAN()})});
+  auto data = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<int64_t>({11, std::nullopt, 33}),
+            makeFlatVector<bool>({true, false, true})})});
+  ASSERT_EQ(data->type()->toString(), fileSchema->toString());
+
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {VARCHAR(), BOOLEAN()})});
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+  auto expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<StringView>({"11", std::nullopt, "33"}),
+            makeFlatVector<bool>({true, false, true})})});
+  assertEqualVectors(expected, actual);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("meta_details")
+      ->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+
+  rowReaderOpts = RowReaderOptions();
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOpts);
+  actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+
+  expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeFlatVector<StringView>({"11", "33"}),
+            makeFlatVector<bool>({true, true})})});
+  assertEqualVectors(expected, actual);
+
+  auto assertValueFilterRejected = [&](bool extractValues) {
+    auto valueFilterSpec = std::make_shared<common::ScanSpec>("<root>");
+    valueFilterSpec->addAllChildFields(*requestedSchema);
+    auto* chatterIdSpec =
+        valueFilterSpec->childByName("meta_details")->childByName("chatter_id");
+    chatterIdSpec->setProjectOut(!extractValues);
+    chatterIdSpec->setExtractValues(extractValues);
+    chatterIdSpec->setFilter(
+        common::createBytesRange("11", true, "11", true, false));
+
+    RowReaderOptions valueFilterOptions;
+    valueFilterOptions.select(
+        std::make_shared<ColumnSelector>(requestedSchema));
+    valueFilterOptions.setScanSpec(valueFilterSpec);
+    BOLT_ASSERT_THROW(
+        reader->createRowReader(valueFilterOptions),
+        "Cannot apply VARCHAR filter to physical BIGINT column chatter_id");
+  };
+  assertValueFilterRejected(false);
+  assertValueFilterRejected(true);
+}
+
+TEST_F(TestReader, readBigintAsVarcharWithValueHook) {
+  auto data = makeRowVector({makeNullableFlatVector<int64_t>(
+      {-42, std::nullopt, 1234567890123456789})});
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW({VARCHAR()});
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("c0")->setProjectOut(true);
+
+  RowReaderOptions options;
+  options.select(std::make_shared<ColumnSelector>(requestedSchema));
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(options);
+  VectorPtr result = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, result), 3);
+
+  auto lazy = result->as<RowVector>()->childAt(0);
+  ASSERT_EQ(lazy->encoding(), VectorEncoding::Simple::LAZY);
+  CollectStringHook hook(3);
+  const std::array<vector_size_t, 3> rows = {0, 1, 2};
+  lazy->as<LazyVector>()->load(RowSet(rows), &hook);
+
+  EXPECT_EQ(
+      hook.values(),
+      (std::vector<std::optional<std::string>>{
+          "-42", std::nullopt, "1234567890123456789"}));
 }
 
 // Ensure there is enough data before switching to fast path.
