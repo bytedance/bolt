@@ -44,24 +44,41 @@
 #include <sstream>
 namespace bytedance::bolt::functions {
 
+/// The padded input and the parsers are thread-local and reused across rows.
+/// A context is invalidated by the next context created on the same thread.
 struct ParserContext {
  public:
   explicit ParserContext() noexcept;
-  explicit ParserContext(const char* data, size_t length) noexcept
-      : padded_json(data, length) {}
+  explicit ParserContext(const char* data, size_t length)
+      : padded_json(makePaddedJson(data, length)) {}
   void parseElement() {
-    jsonEle = domParser.parse(padded_json);
+    jsonEle = domParser().parse(padded_json);
   }
   void parseDocument() {
-    jsonDoc = ondemandParser.iterate(padded_json);
+    jsonDoc = ondemandParser().iterate(padded_json);
   }
   simdjson::dom::element jsonEle;
   simdjson::ondemand::document jsonDoc;
 
  private:
-  simdjson::padded_string padded_json;
-  simdjson::dom::parser domParser;
-  simdjson::ondemand::parser ondemandParser;
+  static simdjson::padded_string_view makePaddedJson(
+      const char* data,
+      size_t length) {
+    thread_local std::string buffer;
+    buffer.assign(data, length);
+    buffer.append(simdjson::SIMDJSON_PADDING, '\0');
+    return simdjson::padded_string_view(buffer.data(), length, buffer.size());
+  }
+  static simdjson::dom::parser& domParser() {
+    thread_local simdjson::dom::parser parser;
+    return parser;
+  }
+  static simdjson::ondemand::parser& ondemandParser() {
+    thread_local simdjson::ondemand::parser parser;
+    return parser;
+  }
+
+  simdjson::padded_string_view padded_json;
 };
 
 template <typename T>

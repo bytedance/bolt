@@ -33,9 +33,8 @@ struct ParseJsonFunction {
   FOLLY_ALWAYS_INLINE bool call(
       out_type<Variant>& result,
       const arg_type<Varchar>& json) {
-    simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    auto error = parser.parse(json.data(), json.size()).get(doc);
+    auto error = parser_.parse(json.data(), json.size()).get(doc);
     if (error) {
       return false;
     }
@@ -60,6 +59,9 @@ struct ParseJsonFunction {
     result.metadata.append(dict.serialize());
     return true;
   }
+
+ private:
+  simdjson::dom::parser parser_;
 };
 
 namespace detail {
