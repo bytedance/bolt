@@ -315,7 +315,7 @@ TEST_F(ConversionsTest, toBoolean) {
   }
 }
 
-TEST_F(ConversionsTest, toIntegeralTypes) {
+TEST_F(ConversionsTest, toIntegralTypes) {
   // From double.
   {
     // When TRUNCATE = false.
