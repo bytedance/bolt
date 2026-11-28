@@ -25,7 +25,8 @@ class ContainerRow2RowSerde {
       char* row,
       char*& current,
       const char* bufferEnd,
-      const RowFormatInfo& info);
+      const RowFormatInfo& info,
+      bool initializeStringViews = false);
 
   FLATTEN static int32_t
   deserialize(char*& current, const RowFormatInfo& info, bool advance = true);

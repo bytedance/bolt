@@ -63,6 +63,8 @@ class HashAggregation : public Operator {
 
   bool isFinished() override;
 
+  bool canReclaim() const override;
+
   void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
       override;
 
@@ -97,6 +99,8 @@ class HashAggregation : public Operator {
   // the inputs.
   void recordSpillStats();
   void recordSpillReadStats();
+
+  void updateReclaimable() noexcept;
 
   std::shared_ptr<const core::AggregationNode> aggregationNode_;
 
@@ -175,6 +179,8 @@ class HashAggregation : public Operator {
   bool supportRowBasedOutput_{false};
   std::vector<AggregateInfo> aggregatesForExtractColumns_;
   RowVectorPtr convertedInput_{nullptr};
+  common::SpillStats recordedSpillStats_;
+  std::atomic_bool reclaimable_{false};
 };
 
 } // namespace bytedance::bolt::exec

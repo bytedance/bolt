@@ -240,6 +240,20 @@ class Aggregate {
   virtual void
   extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result) = 0;
 
+  // Appends extracted rows at a destination offset, preserving earlier rows.
+  // Implementations can write directly; the default uses existing extractors.
+  virtual void extractValuesWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset);
+
+  virtual void extractAccumulatorsWithOffset(
+      char** groups,
+      int32_t numGroups,
+      VectorPtr* result,
+      vector_size_t resultOffset);
+
   /// Produces an accumulator initialized from a single value for each
   /// row in 'rows'. The raw arguments of the aggregate are in 'args',
   /// which have the same meaning as in addRawInput. The result is

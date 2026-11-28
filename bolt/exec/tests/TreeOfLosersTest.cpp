@@ -54,6 +54,32 @@ TEST_F(TreeOfLosersTest, merge) {
   testBoth(500, 1);
 }
 
+TEST_F(TreeOfLosersTest, largeNumberOfStreams) {
+  auto makeStreams = []() {
+    std::vector<std::unique_ptr<TestingStream>> streams(32'769);
+    for (auto& stream : streams) {
+      stream = std::make_unique<TestingStream>(std::vector<uint32_t>{1});
+    }
+    return streams;
+  };
+
+  {
+    TreeOfLosers<TestingStream> merge(makeStreams());
+    auto* first = merge.next();
+    ASSERT_NE(first, nullptr);
+    first->pop();
+    EXPECT_NE(merge.next(), nullptr);
+  }
+  {
+    TreeOfLosers<TestingStream> mergeWithEquals(makeStreams());
+    auto [equalFirst, hasEqual] = mergeWithEquals.nextWithEquals();
+    ASSERT_NE(equalFirst, nullptr);
+    EXPECT_TRUE(hasEqual);
+    equalFirst->pop();
+    EXPECT_NE(mergeWithEquals.nextWithEquals().first, nullptr);
+  }
+}
+
 TEST_F(TreeOfLosersTest, nextWithEquals) {
   constexpr int32_t kNumStreams = 17;
   std::vector<std::vector<uint32_t>> streams(kNumStreams);
