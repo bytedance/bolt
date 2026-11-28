@@ -23,9 +23,13 @@
 #include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkProfiles.h"
 #include "bolt/vector/ComplexVector.h"
 
+#include <gflags/gflags.h>
+
 #include <memory>
 #include <string>
 #include <vector>
+
+DECLARE_string(bolt_benchmark_bm_zstd_strategy);
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 

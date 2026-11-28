@@ -128,7 +128,8 @@ TEST(CompressionConfigTest, DefaultsToZstdLevelThree) {
   CompressionConfig config;
 
   EXPECT_EQ(CompressionKind::kZstdFrame, config.kind);
-  EXPECT_EQ(ZstdStrategy::kOneShot, config.zstd.strategy);
+  EXPECT_EQ(Lz4Strategy::kDefault, config.lz4.strategy);
+  EXPECT_EQ(ZstdStrategy::kPooledContext, config.zstd.strategy);
   EXPECT_EQ(3, config.zstd.compressionLevel);
   EXPECT_EQ(256, config.openZl.graphCacheCapacity);
   EXPECT_EQ(0, config.openZl.maxOutputBytes);
@@ -301,6 +302,124 @@ TEST_F(CompressionManagerTest, ZstdStrategiesWriteStableZstdFrameKind) {
         recordKind(result.record, original.size()));
     auto decoded = decodeRecord(manager, result.record, original.size());
     EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+}
+
+TEST_F(CompressionManagerTest, NonPooledStrategiesDoNotAcquireContextPool) {
+  const auto original = compressiblePayload(512 * 1024);
+
+  {
+    CompressionConfig config;
+    config.kind = CompressionKind::kZstdFrame;
+    config.minCompressBytes = 1;
+    config.zstd.strategy = ZstdStrategy::kOneShot;
+    CompressionManager manager(config);
+    auto payload = makePayload(original);
+    for (int i = 0; i < 2; ++i) {
+      auto result = manager.BuildSpillRecord(
+          std::span<const char>(payload.data(), payload.length()));
+      ASSERT_TRUE(result.compressed);
+      EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
+      auto decoded = decodeRecord(manager, result.record, original.size());
+      EXPECT_EQ(original, readPayload(decoded, original.size()));
+    }
+    EXPECT_EQ(
+        0,
+        manager.testingIdleCompressionContextCount(
+            CompressionKind::kZstdFrame));
+  }
+
+  for (const auto strategy : {Lz4Strategy::kDefault, Lz4Strategy::kFast}) {
+    CompressionConfig config;
+    config.kind = CompressionKind::kLz4Block;
+    config.minCompressBytes = 1;
+    config.lz4.strategy = strategy;
+    CompressionManager manager(config);
+    auto payload = makePayload(original);
+    for (int i = 0; i < 2; ++i) {
+      auto result = manager.BuildSpillRecord(
+          std::span<const char>(payload.data(), payload.length()));
+      ASSERT_TRUE(result.compressed);
+      EXPECT_EQ(CompressionKind::kLz4Block, result.storedKind);
+      auto decoded = decodeRecord(manager, result.record, original.size());
+      EXPECT_EQ(original, readPayload(decoded, original.size()));
+    }
+    EXPECT_EQ(
+        0,
+        manager.testingIdleCompressionContextCount(CompressionKind::kLz4Block));
+  }
+}
+
+TEST_F(CompressionManagerTest, PooledStrategiesAcquireAndReuseContextPool) {
+  const auto original = compressiblePayload(512 * 1024);
+
+  {
+    CompressionConfig config;
+    config.minCompressBytes = 1;
+    CompressionManager manager(config);
+    auto payload = makePayload(original);
+    for (int i = 0; i < 2; ++i) {
+      auto result = manager.BuildSpillRecord(
+          std::span<const char>(payload.data(), payload.length()));
+      ASSERT_TRUE(result.compressed);
+      EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
+      auto decoded = decodeRecord(manager, result.record, original.size());
+      EXPECT_EQ(original, readPayload(decoded, original.size()));
+    }
+    EXPECT_EQ(
+        1,
+        manager.testingIdleCompressionContextCount(
+            CompressionKind::kZstdFrame));
+  }
+
+  {
+    CompressionConfig config;
+    config.kind = CompressionKind::kLz4Block;
+    config.minCompressBytes = 1;
+    config.lz4.strategy = Lz4Strategy::kPooledContext;
+    CompressionManager manager(config);
+    auto payload = makePayload(original);
+    for (int i = 0; i < 2; ++i) {
+      auto result = manager.BuildSpillRecord(
+          std::span<const char>(payload.data(), payload.length()));
+      ASSERT_TRUE(result.compressed);
+      EXPECT_EQ(CompressionKind::kLz4Block, result.storedKind);
+      auto decoded = decodeRecord(manager, result.record, original.size());
+      EXPECT_EQ(original, readPayload(decoded, original.size()));
+    }
+    EXPECT_EQ(
+        1,
+        manager.testingIdleCompressionContextCount(CompressionKind::kLz4Block));
+  }
+
+  {
+    CompressionConfig config;
+    config.minCompressBytes = 1;
+    CompressionManager manager(config);
+    constexpr size_t kThreads = 8;
+    constexpr size_t kIterations = 10;
+    std::vector<std::future<bool>> futures;
+    for (size_t thread = 0; thread < kThreads; ++thread) {
+      futures.push_back(std::async(std::launch::async, [&] {
+        for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+          auto payload = makePayload(original);
+          auto result = manager.BuildSpillRecord(
+              std::span<const char>(payload.data(), payload.length()));
+          auto decoded = decodeRecord(manager, result.record, original.size());
+          if (readPayload(decoded, original.size()) != original) {
+            return false;
+          }
+        }
+        return true;
+      }));
+    }
+    for (auto& future : futures) {
+      EXPECT_TRUE(future.get());
+    }
+    const auto idleContexts =
+        manager.testingIdleCompressionContextCount(CompressionKind::kZstdFrame);
+    EXPECT_GE(idleContexts, 1);
+    EXPECT_LE(idleContexts, kThreads);
   }
 }
 

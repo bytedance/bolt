@@ -46,7 +46,7 @@ enum class ZstdStrategy : uint8_t {
 };
 
 struct ZstdOptions {
-  ZstdStrategy strategy{ZstdStrategy::kOneShot};
+  ZstdStrategy strategy{ZstdStrategy::kPooledContext};
   int compressionLevel{3};
 };
 
